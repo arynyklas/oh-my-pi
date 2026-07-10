@@ -16,6 +16,7 @@ import { type HangulCompatibilityJamoWidth, setHangulCompatibilityJamoWidth } fr
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
+const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 // Hangul Compatibility Jamo (U+3131..=U+318E) render width is terminal-dependent:
 // Ghostty follows UAX#11 (2 cells); Terminal.app and iTerm2 render narrow (1),
 // matching the macOS platform default. Override only for terminals known to
@@ -38,6 +39,12 @@ export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
 function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
 	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
+}
+
+function shouldPollWindowsTerminalAppearance(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (process.platform !== "win32") return false;
+	if (!env.WT_SESSION) return false;
+	return !env.TERM_PROGRAM || env.TERM_PROGRAM.toLowerCase() === "windows_terminal";
 }
 
 /**
@@ -488,6 +495,7 @@ export class ProcessTerminal implements Terminal {
 	#reportedColumns?: number;
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
+	#windowsTerminalAppearancePollTimer?: Timer;
 	#progressTimer?: Timer;
 
 	get kittyProtocolActive(): boolean {
@@ -1151,6 +1159,24 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
+		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
+	}
+
+	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {
+		if (mode2031Supported || !shouldPollWindowsTerminalAppearance() || this.#dead) {
+			this.#clearWindowsTerminalAppearancePoll();
+			return;
+		}
+		if (this.#windowsTerminalAppearancePollTimer) return;
+		this.#windowsTerminalAppearancePollTimer = setInterval(() => {
+			this.#queryBackgroundColor();
+		}, WINDOWS_TERMINAL_OSC11_POLL_MS);
+	}
+
+	#clearWindowsTerminalAppearancePoll(): void {
+		if (!this.#windowsTerminalAppearancePollTimer) return;
+		clearInterval(this.#windowsTerminalAppearancePollTimer);
+		this.#windowsTerminalAppearancePollTimer = undefined;
 	}
 
 	#disableXtermScrollToBottomMode(mode: number): void {
@@ -1303,6 +1329,7 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;
 		}
+		this.#clearWindowsTerminalAppearancePoll();
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
 		this.#osc11QueryQueued = false;

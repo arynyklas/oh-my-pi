@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native Windows Terminal sessions missing mid-run light/dark theme changes when Mode 2031 appearance notifications are unavailable by polling OSC 11 only on that host path ([#5091](https://github.com/can1357/oh-my-pi/issues/5091)).
+
 ## [16.4.0] - 2026-07-10
 
 ### Fixed
