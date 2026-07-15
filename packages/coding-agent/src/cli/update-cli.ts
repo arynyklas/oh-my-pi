@@ -13,11 +13,13 @@ import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import {
+	buildBinaryDownloadUrl,
+	getLatestReleaseForVersion,
+	isAuthGatewayBetaVersion,
+	type ReleaseInfo,
+} from "./release-info";
 
-const REPO = "can1357/oh-my-pi";
-const AUTH_GATEWAY_BETA_REPO = "arynyklas/oh-my-pi";
-const AUTH_GATEWAY_BETA_VERSION_RE = /^auth-gateway-v(\d+\.\d+\.\d+)-beta\.(\d+)$/;
-const AUTH_GATEWAY_BETA_MARKER = "-authgw.";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
@@ -33,7 +35,6 @@ const MISE_TOOL = "github:can1357/oh-my-pi";
  * See #1686.
  */
 const NPM_REGISTRY = "https://registry.npmjs.org/";
-const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
@@ -61,18 +62,6 @@ const SUPPORTED_NATIVE_TAGS: ReadonlySet<string> = new Set([
 
 function currentNativeTag(): string {
 	return `${process.platform}-${process.arch}`;
-}
-
-interface ReleaseInfo {
-	repo: string;
-	tag: string;
-	version: string;
-}
-
-interface GitHubReleaseInfo {
-	tag_name: string;
-	draft: boolean;
-	prerelease: boolean;
 }
 
 /** Result from running the installed binary and parsing its reported version. */
@@ -246,88 +235,6 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	if (bunBinDir) return { method: "bun" };
 
 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
-}
-
-/**
- * Get the latest release info from the npm registry.
- * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
- */
-async function getLatestRelease(): Promise<ReleaseInfo> {
-	let response: Response;
-	try {
-		response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`, {
-			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out fetching release info after 30s", { cause: err });
-		}
-		throw err;
-	}
-	if (!response.ok) {
-		throw new Error(`Failed to fetch release info: ${response.statusText}`);
-	}
-
-	const data = (await response.json()) as { version: string };
-	const version = data.version;
-	const tag = `v${version}`;
-
-	return {
-		repo: REPO,
-		tag,
-		version,
-	};
-}
-
-function versionFromAuthGatewayBetaTag(tag: string): string | undefined {
-	const match = AUTH_GATEWAY_BETA_VERSION_RE.exec(tag);
-	if (!match) return undefined;
-	return `${match[1]}-authgw.beta.${match[2]}`;
-}
-
-function selectAuthGatewayBetaRelease(releases: GitHubReleaseInfo[]): ReleaseInfo | undefined {
-	let latest: ReleaseInfo | undefined;
-	for (const release of releases) {
-		if (release.draft || !release.prerelease) continue;
-		const version = versionFromAuthGatewayBetaTag(release.tag_name);
-		if (!version) continue;
-		const candidate = { repo: AUTH_GATEWAY_BETA_REPO, tag: release.tag_name, version };
-		if (!latest || Bun.semver.order(candidate.version, latest.version) > 0) {
-			latest = candidate;
-		}
-	}
-	return latest;
-}
-
-async function getLatestAuthGatewayBetaRelease(): Promise<ReleaseInfo> {
-	let response: Response;
-	try {
-		response = await fetch(`https://api.github.com/repos/${AUTH_GATEWAY_BETA_REPO}/releases?per_page=20`, {
-			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
-		});
-	} catch (err) {
-		if (isTimeoutError(err)) {
-			throw new Error("Timed out fetching auth-gateway beta release info after 30s", { cause: err });
-		}
-		throw err;
-	}
-	if (!response.ok) {
-		throw new Error(`Failed to fetch auth-gateway beta release info: ${response.statusText}`);
-	}
-
-	const release = selectAuthGatewayBetaRelease((await response.json()) as GitHubReleaseInfo[]);
-	if (!release) {
-		throw new Error(`No auth-gateway beta releases found in ${AUTH_GATEWAY_BETA_REPO}`);
-	}
-	return release;
-}
-
-function getReleaseInfo(): Promise<ReleaseInfo> {
-	return VERSION.includes(AUTH_GATEWAY_BETA_MARKER) ? getLatestAuthGatewayBetaRelease() : getLatestRelease();
-}
-
-function buildBinaryDownloadUrl(repo: string, tag: string, binaryName: string): string {
-	return `https://github.com/${repo}/releases/download/${tag}/${binaryName}`;
 }
 
 function resolveOmpBinaryPathForUpdate(): string {
@@ -932,13 +839,13 @@ async function updateViaBinaryAt(targetPath: string, release: ReleaseInfo): Prom
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	const isAuthGatewayBeta = VERSION.includes(AUTH_GATEWAY_BETA_MARKER);
+	const isAuthGatewayBeta = isAuthGatewayBetaVersion();
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
 	let release: ReleaseInfo;
 	try {
-		release = await getReleaseInfo();
+		release = await getLatestReleaseForVersion();
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
