@@ -8,13 +8,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
-import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, isEnoent, VERSION, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 const REPO = "can1357/oh-my-pi";
+const AUTH_GATEWAY_BETA_REPO = "arynyklas/oh-my-pi";
+const AUTH_GATEWAY_BETA_VERSION_RE = /^auth-gateway-v(\d+\.\d+\.\d+)-beta\.(\d+)$/;
+const AUTH_GATEWAY_BETA_MARKER = "-authgw.";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
@@ -61,8 +64,15 @@ function currentNativeTag(): string {
 }
 
 interface ReleaseInfo {
+	repo: string;
 	tag: string;
 	version: string;
+}
+
+interface GitHubReleaseInfo {
+	tag_name: string;
+	draft: boolean;
+	prerelease: boolean;
 }
 
 /** Result from running the installed binary and parsing its reported version. */
@@ -263,27 +273,67 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
 	const tag = `v${version}`;
 
 	return {
+		repo: REPO,
 		tag,
 		version,
 	};
 }
 
-/**
- * Compare semver versions. Returns:
- * - negative if a < b
- * - 0 if a == b
- * - positive if a > b
- */
-function compareVersions(a: string, b: string): number {
-	const pa = a.split(".").map(Number);
-	const pb = b.split(".").map(Number);
+function versionFromAuthGatewayBetaTag(tag: string): string | undefined {
+	const match = AUTH_GATEWAY_BETA_VERSION_RE.exec(tag);
+	if (!match) return undefined;
+	return `${match[1]}-authgw.beta.${match[2]}`;
+}
 
-	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-		const na = pa[i] || 0;
-		const nb = pb[i] || 0;
-		if (na !== nb) return na - nb;
+function selectAuthGatewayBetaRelease(releases: GitHubReleaseInfo[]): ReleaseInfo | undefined {
+	let latest: ReleaseInfo | undefined;
+	for (const release of releases) {
+		if (release.draft || !release.prerelease) continue;
+		const version = versionFromAuthGatewayBetaTag(release.tag_name);
+		if (!version) continue;
+		const candidate = { repo: AUTH_GATEWAY_BETA_REPO, tag: release.tag_name, version };
+		if (!latest || Bun.semver.order(candidate.version, latest.version) > 0) {
+			latest = candidate;
+		}
 	}
-	return 0;
+	return latest;
+}
+
+async function getLatestAuthGatewayBetaRelease(): Promise<ReleaseInfo> {
+	let response: Response;
+	try {
+		response = await fetch(`https://api.github.com/repos/${AUTH_GATEWAY_BETA_REPO}/releases?per_page=20`, {
+			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+		});
+	} catch (err) {
+		if (isTimeoutError(err)) {
+			throw new Error("Timed out fetching auth-gateway beta release info after 30s", { cause: err });
+		}
+		throw err;
+	}
+	if (!response.ok) {
+		throw new Error(`Failed to fetch auth-gateway beta release info: ${response.statusText}`);
+	}
+
+	const release = selectAuthGatewayBetaRelease((await response.json()) as GitHubReleaseInfo[]);
+	if (!release) {
+		throw new Error(`No auth-gateway beta releases found in ${AUTH_GATEWAY_BETA_REPO}`);
+	}
+	return release;
+}
+
+function getReleaseInfo(): Promise<ReleaseInfo> {
+	return VERSION.includes(AUTH_GATEWAY_BETA_MARKER) ? getLatestAuthGatewayBetaRelease() : getLatestRelease();
+}
+
+function buildBinaryDownloadUrl(repo: string, tag: string, binaryName: string): string {
+	return `https://github.com/${repo}/releases/download/${tag}/${binaryName}`;
+}
+
+function resolveOmpBinaryPathForUpdate(): string {
+	const targetPath = resolveOmpPath();
+	if (!targetPath) throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
+	return targetPath;
 }
 
 interface BunInstallCachePruneResult {
@@ -576,7 +626,7 @@ function getBinaryName(): string {
  * Resolve the path that `omp` maps to in the user's PATH.
  */
 function resolveOmpPath(): string | undefined {
-	return $which(APP_NAME) ?? undefined;
+	return $which(APP_NAME, { PATH: process.env.PATH, cache: WhichCachePolicy.Fresh }) ?? undefined;
 }
 
 /**
@@ -589,8 +639,8 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 		const result = await $`${ompPath} --version`.quiet().nothrow();
 		if (result.exitCode !== 0) return { ok: false, path: ompPath };
 		const output = result.text().trim();
-		// Output format: "omp/X.Y.Z"
-		const match = output.match(/\/(\d+\.\d+\.\d+)/);
+		// Output format: "omp/X.Y.Z" or "omp/X.Y.Z-prerelease.N".
+		const match = output.match(/\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
 		const actual = match?.[1];
 		return { ok: actual === expectedVersion, actual, path: ompPath };
 	} catch {
@@ -599,7 +649,8 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 }
 
 function printVerifiedVersion(expectedVersion: string): void {
-	console.log(chalk.green(`\n${theme.status.success} Updated to ${expectedVersion}`));
+	const success = typeof theme === "undefined" ? "✓" : theme.status.success;
+	console.log(chalk.green(`\n${success} Updated to ${expectedVersion}`));
 }
 
 function formatVerificationFailure(result: InstalledVersionVerification, expectedVersion: string): string {
@@ -833,10 +884,9 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 /**
  * Download a release binary to a target path, replacing an existing file.
  */
-async function updateViaBinaryAt(targetPath: string, expectedVersion: string): Promise<void> {
+async function updateViaBinaryAt(targetPath: string, release: ReleaseInfo): Promise<void> {
 	const binaryName = getBinaryName();
-	const tag = `v${expectedVersion}`;
-	const url = `https://github.com/${REPO}/releases/download/${tag}/${binaryName}`;
+	const url = buildBinaryDownloadUrl(release.repo, release.tag, binaryName);
 
 	const tempPath = `${targetPath}.new`;
 	// Unique per attempt: a stale backup from an earlier update may still be
@@ -869,12 +919,12 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 		targetPath,
 		tempPath,
 		backupPath,
-		expectedVersion,
+		expectedVersion: release.version,
 		verifyInstalledVersion,
 	});
 	// Reclaim backups from earlier updates whose owning process has since exited.
 	await sweepStaleBackups(targetPath);
-	printVerifiedVersion(expectedVersion);
+	printVerifiedVersion(release.version);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -882,25 +932,19 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	if (VERSION.includes("-authgw.")) {
-		process.stderr.write(
-			"Self-update is disabled for unofficial auth-gateway beta builds. Download updates from https://github.com/arynyklas/oh-my-pi/releases.\n",
-		);
-		return;
-	}
-
+	const isAuthGatewayBeta = VERSION.includes(AUTH_GATEWAY_BETA_MARKER);
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
 	let release: ReleaseInfo;
 	try {
-		release = await getLatestRelease();
+		release = await getReleaseInfo();
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
 
-	const comparison = compareVersions(release.version, VERSION);
+	const comparison = Bun.semver.order(release.version, VERSION);
 
 	if (comparison <= 0 && !opts.force) {
 		console.log(chalk.green(`${theme.status.success} Already up to date`));
@@ -918,6 +962,16 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		return;
 	}
 
+	if (isAuthGatewayBeta) {
+		try {
+			await updateViaBinaryAt(resolveOmpBinaryPathForUpdate(), release);
+		} catch (err) {
+			console.error(chalk.red(`Update failed: ${err}`));
+			process.exit(1);
+		}
+		return;
+	}
+
 	// Choose update method based on the prioritized omp binary in PATH
 	try {
 		const target = await resolveUpdateTarget();
@@ -928,7 +982,7 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		} else if (target.method === "bun") {
 			await updateViaBun(release.version);
 		} else {
-			await updateViaBinaryAt(target.path, release.version);
+			await updateViaBinaryAt(target.path, release);
 		}
 	} catch (err) {
 		console.error(chalk.red(`Update failed: ${err}`));

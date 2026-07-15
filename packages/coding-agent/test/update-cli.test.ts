@@ -63,23 +63,70 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-describe("update-cli fork beta guard", () => {
-	it("refuses app self-update before fetching npm metadata", async () => {
-		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ version: "99.0.0" }));
-		const stderrWrites: string[] = [];
-		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(chunk => {
-			stderrWrites.push(String(chunk));
-			return true;
+describe("update-cli auth-gateway beta updater", () => {
+	it("checks fork prerelease metadata instead of upstream npm metadata", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json([{ tag_name: "auth-gateway-v16.5.0-beta.3", draft: false, prerelease: true }]),
+		);
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
+		const logs: string[] = [];
+		spyOn(console, "log").mockImplementation(message => {
+			logs.push(String(message));
 		});
 
 		await updateCli.runUpdateCommand({ force: false, check: true });
 
-		expect(stderrWrites).toEqual([
-			"Self-update is disabled for unofficial auth-gateway beta builds. Download updates from https://github.com/arynyklas/oh-my-pi/releases.\n",
-		]);
-		expect(stderrSpy).toHaveBeenCalledTimes(1);
-		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(
+			"https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20",
+		);
+		expect(stderrSpy).not.toHaveBeenCalled();
+		expect(logs.some(line => line.includes("New version available: 16.5.0-authgw.beta.3"))).toBe(true);
 	});
+
+	it.skipIf(process.platform !== "linux")(
+		"installs fork beta assets through binary replacement even from a bun-bin path",
+		async () => {
+			const dir = await makeTempDir();
+			const bunHome = path.join(dir, "bun-home");
+			const binDir = path.join(bunHome, "bin");
+			await fs.mkdir(binDir, { recursive: true });
+			const ompPath = path.join(binDir, "omp");
+			await Bun.write(ompPath, "#!/bin/sh\necho omp/16.5.0-authgw.beta.1\n");
+			await fs.chmod(ompPath, 0o755);
+			const upgradedBinary = "#!/bin/sh\necho omp/16.5.0-authgw.beta.3\n";
+			const expectedDownloadUrl =
+				"https://github.com/arynyklas/oh-my-pi/releases/download/auth-gateway-v16.5.0-beta.3/omp-linux-x64";
+			const fetchMock: typeof globalThis.fetch = Object.assign(
+				async (input: string | URL | Request): Promise<Response> => {
+					const url = String(input);
+					if (url === "https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20") {
+						return Response.json([{ tag_name: "auth-gateway-v16.5.0-beta.3", draft: false, prerelease: true }]);
+					}
+					if (url === expectedDownloadUrl) {
+						return new Response(upgradedBinary);
+					}
+					throw new Error(`unexpected fetch ${url}`);
+				},
+				{ preconnect: globalThis.fetch.preconnect },
+			);
+			const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+			spyOn(console, "log").mockImplementation(() => {});
+			const previousPath = process.env.PATH;
+			const previousBunInstall = process.env.BUN_INSTALL;
+			process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
+			process.env.BUN_INSTALL = bunHome;
+			try {
+				await updateCli.runUpdateCommand({ force: false, check: false });
+			} finally {
+				process.env.PATH = previousPath;
+				process.env.BUN_INSTALL = previousBunInstall;
+			}
+
+			expect(String(fetchSpy.mock.calls[1]?.[0])).toBe(expectedDownloadUrl);
+			expect(await Bun.file(ompPath).text()).toBe(upgradedBinary);
+		},
+	);
 });
 
 describe("parseUpdateArgs", () => {
