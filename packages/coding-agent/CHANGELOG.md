@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed unofficial auth-gateway beta builds to check fork GitHub prereleases for startup notices and `omp update` self-updates instead of upstream npm metadata.
+
 ## [16.5.0] - 2026-07-13
 
 ### Breaking Changes
