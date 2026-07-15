@@ -26,6 +26,7 @@ export interface GatewayHarnessOptions {
 	bearerTokens?: string[];
 	models?: MockModel[];
 	credentials?: AuthCredential[];
+	keylessProviders?: string[];
 }
 
 export function jsonHeaders(token?: string): Record<string, string> {
@@ -66,6 +67,7 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 		storage,
 		resolveModel: id => modelById.get(id)?.model as Model<Api> | undefined,
 		listModels: () => Array.from(modelById.values()).map(model => model.model),
+		isKeylessModel: model => options.keylessProviders?.includes(model.provider) ?? false,
 	});
 	return { tempDir, credentialStore, storage, accessStore, models, handle };
 }

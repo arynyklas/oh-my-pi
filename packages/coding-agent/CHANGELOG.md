@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `requestModelId` support for custom `models.yml` entries so a user-facing model id can route to a different upstream wire id.
+
 ### Fixed
 
+- Fixed TUI `/usage` to include active self-hosted auth gateway usage totals alongside connected-account reports.
+- Fixed `omp auth-gateway serve` to expose custom and discovered `models.yml` entries, including `auth: none` self-hosted providers.
 - Fixed unofficial auth-gateway beta builds to check fork GitHub prereleases for startup notices and `omp update` self-updates instead of upstream npm metadata.
 
 ## [16.5.0] - 2026-07-13

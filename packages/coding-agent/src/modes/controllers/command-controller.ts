@@ -20,7 +20,7 @@ import {
 	authGatewayUsageReportsResponseSchema,
 	authGatewayUsageResponseSchema,
 } from "@oh-my-pi/pi-ai/auth-gateway";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { type Component, Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -116,6 +116,48 @@ function formatGatewayUsageSummary(response: AuthGatewaySelfUsageResponse | Auth
 	}
 	return lines.join("\n");
 }
+
+function usageReportIdentityKeys(report: UsageReport): Set<string> {
+	const keys = new Set<string>();
+	const provider = report.provider.toLowerCase();
+	const add = (value: unknown): void => {
+		if (typeof value === "string" && value) keys.add(`${provider}:${value.toLowerCase()}`);
+	};
+	const meta = report.metadata ?? {};
+	add(meta.email);
+	add(meta.accountId);
+	add(meta.projectId);
+	add(meta.orgId);
+	for (const limit of report.limits) {
+		add(limit.scope.accountId);
+		add(limit.scope.projectId);
+		add(limit.scope.orgId);
+	}
+	return keys;
+}
+
+function mergeUsageReports(reports: UsageReport[], gatewayReports: UsageReport[]): UsageReport[] {
+	const merged = [...reports];
+	const seen = new Set<string>();
+	for (const report of reports) {
+		for (const key of usageReportIdentityKeys(report)) seen.add(key);
+	}
+	for (const report of gatewayReports) {
+		const keys = usageReportIdentityKeys(report);
+		let alreadyRendered = false;
+		for (const key of keys) {
+			if (seen.has(key)) {
+				alreadyRendered = true;
+				break;
+			}
+		}
+		if (alreadyRendered) continue;
+		merged.push(report);
+		for (const key of keys) seen.add(key);
+	}
+	return merged;
+}
+
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -571,6 +613,7 @@ export class CommandController {
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		let usageReports = reports ?? null;
 		let gatewayUsageUser: string | undefined;
+		let gatewayUsageSummary: string | undefined;
 		if (!usageReports) {
 			if (typeof this.ctx.session.fetchUsageReports !== "function") {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");
@@ -584,20 +627,26 @@ export class CommandController {
 			}
 		}
 
-		if (!usageReports || usageReports.length === 0) {
-			const gatewayUsage = await this.#fetchGatewayUsageFallback();
-			if (gatewayUsage) {
-				if ("usage" in gatewayUsage) {
-					this.ctx.present([new Spacer(1), new Text(formatGatewayUsageSummary(gatewayUsage), 1, 0)]);
-					return;
-				}
+		const gatewayUsage = await this.#fetchGatewayUsageFallback();
+		if (gatewayUsage) {
+			if ("usage" in gatewayUsage) {
+				gatewayUsageSummary = formatGatewayUsageSummary(gatewayUsage);
+			} else {
 				if (gatewayUsage.principal) gatewayUsageUser = formatGatewayUser(gatewayUsage.principal);
-				usageReports = gatewayUsage.reports;
+				usageReports =
+					usageReports && usageReports.length > 0
+						? mergeUsageReports(usageReports, gatewayUsage.reports)
+						: gatewayUsage.reports;
 			}
-			if (!usageReports || usageReports.length === 0) {
-				this.ctx.showWarning("No usage data available.");
+		}
+
+		if (!usageReports || usageReports.length === 0) {
+			if (gatewayUsageSummary) {
+				this.ctx.present([new Spacer(1), new Text(gatewayUsageSummary, 1, 0)]);
 				return;
 			}
+			this.ctx.showWarning("No usage data available.");
+			return;
 		}
 
 		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
@@ -611,11 +660,15 @@ export class CommandController {
 		const output = renderUsageReports(usageReports, theme, Date.now(), availableWidth, provider =>
 			provider === currentProvider ? activeAccount : undefined,
 		);
+		const blocks: Component[] = [new Spacer(1)];
 		if (gatewayUsageUser) {
-			this.ctx.present([new Spacer(1), new Text(gatewayUsageUser, 1, 0), new Spacer(1), new Text(output, 1, 0)]);
-			return;
+			blocks.push(new Text(gatewayUsageUser, 1, 0), new Spacer(1));
 		}
-		this.ctx.present([new Spacer(1), new Text(output, 1, 0)]);
+		blocks.push(new Text(output, 1, 0));
+		if (gatewayUsageSummary) {
+			blocks.push(new Spacer(1), new Text(gatewayUsageSummary, 1, 0));
+		}
+		this.ctx.present(blocks);
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {

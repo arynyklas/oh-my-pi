@@ -158,6 +158,35 @@ describe("auth-gateway managed users", () => {
 		expect(events.some(event => event.routeFamily === "pi-native" && event.outcome === "success")).toBe(true);
 	});
 
+	test("allows managed users to list and call keyless models without pool bindings", async () => {
+		const keylessModel = createMockModel({
+			provider: "vllm",
+			id: "gemma-4:31b",
+			handler: (_ctx, opts) => ({ content: [`key:${typeof opts?.apiKey === "string" ? opts.apiKey : "none"}`] }),
+		});
+		harness = await createGatewayHarness({ models: [keylessModel], credentials: [], keylessProviders: ["vllm"] });
+		const managed = harness.accessStore.createUser({ name: "keyless" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "route", pattern: "models" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "route", pattern: "chat" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "route", pattern: "pi-native" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "provider", pattern: "vllm" });
+		harness.accessStore.addAclRule(managed.user.id, { effect: "allow", kind: "model", pattern: "vllm/gemma-4:31b" });
+
+		const modelsResponse = await fetch(`${harness.handle.url}/v1/models`, {
+			headers: jsonHeaders(managed.token.value),
+		});
+		expect(modelsResponse.status).toBe(200);
+		const body = expectObject(await readJson(modelsResponse));
+		const data = body.data as Array<{ id: string }>;
+		expect(data.map(model => model.id)).toEqual(["vllm/gemma-4:31b"]);
+
+		let response = await postChat(harness.handle.url, managed.token.value, "gemma-4:31b");
+		expect(response.status).toBe(200);
+		response = await postPiNative(harness.handle.url, managed.token.value, "gemma-4:31b");
+		expect(response.status).toBe(200);
+		expect(keylessModel.calls).toHaveLength(2);
+	});
+
 	test("resolves a managed chat request from one ordered binding snapshot", async () => {
 		harness = await createGatewayHarness({ credentials: credentials(["key-a"]) });
 		const managed = harness.accessStore.createUser({ name: "targeted" });

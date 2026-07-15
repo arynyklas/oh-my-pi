@@ -485,6 +485,7 @@ function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
  * always means "leave the base value alone".
  */
 interface ModelPatch {
+	requestModelId?: string;
 	name?: string;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
@@ -513,6 +514,7 @@ type ModelTransportPolicy = "merge" | "replace";
 
 function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
+	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
 	if (patch.name !== undefined) result.name = patch.name;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
@@ -619,6 +621,7 @@ function buildCustomModelOverlay(
 	if (!api) return undefined;
 	return {
 		id: modelDef.id,
+		requestModelId: modelDef.requestModelId,
 		provider: providerName,
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
@@ -661,6 +664,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
 	return buildModel({
 		id: resolvedModel.id,
+		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
 		provider: resolvedModel.provider,
@@ -744,6 +748,7 @@ export class ModelRegistry {
 	#customProviderApiKeys: Map<string, string> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
+	#configuredModelKeys: Set<string> = new Set();
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
@@ -944,6 +949,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
+		this.#configuredModelKeys.clear();
 		this.#discoverableProviders = [];
 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
 		// removed from models.yml must actually disappear from the resolver, not
@@ -980,6 +986,7 @@ export class ModelRegistry {
 			error: configError,
 		} = this.#loadCustomModels();
 		this.#configError = configError;
+		this.#configuredModelKeys = new Set(customModels.map(model => `${model.provider}/${model.id}`));
 		this.#keylessProviders = keylessProviders;
 		this.#discoverableProviders = discoverableProviders;
 		this.#customModelOverlays = customModels;
@@ -1978,6 +1985,14 @@ export class ModelRegistry {
 		return this.#discoverableProviders
 			.filter(provider => !disabledProviders.has(provider.provider))
 			.map(provider => provider.provider);
+	}
+
+	isKeylessProvider(provider: string): boolean {
+		return this.#keylessProviders.has(provider);
+	}
+
+	isConfiguredModel(provider: string, id: string): boolean {
+		return this.#configuredModelKeys.has(`${provider}/${id}`);
 	}
 
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {

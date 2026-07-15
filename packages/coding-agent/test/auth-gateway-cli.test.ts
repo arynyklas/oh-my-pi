@@ -8,6 +8,8 @@ import type {
 	AuthGatewayAuditEvent,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { SqliteAuthGatewayAccessStore } from "@oh-my-pi/pi-ai/auth-gateway";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 import {
 	runAuthGatewayTuiWithDependencies,
@@ -17,9 +19,12 @@ import {
 	type AuthGatewayAction,
 	type AuthGatewayCommandArgs,
 	type AuthGatewayCommandDependencies,
+	buildAuthGatewayModelIndex,
 	runAuthGatewayCommand,
 } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
 import AuthGatewayCommand from "@oh-my-pi/pi-coding-agent/commands/auth-gateway";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -562,6 +567,73 @@ describe("auth-gateway CLI access management", () => {
 		expect(AuthGatewayCommand.flags.provider.description).toBe("Provider id for ACL");
 		expect(AuthGatewayCommand.flags.model.description).toBe("Model id for ACL");
 		expect(AuthGatewayCommand.examples.join("\n")).not.toContain("pool create primary --provider=");
+	});
+
+	test("builds the gateway model index from auth-none custom models", async () => {
+		const modelsPath = path.join(agentDir, "models.yml");
+		await Bun.write(
+			modelsPath,
+			`providers:
+  vllm:
+    baseUrl: http://gemma.svc.dmai.internal/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: gemma4:31b
+        requestModelId: gemma-4:31b
+        name: Gemma 4 31B
+        reasoning: false
+        input: [text]
+        cost:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+        contextWindow: 32768
+        maxTokens: 32768
+`,
+		);
+		writeModelCache(
+			"vllm",
+			Date.now(),
+			[
+				buildModel({
+					id: "stale-other-model",
+					provider: "vllm",
+					api: "openai-completions",
+					baseUrl: "http://gemma.svc.dmai.internal/v1",
+					name: "Stale other model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 8192,
+				}),
+			],
+			true,
+			"",
+			path.join(agentDir, "models.db"),
+		);
+		const authStorage = await AuthStorage.create(path.join(agentDir, "auth.db"));
+		try {
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const index = buildAuthGatewayModelIndex(registry);
+			const model = index.resolveModel("vllm/gemma4:31b");
+			expect(model?.provider).toBe("vllm");
+			expect(model?.id).toBe("gemma4:31b");
+			expect(model?.requestModelId).toBe("gemma-4:31b");
+			expect(model?.baseUrl).toBe("http://gemma.svc.dmai.internal/v1");
+			expect(index.resolveModel("gemma4:31b")).toBe(model);
+			expect(index.resolveModel("stale-other-model")).toBeUndefined();
+			expect(
+				Array.from(index.listModels())
+					.filter(listedModel => listedModel.provider === "vllm")
+					.map(listedModel => listedModel.id),
+			).toEqual(["gemma4:31b"]);
+			expect(model ? index.isKeylessModel(model) : false).toBe(true);
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	test("rejects surplus positionals from direct dispatch before file side effects", async () => {

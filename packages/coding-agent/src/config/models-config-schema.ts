@@ -153,6 +153,7 @@ const RemoteCompactionSchema = type({
 
 const ModelDefinitionSchema = type({
 	id: "string",
+	"requestModelId?": "string",
 	"name?": "string",
 	"api?": ApiSchema,
 	"baseUrl?": "string",
@@ -182,6 +183,13 @@ const ModelDefinitionSchema = type({
 	}
 	if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 		return ctx.mustBe("name a non-empty string");
+	}
+	if (
+		value.requestModelId !== undefined &&
+		typeof value.requestModelId === "string" &&
+		value.requestModelId.length === 0
+	) {
+		return ctx.mustBe("requestModelId a non-empty string");
 	}
 	if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
 		return ctx.mustBe("baseUrl a non-empty string");

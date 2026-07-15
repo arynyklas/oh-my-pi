@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-gateway managed-user routing for explicitly keyless self-hosted models, preserving ACL checks while bypassing credential-pool selection and credential retry handling.
+- Fixed auth-gateway shutdown force-closing in-flight requests on SIGTERM; shutdown now drains active requests via `server.stop()` instead of aborting them during a deploy/restart, so clients no longer see the stream dropped mid-response.
+
 ## [16.5.0] - 2026-07-13
 
 ### Added

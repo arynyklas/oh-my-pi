@@ -39,10 +39,11 @@ import {
 	SqliteAuthGatewayAccessStore,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
-import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { runAuthGatewayTui } from "../auth-gateway/run-tui";
+import { ModelRegistry } from "../config/model-registry";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit" | "tui";
@@ -91,6 +92,31 @@ export interface AuthGatewayCommandDependencies {
 	accessDbPath?: string;
 	loadBrokerCredentials?: () => Promise<Array<{ id: number; provider: string; type: "oauth" | "api_key" }>>;
 	runTui?: (options: { connection?: string }) => Promise<void>;
+}
+
+export interface AuthGatewayModelIndex {
+	resolveModel(modelId: string): Model<Api> | undefined;
+	listModels(): Iterable<Model<Api>>;
+	isKeylessModel(model: Model<Api>): boolean;
+}
+
+export function buildAuthGatewayModelIndex(modelRegistry: ModelRegistry): AuthGatewayModelIndex {
+	const modelById = new Map<string, Model<Api>>();
+	const models: Model<Api>[] = [];
+	const keylessProviders = new Set<string>();
+	for (const model of modelRegistry.getAvailable()) {
+		const keylessProvider = modelRegistry.isKeylessProvider(model.provider);
+		if (keylessProvider && !modelRegistry.isConfiguredModel(model.provider, model.id)) continue;
+		models.push(model);
+		modelById.set(`${model.provider}/${model.id}`, model);
+		if (!modelById.has(model.id)) modelById.set(model.id, model);
+		if (keylessProvider) keylessProviders.add(model.provider);
+	}
+	return {
+		resolveModel: (modelId: string) => modelById.get(modelId),
+		listModels: () => models,
+		isKeylessModel: (model: Model<Api>) => keylessProviders.has(model.provider),
+	};
 }
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit", "tui"];
@@ -251,23 +277,12 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 		await storage.reload();
 		accessStore = await SqliteAuthGatewayAccessStore.open(getAccessDbPath(deps));
 
-		// Build the model resolver + catalog from pi-ai's bundled metadata, scoped
-		// to providers we hold credentials for. Format handlers ask `resolveModel`
-		// to translate a client-requested `model` field into a pi-ai `Model<Api>`
-		// before dispatch; `listModels` powers `/v1/models`.
-		const snapshot = storage.exportSnapshot();
-		const providersWithCreds = new Set<string>();
-		for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
-		const modelById = new Map<string, Model<Api>>();
-		for (const provider of getBundledProviders()) {
-			if (!providersWithCreds.has(provider)) continue;
-			for (const model of getBundledModels(provider as GeneratedProvider)) {
-				// Always set the qualified key (no collision possible)
-				modelById.set(`${model.provider}/${model.id}`, model);
-				// Bare id as fallback for legacy clients (first-write-wins)
-				if (!modelById.has(model.id)) modelById.set(model.id, model);
-			}
-		}
+		// Use the same registry contract as the interactive agent: bundled
+		// credentialed providers, custom `models.yml` providers, cached
+		// discoveries, and explicit `auth: none` self-hosted models.
+		const modelRegistry = new ModelRegistry(storage);
+		await modelRegistry.refresh("online-if-uncached");
+		const modelIndex = buildAuthGatewayModelIndex(modelRegistry);
 
 		const handle = startAuthGateway({
 			storage,
@@ -275,8 +290,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 			bind,
 			bearerTokens: gatewayToken ? [gatewayToken] : [],
 			version: VERSION,
-			resolveModel: (id: string) => modelById.get(id),
-			listModels: () => modelById.values(),
+			resolveModel: modelIndex.resolveModel,
+			listModels: modelIndex.listModels,
+			isKeylessModel: modelIndex.isKeylessModel,
 		});
 		process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 		if (gatewayToken) {

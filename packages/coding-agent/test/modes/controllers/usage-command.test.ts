@@ -399,6 +399,108 @@ describe("CommandController /usage", () => {
 		}
 	});
 
+	it("renders auth-gateway self usage alongside connected-account reports", async () => {
+		const present = vi.fn();
+		const fetchedAt = Date.now();
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					usage: {
+						userId: 3,
+						since: 0,
+						generatedAt: fetchedAt,
+						totals: {
+							requests: 3,
+							inputTokens: 24_804,
+							outputTokens: 102,
+							cacheReadTokens: 0,
+							cacheWriteTokens: 40_434,
+							totalTokens: 65_340,
+							costUsd: 0.227159,
+						},
+						byProviderModel: [
+							{
+								provider: "openai-codex",
+								model: "gpt-5.6-sol",
+								requests: 2,
+								totalTokens: 24_854,
+								costUsd: 0.12557,
+							},
+						],
+					},
+					principal: {
+						kind: "managed",
+						userId: 3,
+						name: "alice",
+						role: "user",
+						tokenId: 11,
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+		const getApiKey = vi.fn().mockResolvedValue("managed-token");
+		const getOAuthAccountIdentity = vi.fn();
+		const ctx = {
+			session: {
+				model: {
+					provider: "xllm-gateway",
+					id: "gpt-5.6-sol",
+					baseUrl: "http://127.0.0.1:4000",
+					transport: "pi-native",
+				},
+				sessionId: "session-1",
+				fetchUsageReports: vi.fn().mockResolvedValue([
+					{
+						provider: "openai-codex",
+						fetchedAt,
+						limits: [
+							{
+								id: "codex-weekly",
+								label: "Weekly",
+								scope: { provider: "openai-codex", accountId: "acct-1" },
+								window: { id: "weekly", label: "weekly" },
+								amount: { used: 75, limit: 100, unit: "requests" },
+								status: "ok",
+							},
+						],
+						metadata: { email: "connected@example.com" },
+					},
+				] satisfies UsageReport[]),
+				modelRegistry: {
+					authStorage: { getApiKey, getOAuthAccountIdentity },
+				},
+			},
+			ui: { terminal: { columns: 100 } },
+			present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		try {
+			await controller.handleUsageCommand();
+
+			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
+				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
+			});
+			expect(present).toHaveBeenCalledTimes(1);
+			const firstCall = present.mock.calls[0];
+			expect(firstCall).toBeDefined();
+			const output = renderPresentedBlocks(firstCall?.[0]);
+			expect(output).toContain("Openai Codex");
+			expect(output).toContain("connected@example.com");
+			expect(output).toContain("Weekly");
+			expect(output).toContain("Gateway Usage");
+			expect(output).toContain("User: alice (user #3)");
+			expect(output).toContain("Requests: 3");
+			expect(output).toContain("65,340 tokens");
+			expect(output).toContain("openai-codex/gpt-5.6-sol");
+			expect(ctx.showWarning).not.toHaveBeenCalled();
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
 	it("renders auth-gateway provider reports when the gateway token is admin-scoped", async () => {
 		const present = vi.fn();
 		const fetchedAt = Date.now();
