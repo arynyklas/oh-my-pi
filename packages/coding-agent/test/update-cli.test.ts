@@ -63,6 +63,25 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
+describe("update-cli fork beta guard", () => {
+	it("refuses app self-update before fetching npm metadata", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ version: "99.0.0" }));
+		const stderrWrites: string[] = [];
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(chunk => {
+			stderrWrites.push(String(chunk));
+			return true;
+		});
+
+		await updateCli.runUpdateCommand({ force: false, check: true });
+
+		expect(stderrWrites).toEqual([
+			"Self-update is disabled for unofficial auth-gateway beta builds. Download updates from https://github.com/arynyklas/oh-my-pi/releases.\n",
+		]);
+		expect(stderrSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+});
+
 describe("parseUpdateArgs", () => {
 	it("preserves the legacy plugin update shorthand", () => {
 		expect(parseUpdateArgs(["update", "-l"])).toEqual({ force: false, check: false, plugins: true });

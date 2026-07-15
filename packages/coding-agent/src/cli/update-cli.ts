@@ -882,6 +882,13 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+	if (VERSION.includes("-authgw.")) {
+		process.stderr.write(
+			"Self-update is disabled for unofficial auth-gateway beta builds. Download updates from https://github.com/arynyklas/oh-my-pi/releases.\n",
+		);
+		return;
+	}
+
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
