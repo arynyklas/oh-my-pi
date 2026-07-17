@@ -69,7 +69,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "17.0.2",
+      "version": "17.0.2-authgw.beta.4",
       "bin": {
         "omp": "src/cli.ts",
       },
@@ -315,7 +315,7 @@
     },
     "packages/utils": {
       "name": "@oh-my-pi/pi-utils",
-      "version": "17.0.2",
+      "version": "17.0.2-authgw.beta.4",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
         "handlebars": "catalog:",
@@ -374,11 +374,11 @@
     "@oh-my-pi/pi-agent-core": "17.0.2",
     "@oh-my-pi/pi-ai": "17.0.2",
     "@oh-my-pi/pi-catalog": "17.0.2",
-    "@oh-my-pi/pi-coding-agent": "17.0.2",
+    "@oh-my-pi/pi-coding-agent": "17.0.2-authgw.beta.4",
     "@oh-my-pi/pi-mnemopi": "17.0.2",
     "@oh-my-pi/pi-natives": "17.0.2",
     "@oh-my-pi/pi-tui": "17.0.2",
-    "@oh-my-pi/pi-utils": "17.0.2",
+    "@oh-my-pi/pi-utils": "17.0.2-authgw.beta.4",
     "@oh-my-pi/pi-wire": "17.0.2",
     "@oh-my-pi/snapcompact": "17.0.2",
     "@opentelemetry/api": "^1.9.1",
