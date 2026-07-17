@@ -125,6 +125,28 @@ async function handleAdmin(
 			return managementError(502, "credential_refresh_failed", "Credential refresh failed");
 		}
 	}
+	if (parts.length === 3 && parts[2] === "reset" && req.method === "POST") {
+		const credentialId = positiveId(parts[1] ?? "", "credential id");
+		const row = storage.listStoredCredentialsByIds([credentialId])[0];
+		if (!row) throw new ManagementHttpError(404, "not_found", "credential not found");
+		if (row.provider !== "openai-codex" || row.credential.type !== "oauth") {
+			throw new ManagementHttpError(
+				400,
+				"credential_reset_not_supported",
+				"Saved resets are only available for OpenAI Codex OAuth credentials",
+			);
+		}
+		try {
+			const outcome = await storage.redeemResetCredit({
+				target: { credentialId },
+				provider: row.provider,
+				signal: req.signal,
+			});
+			return json(200, { outcome });
+		} catch {
+			return managementError(502, "credential_reset_failed", "Saved reset activation failed");
+		}
+	}
 	if (parts.length === 2 && req.method === "DELETE") {
 		const credentialId = positiveId(parts[1] ?? "", "credential id");
 		const row = storage.listStoredCredentialsByIds([credentialId])[0];

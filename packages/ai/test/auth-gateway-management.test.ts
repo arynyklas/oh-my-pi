@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type AuthCredential, REMOTE_REFRESH_SENTINEL, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthCredential,
+	REMOTE_REFRESH_SENTINEL,
+	type ResetCreditRedeemOutcome,
+	type ResetCreditTarget,
+	type StoredAuthCredential,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import {
 	closeGatewayHarness,
 	createGatewayHarness,
@@ -15,6 +21,10 @@ type RemoteUpsertStore = GatewayHarness["credentialStore"] & {
 
 type RefreshPatchedStorage = GatewayHarness["storage"] & {
 	refreshCredentialById: GatewayHarness["storage"]["refreshCredentialById"];
+};
+
+type ResetPatchedStorage = GatewayHarness["storage"] & {
+	redeemResetCredit(options: { target: ResetCreditTarget }): Promise<ResetCreditRedeemOutcome>;
 };
 
 async function requestJson(
@@ -542,6 +552,88 @@ describe("auth-gateway management HTTP", () => {
 		expect(await readJson(response)).toEqual({ error: { code: "not_found", message: "credential not found" } });
 	});
 
+	test("redeems a saved reset for one Codex OAuth credential and preserves business outcomes", async () => {
+		harness = await createGatewayHarness();
+		const [credential] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
+			type: "oauth",
+			access: "codex-access",
+			refresh: "codex-refresh",
+			expires: 1_900_000_000_000,
+			email: "codex@example.com",
+			accountId: "acct-codex",
+		});
+		if (!credential) throw new Error("expected Codex credential");
+		await harness.storage.reload();
+		let redeemedTarget: ResetCreditTarget | undefined;
+		let outcome: ResetCreditRedeemOutcome = {
+			ok: true,
+			code: "reset",
+			accountId: "acct-codex",
+			email: "codex@example.com",
+			creditId: "credit-1",
+		};
+		const storage = harness.storage as ResetPatchedStorage;
+		storage.redeemResetCredit = async options => {
+			redeemedTarget = options.target;
+			return outcome;
+		};
+
+		let response = await requestJson(
+			harness.handle.url,
+			"POST",
+			`/v1/admin/credentials/${credential.id}/reset`,
+			"legacy-token",
+			{},
+		);
+		expect(response.status).toBe(200);
+		expect(redeemedTarget).toEqual({ credentialId: credential.id });
+		expect(await readJson(response)).toEqual({ outcome });
+
+		outcome = { ok: false, code: "nothing_to_reset", accountId: "acct-codex", email: "codex@example.com" };
+		response = await requestJson(
+			harness.handle.url,
+			"POST",
+			`/v1/admin/credentials/${credential.id}/reset`,
+			"legacy-token",
+			{},
+		);
+		expect(response.status).toBe(200);
+		expect(await readJson(response)).toEqual({ outcome });
+	});
+
+	test("rejects reset activation for non-Codex and API-key credentials", async () => {
+		harness = await createGatewayHarness();
+		const [anthropic] = harness.credentialStore.upsertAuthCredentialForProvider("anthropic", {
+			type: "oauth",
+			access: "anthropic-access",
+			refresh: "anthropic-refresh",
+			expires: 1_900_000_000_000,
+			email: "anthropic@example.com",
+		});
+		const [apiKey] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
+			type: "api_key",
+			key: "codex-key",
+		});
+		if (!anthropic || !apiKey) throw new Error("expected reset-ineligible credentials");
+		await harness.storage.reload();
+
+		for (const credentialId of [anthropic.id, apiKey.id]) {
+			const response = await requestJson(
+				harness.handle.url,
+				"POST",
+				`/v1/admin/credentials/${credentialId}/reset`,
+				"legacy-token",
+				{},
+			);
+			expect(response.status).toBe(400);
+			expect(await readJson(response)).toEqual({
+				error: {
+					code: "credential_reset_not_supported",
+					message: "Saved resets are only available for OpenAI Codex OAuth credentials",
+				},
+			});
+		}
+	});
 	test("implements ordered pool membership, pool users, and token rotation labels over HTTP", async () => {
 		harness = await createGatewayHarness({
 			credentials: [

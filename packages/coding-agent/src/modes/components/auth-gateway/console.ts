@@ -18,6 +18,7 @@ import {
 	AUTH_GATEWAY_BASIC_ROUTES,
 	AUTH_GATEWAY_POOL_STRATEGIES,
 } from "@oh-my-pi/pi-ai/auth-gateway";
+import { resolveUsedFraction } from "@oh-my-pi/pi-ai/usage";
 import type { Component, Focusable, SelectItem, SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 import {
 	matchesKey,
@@ -29,7 +30,9 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
+import { describeRedeemOutcome } from "../../../slash-commands/helpers/reset-usage";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { formatUsageReportLines } from "../../../utils/usage-format";
 import { getTabBarTheme } from "../../shared";
 import { theme } from "../../theme/theme";
 import { renderOAuthAuthorizationLink } from "../oauth-authorization-link";
@@ -40,7 +43,11 @@ import {
 	type AuthGatewayAccountLoginPromptState,
 	uploadAcquiredAuthGatewayCredential,
 } from "./account-login";
-import { AuthGatewayConsoleController, type AuthGatewayConsoleTab } from "./console-controller";
+import {
+	type AuthGatewayAccountUsageState,
+	AuthGatewayConsoleController,
+	type AuthGatewayConsoleTab,
+} from "./console-controller";
 import {
 	type AuthGatewayOneTimeTokenDialog,
 	closeOneTimeTokenDialog,
@@ -518,6 +525,10 @@ export class AuthGatewayConsole implements Component, Focusable {
 	}
 
 	#handleAccountAction(data: string): void {
+		if (data === "s") {
+			this.#openCredentialResetConfirmation();
+			return;
+		}
 		if (data === "d") {
 			const selected = this.controller.selectedCredential();
 			if (!selected) return;
@@ -549,6 +560,47 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (data === "k") this.#startApiKeyPrompt();
 	}
 
+	#openCredentialResetConfirmation(): void {
+		const eligibility = this.controller.selectedCredentialResetEligibility();
+		if (!eligibility.eligible) {
+			this.controller.setTransientBanner(eligibility.reason);
+			return;
+		}
+		const dialog = this.#createFlowDialog();
+		dialog.push({
+			id: `redeem-reset-${eligibility.account.id}`,
+			kind: "choice",
+			title: "Spend one saved reset?",
+			items: [
+				{ value: "no", label: "No", description: "Keep every saved reset" },
+				{ value: "yes", label: "Yes", description: "Spend one saved reset now" },
+			],
+			help: [
+				eligibility.label,
+				`${eligibility.availableCount} saved reset${eligibility.availableCount === 1 ? "" : "s"} available`,
+				"This is scarce and irreversible.",
+			],
+			onSelect: (value, activeDialog) => {
+				if (value !== "yes") {
+					activeDialog.close();
+					return;
+				}
+				void this.#redeemCredentialReset(eligibility.label, activeDialog);
+			},
+		});
+	}
+
+	async #redeemCredentialReset(label: string, dialog: AuthGatewayFlowDialog): Promise<void> {
+		dialog.setBusy(`Spending one saved reset for ${label}…`);
+		const result = await this.controller.redeemSelectedCredentialReset();
+		dialog.setBusy(null);
+		if (!result) {
+			dialog.setError(this.controller.state.errorBanner ?? "Saved reset activation failed");
+			return;
+		}
+		dialog.close();
+		this.controller.setTransientBanner(describeRedeemOutcome(result.outcome, result.label));
+	}
 	#startApiKeyPrompt(): void {
 		this.#openPrompt({ kind: "api-key-provider", label: "Provider id: ", value: "", masked: false, error: null });
 	}
@@ -1938,12 +1990,18 @@ export class AuthGatewayConsole implements Component, Focusable {
 		const accounts = this.controller.filteredCredentials();
 		if (this.controller.state.accounts.status === "loading" && accounts.length === 0) return ["Loading accounts..."];
 		if (accounts.length === 0) return ["No accounts found"];
+		const resetEligibility = this.controller.selectedCredentialResetEligibility();
 		return [
 			theme.bold("Accounts"),
 			...accounts.map((item, index) =>
-				selectedLine(index === this.controller.state.selected.accounts, accountSummary(item), width),
+				selectedLine(
+					index === this.controller.state.selected.accounts,
+					`${accountSummary(item)}${accountUsageListSuffix(this.controller.state.accountUsage[item.id])}`,
+					width,
+				),
 			),
 			theme.fg("dim", "l local login · k add API key · c copy identifiers · o refresh OAuth · d remove"),
+			...(resetEligibility.eligible ? [theme.fg("dim", "s spend reset (confirmation required)")] : []),
 		];
 	}
 
@@ -2032,6 +2090,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		if (!selected) return ["No account selected"];
 		const lines = [
 			theme.bold("Details"),
+			...this.#accountUsageLines(selected, width),
 			`ID: ${selected.id}`,
 			`Provider: ${sanitizeCell(selected.provider)}`,
 			`Type: ${selected.type}`,
@@ -2040,6 +2099,22 @@ export class AuthGatewayConsole implements Component, Focusable {
 			"Copyable: account id, email, project id, API endpoint",
 		];
 		return lines.map(line => truncateToWidth(line, width));
+	}
+
+	#accountUsageLines(account: AuthGatewayCredentialSummary, width: number): string[] {
+		const usage = this.controller.state.accountUsage[account.id];
+		if (!usage || this.controller.state.accountUsageReports.status === "loading") return ["Usage: loading"];
+		if (usage.kind === "unavailable") return [`Usage: unavailable — ${sanitizeCell(usage.message)}`];
+		if (usage.kind === "unreported") return [`Usage: ${sanitizeCell(usage.message)}`];
+		const reports = this.controller.state.accountUsageReports;
+		const lines = ["Usage"];
+		if (reports.stale && reports.error) lines.push(`  Usage refresh unavailable — ${sanitizeCell(reports.error)}`);
+		lines.push(
+			...formatUsageReportLines(usage.report, {
+				reports: reports.data.filter(report => report.provider === usage.report.provider),
+			}),
+		);
+		return wrapAnsiDetailLines(lines, width);
 	}
 
 	#auditDetail(width: number): string[] {
@@ -2161,6 +2236,22 @@ function printablePromptInput(data: string): string {
 
 function accountSummary(account: AuthGatewayCredentialSummary): string {
 	return `#${account.id} · ${account.provider} · ${account.type} · ${credentialIdentity(account)}`;
+}
+
+function accountUsageListSuffix(usage: AuthGatewayAccountUsageState | undefined): string {
+	if (!usage) return "";
+	if (usage.kind === "unavailable") return " · usage unavailable";
+	if (usage.kind === "unreported") return ` · ${usage.message}`;
+	const fractions = usage.report.limits
+		.map(resolveUsedFraction)
+		.filter((value): value is number => value !== undefined);
+	if (fractions.length === 0) return " · usage reported";
+	const maxFraction = Math.max(...fractions);
+	return ` · usage ${(maxFraction * 100).toFixed(1)}%`;
+}
+
+function wrapAnsiDetailLines(lines: string[], width: number): string[] {
+	return lines.flatMap(line => Bun.wrapAnsi(line, Math.max(1, width), { trim: false }).split("\n"));
 }
 
 function credentialIdentity(account: AuthGatewayCredentialSummary): string {

@@ -1,7 +1,8 @@
 import { type } from "arktype";
 import { credentialUploadRequestSchema } from "../auth-broker/wire-schemas";
-import type { AuthCredential } from "../auth-storage";
+import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 import type { Api } from "../types";
+import type { UsageReport } from "../usage";
 import type {
 	AuthGatewayAclBatchResult,
 	AuthGatewayAclRule,
@@ -16,6 +17,7 @@ import {
 	authGatewayAclRuleResponseSchema,
 	authGatewayAdminStatusResponseSchema,
 	authGatewayAuditPageResponseSchema,
+	authGatewayCredentialResetResponseSchema,
 	authGatewayCredentialResponseSchema,
 	authGatewayCredentialsResponseSchema,
 	authGatewayIssuedTokenValueSchema,
@@ -25,6 +27,7 @@ import {
 	authGatewayPoolsResponseSchema,
 	authGatewayPoolUsersResponseSchema,
 	authGatewayTokenResponseSchema,
+	authGatewayUsageReportsResponseSchema,
 	authGatewayUsageResponseSchema,
 	authGatewayUserDetailsResponseSchema,
 	authGatewayUserPoolsResponseSchema,
@@ -40,6 +43,7 @@ import type {
 	AuthGatewayAdminStatusResponse,
 	AuthGatewayAuditPage,
 	AuthGatewayCredentialInUseDetails,
+	AuthGatewayCredentialResetResponse,
 	AuthGatewayCredentialResponse,
 	AuthGatewayCredentialSummary,
 	AuthGatewayCredentialsResponse,
@@ -51,6 +55,7 @@ import type {
 	AuthGatewayPoolsResponse,
 	AuthGatewayPoolUsersResponse,
 	AuthGatewayTokenResponse,
+	AuthGatewayUsageReportsResponse,
 	AuthGatewayUsageResponse,
 	AuthGatewayUserDetails,
 	AuthGatewayUserDetailsResponse,
@@ -307,6 +312,17 @@ export class AuthGatewayAdminClient {
 		).usage;
 	}
 
+	async listUsageReports(signal?: AbortSignal): Promise<UsageReport[]> {
+		return (
+			await this.#requestJson<AuthGatewayUsageReportsResponse>(
+				"GET",
+				"/v1/usage",
+				authGatewayUsageReportsResponseSchema,
+				{ signal },
+			)
+		).reports;
+	}
+
 	async listPools(signal?: AbortSignal): Promise<AuthGatewayPool[]> {
 		return (
 			await this.#requestJson<AuthGatewayPoolsResponse>("GET", "/v1/pools", authGatewayPoolsResponseSchema, {
@@ -444,6 +460,17 @@ export class AuthGatewayAdminClient {
 				{ signal },
 			)
 		).credential;
+	}
+
+	async redeemCredentialReset(credentialId: number, signal?: AbortSignal): Promise<ResetCreditRedeemOutcome> {
+		return (
+			await this.#requestJson<AuthGatewayCredentialResetResponse>(
+				"POST",
+				`/v1/admin/credentials/${credentialId}/reset`,
+				authGatewayCredentialResetResponseSchema,
+				{ signal },
+			)
+		).outcome;
 	}
 
 	async removeCredential(credentialId: number, signal?: AbortSignal): Promise<void> {

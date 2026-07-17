@@ -1,4 +1,4 @@
-import type { AuthCredential } from "../auth-storage";
+import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 import type { Api } from "../types";
 import type { UsageReport } from "../usage";
 import type {
@@ -175,6 +175,10 @@ export interface AuthGatewayCredentialsResponse {
 
 export interface AuthGatewayCredentialResponse {
 	credential: AuthGatewayCredentialSummary;
+}
+
+export interface AuthGatewayCredentialResetResponse {
+	outcome: ResetCreditRedeemOutcome;
 }
 
 export interface AuthGatewayCredentialUploadRequest {

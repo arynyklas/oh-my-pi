@@ -17,7 +17,11 @@ import type {
 	UpdatePoolInput,
 	UpdateUserInput,
 } from "@oh-my-pi/pi-ai/auth-gateway";
+import type { ResetCreditRedeemOutcome } from "@oh-my-pi/pi-ai/auth-storage";
+import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { matchUsageReportsToIdentities } from "@oh-my-pi/pi-ai/usage/match";
 import type { ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
+import { CODEX_PROVIDER_ID } from "../../../slash-commands/helpers/reset-usage";
 
 export const ACTIVE_POLL_MS = 3_000;
 export const POLL_ERROR_BACKOFF_MS = [3_000, 6_000, 12_000, 30_000] as const;
@@ -26,6 +30,24 @@ export type AuthGatewayConsoleTab = "overview" | "users" | "pools" | "accounts" 
 type ResourceStatus = "idle" | "loading" | "ready" | "error";
 
 export type AuthGatewayErrorBannerSource = "visible-load" | "transient";
+export type AuthGatewayAccountUsageState =
+	| { kind: "matched"; report: UsageReport }
+	| { kind: "unavailable"; message: string }
+	| { kind: "unreported"; message: string };
+
+export type AuthGatewayCredentialResetEligibility =
+	| {
+			eligible: true;
+			account: AuthGatewayCredentialSummary;
+			label: string;
+			availableCount: number;
+	  }
+	| { eligible: false; reason: string };
+
+export interface AuthGatewayCredentialResetResult {
+	outcome: ResetCreditRedeemOutcome;
+	label: string;
+}
 
 interface ResourceState<T> {
 	data: T;
@@ -54,6 +76,8 @@ export interface AuthGatewayConsoleState {
 	pools: ResourceState<AuthGatewayPool[]>;
 	poolUsers: Record<number, AuthGatewayUser[]>;
 	accounts: ResourceState<AuthGatewayCredentialSummary[]>;
+	accountUsageReports: ResourceState<UsageReport[]>;
+	accountUsage: Record<number, AuthGatewayAccountUsageState>;
 	audit: ResourceState<AuthGatewayAuditEvent[]> & {
 		nextBefore: number | null;
 		pages: Array<{ before: number | undefined; events: AuthGatewayAuditEvent[]; nextBefore: number | null }>;
@@ -126,6 +150,8 @@ export class AuthGatewayConsoleController {
 			pools: emptyResource<AuthGatewayPool[]>([]),
 			poolUsers: {},
 			accounts: emptyResource<AuthGatewayCredentialSummary[]>([]),
+			accountUsageReports: emptyResource<UsageReport[]>([]),
+			accountUsage: {},
 			audit: {
 				...emptyResource<AuthGatewayAuditEvent[]>([]),
 				nextBefore: null,
@@ -176,6 +202,8 @@ export class AuthGatewayConsoleController {
 			pools: emptyResource<AuthGatewayPool[]>([]),
 			poolUsers: {},
 			accounts: emptyResource<AuthGatewayCredentialSummary[]>([]),
+			accountUsageReports: emptyResource<UsageReport[]>([]),
+			accountUsage: {},
 			audit: {
 				...emptyResource<AuthGatewayAuditEvent[]>([]),
 				nextBefore: null,
@@ -767,6 +795,65 @@ export class AuthGatewayConsoleController {
 		);
 	}
 
+	selectedCredentialResetEligibility(): AuthGatewayCredentialResetEligibility {
+		const account = this.selectedCredential();
+		if (!account) return { eligible: false, reason: "No account selected" };
+		if (account.provider !== CODEX_PROVIDER_ID || account.type !== "oauth") {
+			return {
+				eligible: false,
+				reason: "Saved resets are only available for OpenAI Codex OAuth accounts",
+			};
+		}
+		const usage = this.#state.accountUsage[account.id];
+		if (!usage) return { eligible: false, reason: "Saved-reset availability is still loading" };
+		if (usage.kind === "unavailable") {
+			return { eligible: false, reason: `Saved-reset availability is unavailable — ${usage.message}` };
+		}
+		if (usage.kind === "unreported") {
+			return { eligible: false, reason: `Saved-reset availability is ${usage.message}` };
+		}
+		const availableCount = Math.max(0, Math.trunc(usage.report.resetCredits?.availableCount ?? 0));
+		const label = account.email ?? account.accountId ?? `account #${account.id}`;
+		if (availableCount === 0) {
+			return { eligible: false, reason: `${label}: no saved resets available to spend` };
+		}
+		return { eligible: true, account, label, availableCount };
+	}
+
+	async redeemSelectedCredentialReset(): Promise<AuthGatewayCredentialResetResult | null> {
+		const eligibility = this.selectedCredentialResetEligibility();
+		if (!eligibility.eligible) {
+			this.setTransientBanner(eligibility.reason);
+			return null;
+		}
+		if (this.#state.busyAction) return null;
+		this.#abortVisibleLoads();
+		this.clearTransientBanner();
+		this.#state.busyAction = "redeem-credential-reset";
+		this.#requestRender();
+		const generation = this.#generation;
+		const abort = new AbortController();
+		this.#mutationAbort = abort;
+		try {
+			const outcome = await this.#client.redeemCredentialReset(eligibility.account.id, abort.signal);
+			if (!this.#isCurrent(generation, abort.signal)) return null;
+			this.#state.activeTab = "accounts";
+			await this.refresh("mutation");
+			if (!this.#isCurrent(generation, abort.signal)) return null;
+			return { outcome, label: eligibility.label };
+		} catch (error) {
+			if (!this.#isCurrent(generation, abort.signal)) return null;
+			this.setTransientBanner(this.#formatMutationError(error));
+			return null;
+		} finally {
+			if (this.#mutationAbort === abort) this.#mutationAbort = null;
+			if (this.#isCurrent(generation, abort.signal)) {
+				this.#state.busyAction = null;
+				this.#requestRender();
+			}
+		}
+	}
+
 	copySelectedCredentialIdentifiers(): string | null {
 		const selected = this.selectedCredential();
 		if (!selected) return null;
@@ -951,9 +1038,52 @@ export class AuthGatewayConsoleController {
 		}
 		if (tab === "accounts") {
 			this.#state.accounts.status = reason === "poll" && this.#state.accounts.data.length > 0 ? "ready" : "loading";
-			const accounts = await this.#client.listCredentials(signal);
+			this.#state.accountUsageReports.status =
+				reason === "poll" && this.#state.accountUsageReports.data.length > 0 ? "ready" : "loading";
+			const [accounts, usageResult] = await Promise.all([
+				this.#client.listCredentials(signal),
+				this.#client.listUsageReports(signal).then(
+					reports => ({ ok: true as const, reports }),
+					error => ({ ok: false as const, error }),
+				),
+			]);
 			if (signal.aborted || this.#closed) return "ready";
-			this.#state.accounts = { data: accounts, status: "ready", error: null, stale: false, lastUpdatedAt: nowMs() };
+			const loadedAt = nowMs();
+			this.#state.accounts = { data: accounts, status: "ready", error: null, stale: false, lastUpdatedAt: loadedAt };
+			if (usageResult.ok) {
+				this.#state.accountUsageReports = {
+					data: usageResult.reports,
+					status: "ready",
+					error: null,
+					stale: false,
+					lastUpdatedAt: loadedAt,
+				};
+				this.#state.accountUsage = this.#mapAccountUsage(accounts, usageResult.reports);
+			} else {
+				const message = this.#formatMutationError(usageResult.error);
+				const previousReports = this.#state.accountUsageReports.data;
+				if (previousReports.length > 0) {
+					this.#state.accountUsageReports = {
+						data: previousReports,
+						status: "error",
+						error: message,
+						stale: true,
+						lastUpdatedAt: this.#state.accountUsageReports.lastUpdatedAt,
+					};
+					this.#state.accountUsage = this.#mapAccountUsage(accounts, previousReports);
+				} else {
+					this.#state.accountUsageReports = {
+						data: [],
+						status: "error",
+						error: message,
+						stale: false,
+						lastUpdatedAt: loadedAt,
+					};
+					this.#state.accountUsage = Object.fromEntries(
+						accounts.map(account => [account.id, { kind: "unavailable" as const, message }]),
+					);
+				}
+			}
 			this.#clampSelection("accounts", accounts.length);
 			return "ready";
 		}
@@ -961,6 +1091,26 @@ export class AuthGatewayConsoleController {
 		return "ready";
 	}
 
+	#mapAccountUsage(
+		accounts: readonly AuthGatewayCredentialSummary[],
+		reports: readonly UsageReport[],
+	): Record<number, AuthGatewayAccountUsageState> {
+		const matches = matchUsageReportsToIdentities(reports, accounts);
+		return Object.fromEntries(
+			accounts.map(account => {
+				const report = matches.get(account);
+				if (report) return [account.id, { kind: "matched" as const, report }];
+				const providerReports = reports.filter(item => item.provider === account.provider);
+				return [
+					account.id,
+					{
+						kind: "unreported" as const,
+						message: providerReports.length === 0 ? "no usage data" : "not attributable",
+					},
+				];
+			}),
+		);
+	}
 	async #loadSelectedDetail(tab: AuthGatewayConsoleTab): Promise<void> {
 		if (this.#closed) return;
 		this.#detailAbort?.abort();

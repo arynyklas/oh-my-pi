@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added auth-gateway admin operations for per-credential usage attribution and confirmed OpenAI Codex saved-reset activation.
+
 ### Fixed
 
 - Fixed auth-gateway managed-user routing for explicitly keyless self-hosted models, preserving ACL checks while bypassing credential-pool selection and credential retry handling.

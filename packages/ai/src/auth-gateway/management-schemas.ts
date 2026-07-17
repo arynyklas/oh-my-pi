@@ -339,6 +339,18 @@ export const authGatewayCredentialResponseSchema = type({
 	credential: authGatewayCredentialSummarySchema,
 });
 
+export const authGatewayCredentialResetResponseSchema = type({
+	"+": "reject",
+	outcome: {
+		"+": "reject",
+		ok: "boolean",
+		code: type("string").atLeastLength(1),
+		"accountId?": "string",
+		"email?": "string",
+		"creditId?": "string",
+	},
+});
+
 export const authGatewayCredentialInUseDetailsSchema = type({
 	"+": "reject",
 	credentialId: "number.integer",

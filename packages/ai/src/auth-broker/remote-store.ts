@@ -22,6 +22,7 @@ import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { UsageReport } from "../usage";
+import { findMatchingUsageReportIndex, matchUsageReportToIdentity } from "../usage/match";
 import { type AuthBrokerClient, AuthBrokerStreamUnsupportedError } from "./client";
 import type {
 	CredentialBlockSnapshot,
@@ -1017,63 +1018,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  * usage data" (ranking proceeds without a usage signal for this credential).
  */
 function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
-	const candidates = reports.filter(report => report.provider === provider);
-	if (candidates.length === 0) return null;
-	if (candidates.length === 1) return candidates[0];
-	const accountId = credential.accountId?.trim().toLowerCase();
-	const email = credential.email?.trim().toLowerCase();
-	const projectId = credential.projectId?.trim().toLowerCase();
-	for (const report of candidates) {
-		if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
-	}
-	return null;
+	return matchUsageReportToIdentity(reports, {
+		provider,
+		accountId: credential.accountId,
+		email: credential.email,
+		projectId: credential.projectId,
+	});
 }
 
 function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): number {
-	const candidates = reports
-		.map((report, index) => ({ report, index }))
-		.filter(candidate => candidate.report.provider === overlay.provider);
-	if (candidates.length === 0) return -1;
-	if (candidates.length === 1) return candidates[0]!.index;
-	const metadata = (overlay.metadata ?? {}) as Record<string, unknown>;
-	const accountId = readMetadataString(metadata, "accountId")?.toLowerCase();
-	const email = readMetadataString(metadata, "email")?.toLowerCase();
-	const projectId = readMetadataString(metadata, "projectId")?.toLowerCase();
-	for (const candidate of candidates) {
-		if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
-	}
-	return -1;
-}
-
-function reportMatchesIdentity(
-	report: UsageReport,
-	accountId: string | undefined,
-	email: string | undefined,
-	projectId: string | undefined,
-): boolean {
-	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
-	if (accountId) {
-		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
-		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
-		for (const limit of report.limits) {
-			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
-		}
-	}
-	if (email) {
-		const metaEmail = readMetadataString(metadata, "email");
-		if (metaEmail && metaEmail.toLowerCase() === email) return true;
-	}
-	if (projectId) {
-		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
-		if (metaProject && metaProject.toLowerCase() === projectId) return true;
-		for (const limit of report.limits) {
-			if (limit.scope.projectId?.toLowerCase() === projectId) return true;
-		}
-	}
-	return false;
-}
-
-function readMetadataString(metadata: Record<string, unknown>, key: string): string | undefined {
-	const value = metadata[key];
-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+	return findMatchingUsageReportIndex(reports, overlay);
 }

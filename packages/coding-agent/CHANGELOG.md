@@ -5,6 +5,7 @@
 ### Added
 
 - Added `requestModelId` support for custom `models.yml` entries so a user-facing model id can route to a different upstream wire id.
+- Added per-account upstream usage and confirmed saved-reset activation to the auth-gateway admin console Accounts tab, with safe attribution and stale/unavailable states when usage refreshes fail.
 
 ### Fixed
 
