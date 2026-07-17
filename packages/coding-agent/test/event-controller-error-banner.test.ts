@@ -115,6 +115,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		pendingTools: new Map(),
 		flushCompactionQueue: vi.fn(async () => {}),
 		flushPendingModelSwitch: vi.fn(async () => {}),
+		flushPendingCommandOutput: vi.fn(),
 		showPinnedError,
 		clearPinnedError,
 		showError,

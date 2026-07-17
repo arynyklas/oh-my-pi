@@ -113,6 +113,8 @@ export const authGatewayCredentialSummarySchema = type({
 	email: "string | null",
 	accountId: "string | null",
 	projectId: "string | null",
+	orgId: "string | null",
+	orgName: "string | null",
 	enterpriseUrl: "string | null",
 	apiEndpoint: "string | null",
 	expiresAt: "number | null",

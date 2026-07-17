@@ -613,6 +613,8 @@ function credentialSummaryFromCredential(
 			email: null,
 			accountId: null,
 			projectId: null,
+			orgId: null,
+			orgName: null,
 			enterpriseUrl: null,
 			apiEndpoint: null,
 			expiresAt: null,
@@ -626,6 +628,8 @@ function credentialSummaryFromCredential(
 		email: credential.email ?? null,
 		accountId: credential.accountId ?? null,
 		projectId: credential.projectId ?? null,
+		orgId: credential.orgId ?? null,
+		orgName: credential.orgName ?? null,
 		enterpriseUrl: credential.enterpriseUrl ?? null,
 		apiEndpoint: credential.apiEndpoint ?? null,
 		expiresAt: credential.expires,
@@ -636,7 +640,19 @@ function credentialIdentityKey(provider: string, credential: OAuthCredential): s
 	const accountId = credential.accountId?.trim();
 	const email = credential.email?.trim().toLowerCase();
 	const projectId = credential.projectId?.trim();
-	if ((provider === "openai-codex" || provider === "anthropic") && email) return `email:${email}`;
+	const orgId = credential.orgId?.trim();
+	if (provider === "anthropic") {
+		const base = email
+			? `email:${email}`
+			: accountId
+				? `account:${accountId}`
+				: projectId
+					? `project:${projectId}`
+					: null;
+		const org = orgId ? `org:${orgId}` : null;
+		return base ? (org ? `${base}|${org}` : base) : org;
+	}
+	if (provider === "openai-codex" && email) return `email:${email}`;
 	if (accountId) return `account:${accountId}`;
 	if (email) return `email:${email}`;
 	if (projectId) return `project:${projectId}`;

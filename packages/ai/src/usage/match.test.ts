@@ -98,6 +98,28 @@ describe("matchUsageReportToIdentity", () => {
 		}
 	});
 
+	it("uses organization before canonical email for multi-subscription accounts", () => {
+		const reports = [
+			report(anthropic, { orgId: "org-b", email: "shared@example.com", accountId: "member-b" }),
+			report(anthropic, { orgId: "org-a", email: "shared@example.com", accountId: "member-a" }),
+		];
+
+		expect(
+			matchUsageReportToIdentity(reports, {
+				provider: anthropic,
+				orgId: "org-a",
+				email: "shared@example.com",
+				accountId: "saved-member-a",
+			}),
+		).toBe(reports[1]);
+		expect(
+			matchUsageReportToIdentity(reports, {
+				provider: anthropic,
+				email: "shared@example.com",
+			}),
+		).toBeNull();
+	});
+
 	it("falls back to the lone same-provider report", () => {
 		const reports = [report(anthropic, { accountId: "other" }), report(openai, {})];
 
@@ -140,6 +162,22 @@ describe("matchUsageReportsToIdentities", () => {
 
 		expect(matches.get(identities[0]!)).toBe(reports[0]);
 		expect(matches.get(identities[1]!)).toBe(reports[1]);
+	});
+
+	it("maps same-email Anthropic accounts to their own organizations", () => {
+		const identities = [
+			{ provider: anthropic, orgId: "org-a", email: "shared@example.com", accountId: "saved-a" },
+			{ provider: anthropic, orgId: "org-b", email: "shared@example.com", accountId: "saved-b" },
+		];
+		const reports = [
+			report(anthropic, { orgId: "org-b", email: "shared@example.com", accountId: "member-b" }),
+			report(anthropic, { orgId: "org-a", email: "shared@example.com", accountId: "member-a" }),
+		];
+
+		const matches = matchUsageReportsToIdentities(reports, identities);
+
+		expect(matches.get(identities[0]!)).toBe(reports[1]);
+		expect(matches.get(identities[1]!)).toBe(reports[0]);
 	});
 
 	it("falls back only when one unclaimed account and one unclaimed report remain for a provider", () => {

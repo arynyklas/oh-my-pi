@@ -146,6 +146,8 @@ const credentialSummaryFixture: AuthGatewayCredentialSummary = {
 	email: null,
 	accountId: null,
 	projectId: null,
+	orgId: null,
+	orgName: null,
 	enterpriseUrl: null,
 	apiEndpoint: null,
 	expiresAt: null,

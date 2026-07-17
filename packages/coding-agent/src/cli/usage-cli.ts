@@ -127,6 +127,7 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 		add(meta.accountId);
 		add(meta.projectId);
 		add(meta.orgId);
+		add(meta.orgName);
 		for (const limit of report.limits) {
 			add(limit.scope.accountId);
 			add(limit.scope.projectId);
@@ -137,6 +138,8 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 		add(account.email);
 		add(account.accountId);
 		add(account.projectId);
+		add(account.orgId);
+		add(account.orgName);
 		add(account.enterpriseUrl);
 	}
 	return values;
@@ -295,6 +298,8 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 					accountId: credential.accountId,
 					projectId: credential.projectId,
 					enterpriseUrl: credential.enterpriseUrl,
+					orgId: credential.orgId,
+					orgName: credential.orgName,
 				});
 			} else {
 				accounts.push({ provider, type: "api_key" });
@@ -331,7 +336,7 @@ function maskIdentity(redaction: Map<string, string>, value: string | undefined)
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
 }
 
-const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId"] as const;
+const IDENTITY_METADATA_KEYS = ["email", "accountId", "projectId", "orgId", "orgName"] as const;
 
 /** Mask identity fields in a raw-stripped report for `--redact --json`. */
 function redactReportForJson(
@@ -435,6 +440,8 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					accountId: maskIdentity(redaction, account.accountId),
 					projectId: maskIdentity(redaction, account.projectId),
 					enterpriseUrl: maskIdentity(redaction, account.enterpriseUrl),
+					orgId: maskIdentity(redaction, account.orgId),
+					orgName: maskIdentity(redaction, account.orgName),
 				}));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};

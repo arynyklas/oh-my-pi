@@ -1,12 +1,13 @@
 import type { UsageReport } from "../usage";
 
-const EMAIL_CANONICAL_PROVIDERS = new Set(["anthropic", "openai-codex"]);
+const EMAIL_CANONICAL_PROVIDERS: Record<string, true> = { anthropic: true, "openai-codex": true };
 
 export interface UsageReportIdentity {
 	provider: string;
 	accountId?: string | null;
 	email?: string | null;
 	projectId?: string | null;
+	orgId?: string | null;
 }
 
 export interface UsageReportMatchOptions {
@@ -29,8 +30,11 @@ export function matchUsageReportToIdentity(
 ): UsageReport | null {
 	const candidates = reports.filter(report => report.provider === identity.provider);
 	if (candidates.length === 0) return null;
-	if (candidates.length === 1 && options.allowProviderFallback !== false) return candidates[0]!;
-	return matchExactUsageReportCandidate(candidates, identity);
+	const scoped = scopeUsageReportCandidates(candidates, identity);
+	const exact = matchExactUsageReportCandidate(scoped.candidates, identity);
+	if (exact) return exact;
+	if (options.allowProviderFallback !== false && scoped.allowLoneFallback) return scoped.candidates[0] ?? null;
+	return null;
 }
 
 export function matchUsageReportsToIdentities<T extends UsageReportIdentity>(
@@ -41,7 +45,8 @@ export function matchUsageReportsToIdentities<T extends UsageReportIdentity>(
 	const claimed = new Set<UsageReport>();
 	for (const identity of identities) {
 		const candidates = reports.filter(report => report.provider === identity.provider && !claimed.has(report));
-		const match = matchExactUsageReportCandidate(candidates, identity);
+		const scoped = scopeUsageReportCandidates(candidates, identity);
+		const match = matchExactUsageReportCandidate(scoped.candidates, identity);
 		if (!match) continue;
 		matches.set(identity, match);
 		claimed.add(match);
@@ -59,13 +64,37 @@ export function matchUsageReportsToIdentities<T extends UsageReportIdentity>(
 		if (remainingReports.length === 1 && remainingIdentities.length === 1) {
 			const report = remainingReports[0]!;
 			const identity = remainingIdentities[0]!;
-			if (!usageReportHasAttribution(report) || !identityHasAttribution(identity)) {
+			const orgSafeFallback = matchUsageReportToIdentity([report], identity) === report;
+			const identityHasAttribution =
+				identityHasBaseAttribution(identity) || normalizeIdentity(identity.orgId) !== undefined;
+			if (orgSafeFallback && (!usageReportHasAttribution(report) || !identityHasAttribution)) {
 				matches.set(identity, report);
 				claimed.add(report);
 			}
 		}
 	}
 	return matches;
+}
+
+function scopeUsageReportCandidates(
+	candidates: readonly UsageReport[],
+	identity: UsageReportIdentity,
+): { candidates: readonly UsageReport[]; allowLoneFallback: boolean } {
+	const orgId = normalizeIdentity(identity.orgId);
+	const reportsWithOrg = candidates.filter(report => normalizedReportOrgIds(report).length > 0);
+	if (orgId) {
+		if (reportsWithOrg.length === 0) return { candidates: [], allowLoneFallback: false };
+		const sameOrg = reportsWithOrg.filter(report => normalizedReportOrgIds(report).includes(orgId));
+		return {
+			candidates: sameOrg,
+			allowLoneFallback: sameOrg.length === 1 && !identityHasBaseAttribution(identity),
+		};
+	}
+	const orgless = candidates.filter(report => normalizedReportOrgIds(report).length === 0);
+	return {
+		candidates: orgless,
+		allowLoneFallback: candidates.length === 1 && orgless.length === 1,
+	};
 }
 
 function matchExactUsageReportCandidate(
@@ -75,7 +104,7 @@ function matchExactUsageReportCandidate(
 	const accountId = normalizeIdentity(identity.accountId);
 	const email = normalizeIdentity(identity.email);
 	const projectId = normalizeIdentity(identity.projectId);
-	const emailIsCanonical = EMAIL_CANONICAL_PROVIDERS.has(identity.provider);
+	const emailIsCanonical = identity.provider in EMAIL_CANONICAL_PROVIDERS;
 	if (email && emailIsCanonical) {
 		const match = candidates.find(
 			report => normalizedReportEmails(report).includes(email) && !reportHasProjectConflict(report, projectId),
@@ -106,23 +135,15 @@ function matchExactUsageReportCandidate(
 }
 
 export function findMatchingUsageReportIndex(reports: readonly UsageReport[], overlay: UsageReport): number {
-	const candidates = reports
-		.map((report, index) => ({ report, index }))
-		.filter(candidate => candidate.report.provider === overlay.provider);
-	if (candidates.length === 0) return -1;
-	if (candidates.length === 1) return candidates[0]!.index;
 	const metadata = (overlay.metadata ?? {}) as Record<string, unknown>;
-	const match = matchExactUsageReportCandidate(
-		candidates.map(candidate => candidate.report),
-		{
-			provider: overlay.provider,
-			accountId: readMetadataString(metadata, "accountId"),
-			email: readMetadataString(metadata, "email"),
-			projectId: readMetadataString(metadata, "projectId"),
-		},
-	);
-	if (!match) return -1;
-	return candidates.find(candidate => candidate.report === match)?.index ?? -1;
+	const match = matchUsageReportToIdentity(reports, {
+		provider: overlay.provider,
+		accountId: readMetadataString(metadata, "accountId"),
+		email: readMetadataString(metadata, "email"),
+		projectId: readMetadataString(metadata, "projectId"),
+		orgId: readMetadataString(metadata, "orgId"),
+	});
+	return match ? reports.indexOf(match) : -1;
 }
 
 function reportHasAccountConflict(report: UsageReport, accountId: string | undefined): boolean {
@@ -133,6 +154,15 @@ function reportHasAccountConflict(report: UsageReport, accountId: string | undef
 function reportHasProjectConflict(report: UsageReport, projectId: string | undefined): boolean {
 	const projectIds = normalizedReportProjectIds(report);
 	return projectId !== undefined && projectIds.length > 0 && !projectIds.includes(projectId);
+}
+
+function normalizedReportOrgIds(report: UsageReport): string[] {
+	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+	return uniqueDefined([
+		normalizeIdentity(readMetadataString(metadata, "orgId")),
+		normalizeIdentity(readMetadataString(metadata, "org_id")),
+		...report.limits.map(limit => normalizeIdentity(limit.scope.orgId)),
+	]);
 }
 
 function normalizedReportAccountIds(report: UsageReport): string[] {
@@ -167,13 +197,20 @@ function usageReportHasAttribution(report: UsageReport): boolean {
 	if (readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id")) return true;
 	if (readMetadataString(metadata, "email")) return true;
 	if (readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id")) return true;
+	if (readMetadataString(metadata, "orgId") ?? readMetadataString(metadata, "org_id")) return true;
 	for (const limit of report.limits) {
-		if (normalizeIdentity(limit.scope.accountId) || normalizeIdentity(limit.scope.projectId)) return true;
+		if (
+			normalizeIdentity(limit.scope.accountId) ||
+			normalizeIdentity(limit.scope.projectId) ||
+			normalizeIdentity(limit.scope.orgId)
+		) {
+			return true;
+		}
 	}
 	return false;
 }
 
-function identityHasAttribution(identity: UsageReportIdentity): boolean {
+function identityHasBaseAttribution(identity: UsageReportIdentity): boolean {
 	return (
 		normalizeIdentity(identity.accountId) !== undefined ||
 		normalizeIdentity(identity.email) !== undefined ||

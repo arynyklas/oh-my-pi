@@ -27,6 +27,8 @@ const credential: AuthGatewayCredentialSummary = {
 	email: "person@example.com",
 	accountId: "acct-1",
 	projectId: null,
+	orgId: null,
+	orgName: null,
 	enterpriseUrl: null,
 	apiEndpoint: null,
 	expiresAt: null,

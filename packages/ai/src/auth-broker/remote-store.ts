@@ -144,14 +144,24 @@ interface UsageCacheEntry {
 
 function usageOverlayKey(
 	provider: Provider,
-	ids: { accountId?: string; email?: string; projectId?: string },
+	ids: { accountId?: string; email?: string; projectId?: string; orgId?: string },
 ): string | undefined {
+	// Org first: one account email can hold several organizations (Anthropic
+	// Team seat + personal Max), each with its own limit pools. Keying the
+	// overlay by account/email would merge the two pools' header ingests.
+	// But the org alone is not enough either: two Team members share the org
+	// id while drawing on per-user pools, so the key stays qualified by the
+	// member's own base identity whenever one is known.
+	let base: string | undefined;
 	const accountId = ids.accountId?.trim().toLowerCase();
-	if (accountId) return `${provider}\0account:${accountId}`;
 	const email = ids.email?.trim().toLowerCase();
-	if (email) return `${provider}\0email:${email}`;
 	const projectId = ids.projectId?.trim().toLowerCase();
-	if (projectId) return `${provider}\0project:${projectId}`;
+	if (accountId) base = `account:${accountId}`;
+	else if (email) base = `email:${email}`;
+	else if (projectId) base = `project:${projectId}`;
+	const orgId = ids.orgId?.trim().toLowerCase();
+	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
+	if (base) return `${provider}\0${base}`;
 	return undefined;
 }
 
@@ -818,6 +828,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#cache.set(key, { value, expiresAtSec });
 	}
 
+	/** Drop all cache rows whose keys start with the supplied prefix. */
+	deleteCachePrefix(prefix: string): void {
+		for (const key of this.#cache.keys()) {
+			if (key.startsWith(prefix)) this.#cache.delete(key);
+		}
+	}
+
 	cleanExpiredCache(): void {
 		const nowSec = Math.floor(Date.now() / 1000);
 		for (const [key, entry] of this.#cache) {
@@ -1010,12 +1027,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 /**
  * Match a broker-supplied usage report to a specific OAuth credential. The
  * broker returns aggregate reports across all credentials it manages, so we
- * pick the one whose identity (accountId / email / projectId) lines up with
- * the credential the caller is asking about.
+ * first scope by organization and then match accountId / email / projectId.
  *
- * Falls back to the lone candidate when only one matches the provider; falls
- * through to `null` when nothing matches, which `AuthStorage` treats as "no
- * usage data" (ranking proceeds without a usage signal for this credential).
+ * Falls back to the lone safe candidate when attribution is unambiguous;
+ * otherwise returns `null`, which `AuthStorage` treats as "no usage data"
+ * so ranking proceeds without borrowing another account's quota signal.
  */
 function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
 	return matchUsageReportToIdentity(reports, {
@@ -1023,6 +1039,7 @@ function matchUsageReport(reports: UsageReport[], provider: Provider, credential
 		accountId: credential.accountId,
 		email: credential.email,
 		projectId: credential.projectId,
+		orgId: credential.orgId,
 	});
 }
 

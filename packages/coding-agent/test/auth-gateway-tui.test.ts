@@ -35,6 +35,7 @@ import {
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInterface } from "@oh-my-pi/pi-ai/oauth/types";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import {
 	AuthGatewayProfileStore,
 	type ResolvedAuthGatewayConnection,
@@ -152,6 +153,8 @@ function credential(
 		email: type === "oauth" ? `account-${id}@example.com` : null,
 		accountId: type === "oauth" ? `account-${id}` : null,
 		projectId: null,
+		orgId: null,
+		orgName: null,
 		enterpriseUrl: null,
 		apiEndpoint: null,
 		expiresAt: null,
@@ -222,6 +225,7 @@ class FakeGatewayClient {
 	listPoolsCalls = 0;
 	listPoolUsersCalls: number[] = [];
 	listCredentialsCalls = 0;
+	listUsageReportsCalls = 0;
 	listAuditQueries: Array<{ userId?: number; limit?: number; before?: number }> = [];
 	createUserCalls: CreateUserInput[] = [];
 	updateUserCalls: Array<{
@@ -579,6 +583,12 @@ class FakeGatewayClient {
 		const queued = this.credentialListQueue.shift();
 		if (queued) return await queued.promise;
 		return this.credentials;
+	}
+
+	async listUsageReports(signal?: AbortSignal): Promise<UsageReport[]> {
+		this.listUsageReportsCalls++;
+		if (signal) this.abortedSignals.push(signal);
+		return [];
 	}
 
 	async listModels(signal?: AbortSignal): Promise<AuthGatewayModelSummary[]> {

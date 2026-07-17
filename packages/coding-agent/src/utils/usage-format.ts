@@ -16,6 +16,9 @@ export interface UsageAccountIdentity {
 	accountId?: string;
 	projectId?: string;
 	enterpriseUrl?: string;
+	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
+	orgId?: string;
+	orgName?: string;
 }
 
 export type LimitStatus = NonNullable<UsageLimit["status"]>;
@@ -164,9 +167,27 @@ export function collectUnreportedAccounts(
 		const providerReports = byProvider.get(account.provider) ?? [];
 		if (providerReports.length === 0) return true;
 		if (account.type === "api_key") return false;
+		const accountOrg = account.orgId?.toLowerCase();
 		const ids = [account.email, account.accountId, account.projectId]
 			.filter((value): value is string => typeof value === "string" && value.length > 0)
 			.map(value => value.toLowerCase());
+		const sameOrgReports: UsageReport[] = [];
+		let sawReportOrg = false;
+		for (const report of providerReports) {
+			const metaOrg = report.metadata?.orgId;
+			if (typeof metaOrg === "string" && metaOrg) {
+				sawReportOrg = true;
+				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
+			}
+		}
+		if (accountOrg || sawReportOrg) {
+			if (!accountOrg || sameOrgReports.length === 0) return true;
+			if (ids.length === 0) return false;
+			return !sameOrgReports.some(report => {
+				const identifiers = reportIdentifiers(report);
+				return ids.some(id => identifiers.has(id));
+			});
+		}
 		if (ids.length === 0) return false;
 		const reported = new Set<string>();
 		let anyIdentified = false;
@@ -180,9 +201,13 @@ export function collectUnreportedAccounts(
 	});
 }
 
-function accountIdentityLabel(account: UsageAccountIdentity): string {
+function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
 	if (account.type === "api_key") return "API key";
-	return account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
+	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
+	const masked = redaction?.get(base) ?? sanitizeUsageText(base);
+	const org = account.orgName ?? account.orgId;
+	if (!org || org === base) return masked;
+	return `${masked} · ${redaction?.get(org) ?? sanitizeUsageText(org)}`;
 }
 
 function formatAccountHeader(
@@ -196,6 +221,12 @@ function formatAccountHeader(
 	const rawLabel = reportAccountLabel(report, index);
 	const label = redaction?.get(rawLabel) ?? sanitizeUsageText(rawLabel);
 	let header = `${icon} ${chalk.bold(label)}`;
+	const metaOrgName = report.metadata?.orgName;
+	const metaOrgId = report.metadata?.orgId;
+	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+	if (typeof org === "string" && org && org !== rawLabel) {
+		header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
+	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
 	const savedResets = report.resetCredits?.availableCount ?? 0;
@@ -419,9 +450,8 @@ export function formatUsageBreakdown(
 		});
 
 		for (const account of providerUnreported) {
-			const label = accountIdentityLabel(account);
-			const renderedLabel = redaction?.get(label) ?? sanitizeUsageText(label);
-			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${renderedLabel} — no usage data`)}`);
+			const label = accountIdentityLabel(account, redaction);
+			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
 		}
 
 		const stats = computeProviderWindowStats(providerReports);
