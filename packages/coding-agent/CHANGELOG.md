@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed open sessions retaining revoked command-backed provider credentials after token-file rotation by expiring successful command results and invalidating them on provider refresh.
 - Fixed TUI `/usage` to include active self-hosted auth gateway usage totals alongside connected-account reports.
 - Fixed `omp auth-gateway serve` to expose custom and discovered `models.yml` entries, including `auth: none` self-hosted providers.
 - Fixed unofficial auth-gateway beta builds to check fork GitHub prereleases for startup notices and `omp update` self-updates instead of upstream npm metadata.

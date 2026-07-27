@@ -271,7 +271,10 @@ interface CustomModelsResult {
 	found: boolean;
 }
 
-const commandValueCache = new Map<string, string>();
+// Successful command-backed secrets are cached briefly to avoid an execSync on
+// every request, but must be reread after external credential rotation.
+const COMMAND_SUCCESS_CACHE_MS = 30_000;
+const commandValueCache = new Map<string, { expiresAt: number; value: string }>();
 // Failed `!command` resolutions (non-zero exit, empty stdout) are negative-cached
 // with a TTL instead of forever: a transient failure (locked password manager,
 // network hiccup) must not disable the key until process restart, but re-running
@@ -285,10 +288,12 @@ function isCommandConfigValue(valueConfig: string | undefined): valueConfig is s
 }
 
 function resolveCommandConfig(command: string): string | undefined {
+	const now = Date.now();
 	const cached = commandValueCache.get(command);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined && now < cached.expiresAt) return cached.value;
+	if (cached !== undefined) commandValueCache.delete(command);
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
+	if (retryAt !== undefined && now < retryAt) return undefined;
 	try {
 		const stdout = execSync(command, { encoding: "utf8", timeout: 10_000, windowsHide: true });
 		const trimmed = stdout.trim();
@@ -297,7 +302,7 @@ function resolveCommandConfig(command: string): string | undefined {
 			return undefined;
 		}
 		commandFailureRetryAt.delete(command);
-		commandValueCache.set(command, trimmed);
+		commandValueCache.set(command, { expiresAt: Date.now() + COMMAND_SUCCESS_CACHE_MS, value: trimmed });
 		return trimmed;
 	} catch {
 		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
@@ -326,6 +331,7 @@ type HeaderSource = Record<string, string> | undefined;
 interface HeaderResolutionOptions {
 	authHeader?: boolean;
 	apiKeyConfig?: string;
+	dropAuthorizationFromFirstSource?: boolean;
 }
 
 function materializeConfigHeaderSources(
@@ -333,9 +339,13 @@ function materializeConfigHeaderSources(
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
 	const resolved: Record<string, string> = {};
-	for (const source of sources) {
+	for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+		const source = sources[sourceIndex];
 		if (!source) continue;
 		for (const [key, value] of Object.entries(source)) {
+			if (options?.dropAuthorizationFromFirstSource && sourceIndex === 0 && key.toLowerCase() === "authorization") {
+				continue;
+			}
 			const next = resolveConfigValue(value);
 			if (next) resolved[key] = next;
 		}
@@ -351,11 +361,11 @@ function createLiveConfigHeaders(
 	sources: readonly HeaderSource[],
 	options?: HeaderResolutionOptions,
 ): Record<string, string> | undefined {
-	const liveSources = sources.filter((source): source is Record<string, string> => source !== undefined);
-	if (liveSources.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
+	const hasSources = sources.some(source => source !== undefined);
+	if (!hasSources && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
 
 	const localHeaders: Record<string, string> = {};
-	const allSources = [...liveSources, localHeaders];
+	const allSources = [...sources, localHeaders];
 	const current = () => materializeConfigHeaderSources(allSources, options) ?? {};
 	return new Proxy(localHeaders, {
 		get(target, property, receiver) {
@@ -391,10 +401,6 @@ function createLiveConfigHeaders(
 			};
 		},
 	});
-}
-
-function resolveConfigHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
-	return materializeConfigHeaderSources([headers]);
 }
 
 function extractGoogleOAuthToken(value: string | undefined): string | undefined {
@@ -588,8 +594,13 @@ function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	dropAuthorizationFromFirstSource: boolean,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders(sources, {
+		authHeader,
+		apiKeyConfig,
+		dropAuthorizationFromFirstSource,
+	});
 }
 
 /**
@@ -855,6 +866,8 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
+		commandValueCache.clear();
+		commandFailureRetryAt.clear();
 		this.#reloadStaticModels();
 		for (const selector of this.#suppressedSelectors.keys()) {
 			if (selector.startsWith(`${providerId}/`)) {
@@ -1304,11 +1317,11 @@ export class ModelRegistry {
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
-			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const liveProviderHeaders = createLiveConfigHeaders([providerConfig.headers]);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
 				providerConfig.baseUrl ||
-				resolvedProviderHeaders ||
+				liveProviderHeaders ||
 				providerConfig.apiKey ||
 				providerConfig.authHeader !== undefined ||
 				providerConfig.compat ||
@@ -1322,7 +1335,7 @@ export class ModelRegistry {
 						providerConfig.discovery?.type === "litellm"
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
 							: providerConfig.baseUrl,
-					headers: resolvedProviderHeaders,
+					headers: liveProviderHeaders,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
@@ -1345,7 +1358,7 @@ export class ModelRegistry {
 					// fallback for entries that don't advertise one.
 					api: (providerConfig.api ?? "openai-completions") as Api,
 					baseUrl: providerConfig.baseUrl,
-					headers: resolvedProviderHeaders,
+					headers: liveProviderHeaders,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
 					discovery: providerConfig.discovery,
@@ -1367,7 +1380,7 @@ export class ModelRegistry {
 				for (const [modelId, override] of Object.entries(providerConfig.modelOverrides)) {
 					perModel.set(
 						modelId,
-						override.headers ? { ...override, headers: resolveConfigHeaders(override.headers) } : override,
+						override.headers ? { ...override, headers: createLiveConfigHeaders([override.headers]) } : override,
 					);
 				}
 				allModelOverrides.set(providerName, perModel);
@@ -1821,7 +1834,12 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+			transport?: "pi-native";
+		},
 	>(
 		entry: T,
 		override: Pick<
@@ -1829,10 +1847,20 @@ export class ModelRegistry {
 			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
 		>,
 	): T {
+		const explicitAuthorization =
+			override.headers !== undefined &&
+			Object.keys(override.headers).some(key => key.toLowerCase() === "authorization");
+		const effectiveTransport = override.transport ?? entry.transport;
+		const authHeader =
+			override.authHeader ??
+			(effectiveTransport === "pi-native" && override.apiKey !== undefined && !explicitAuthorization);
+		const dropCachedAuthorization =
+			override.authHeader !== undefined || override.apiKey !== undefined || explicitAuthorization;
 		const headers = mergeAuthHeaderSources(
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
-			override.authHeader,
+			authHeader,
 			override.apiKey,
+			dropCachedAuthorization,
 		);
 		return {
 			...entry,
@@ -1908,7 +1936,7 @@ export class ModelRegistry {
 		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
-			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const liveProviderHeaders = createLiveConfigHeaders([providerConfig.headers]);
 			if (providerConfig.apiKey) {
 				this.#installProviderApiKey(providerName, providerConfig.apiKey);
 			}
@@ -1920,7 +1948,7 @@ export class ModelRegistry {
 					providerName,
 					providerConfig.baseUrl!,
 					providerConfig.api as Api | undefined,
-					resolvedProviderHeaders,
+					liveProviderHeaders,
 					providerConfig.apiKey,
 					providerConfig.authHeader,
 					providerCompat,
