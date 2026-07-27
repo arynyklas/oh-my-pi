@@ -20,6 +20,16 @@ import {
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
+// Marked treats the backslash in an ST-terminated OSC 8 sequence (`ESC \\`) as
+// Markdown punctuation when it is immediately followed by markup such as a
+// codespan backtick. Normalize well-formed OSC 8 prefixes to the equivalent BEL
+// terminator before lexing so the control sequence stays opaque to Markdown.
+const OSC8_ST_PREFIX_REGEX = /(\x1b\]8;[^\x07\x1b]*)\x1b\\/g;
+
+function normalizeOsc8Terminators(text: string): string {
+	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
+}
+
 // OSC 66 (Kitty text-sizing) heading spans are emitted as a single indivisible
 // unit by the H1 render path. Like image-protocol lines, they must bypass
 // ANSI wrapping and width padding: re-wrapping splits/normalizes the sized span
@@ -1097,7 +1107,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		defaultTextStyle?: DefaultTextStyle,
 		codeBlockIndent: number = 2,
 	) {
-		this.#text = text;
+		this.#text = normalizeOsc8Terminators(text);
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#theme = theme;
@@ -1106,6 +1116,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 	}
 
 	setText(text: string): boolean {
+		text = normalizeOsc8Terminators(text);
 		// Equality guard: streaming re-emits identical text on ticks that carried
 		// no delta (throttled provider frames, reconciled tool-execution updates).
 		// Without this, the caller-side `#cachedLines` gets thrown away and the
@@ -2190,8 +2201,8 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 					if (token.text === token.href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
-						const styledLinkUrl = this.#theme.linkUrl(` (${token.href})`);
-						result += clickableLinkText + formatHyperlink(styledLinkUrl, token.href) + stylePrefix;
+						const styledLinkUrl = this.#theme.linkUrl(`(${token.href})`);
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, token.href)}${stylePrefix}`;
 					}
 					break;
 				}
@@ -2388,7 +2399,14 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 	 */
 	#wrapCellText(text: string, maxWidth: number): string[] {
 		const cellWidth = Math.max(1, maxWidth);
-		return splitTerminalLines(text).flatMap(line => wrapTextWithAnsi(line, cellWidth));
+		// Wrap the whole cell in one call so wrapTextWithAnsi() balances OSC 8
+		// hyperlink state across explicit newlines (e.g. `<br>` rendered as \n);
+		// per-fragment wrapping would drop the reopened link on later rows.
+		const wrapped = wrapTextWithAnsi(text, cellWidth);
+		while (wrapped.length > 1 && wrapped[wrapped.length - 1] === "") {
+			wrapped.pop();
+		}
+		return wrapped;
 	}
 
 	/**
@@ -2604,7 +2622,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 export function renderInlineMarkdown(text: string, mdTheme: MarkdownTheme, baseColor?: (t: string) => string): string {
 	// Guard against undefined/null during streaming — partial JSON can leave fields unpopulated.
 	if (typeof text !== "string") return (baseColor ?? (t => t))(text != null ? String(text) : "");
-	const tokens = markdownParser.lexer(text);
+	const tokens = markdownParser.lexer(normalizeOsc8Terminators(text));
 	const applyText = baseColor ?? ((t: string) => t);
 	let result = "";
 	for (const token of tokens) {

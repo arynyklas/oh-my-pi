@@ -31,6 +31,15 @@ export class Input implements Component, Focusable {
 	#mask: string | undefined;
 	/** Rendered before the editable area; set to "" for chrome-less embedding. */
 	prompt = "> ";
+	/** Render the editable value as bullets while retaining the real value internally. */
+	get mask(): boolean {
+		return this.#mask !== undefined;
+	}
+
+	set mask(enabled: boolean) {
+		this.#mask = enabled ? "•" : undefined;
+	}
+
 	onSubmit?: (value: string) => void;
 	onEscape?: () => void;
 
@@ -430,19 +439,15 @@ export class Input implements Component, Focusable {
 		}
 
 		let cursorIndex = this.#cursor;
+		// Ensure we always have a grapheme to invert at the cursor (space at end).
 		let displayValue: string;
 		if (this.#mask === undefined) {
-			// Ensure we always have a grapheme to invert at the cursor (space at end).
 			displayValue = cursorIndex >= this.#value.length ? `${this.#value} ` : this.#value;
 		} else {
-			const beforeCursor = this.#value.slice(0, this.#cursor);
-			const beforeCount = [...segmenter.segment(beforeCursor)].length;
-			const valueCount = [...segmenter.segment(this.#value)].length;
-			displayValue = this.#mask.repeat(valueCount);
-			cursorIndex = this.#mask.length * beforeCount;
-			if (this.#cursor >= this.#value.length) {
-				displayValue += " ";
-			}
+			const graphemes = [...segmenter.segment(this.#value)];
+			displayValue = this.#mask.repeat(graphemes.length);
+			cursorIndex = this.#mask.length * graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
+			if (this.#cursor >= this.#value.length) displayValue += " ";
 		}
 
 		const totalCols = visibleWidth(displayValue);

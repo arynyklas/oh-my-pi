@@ -48,12 +48,16 @@ describe("ci-test-ts coding-agent requested filters", () => {
 		"packages/coding-agent/test/auth-gateway-cli.test.ts",
 		"packages\\coding-agent\\test\\auth-gateway-cli.test.ts",
 		"test\\auth-gateway-cli.test.ts",
-	])("normalizes %s to the package-relative coding-agent command", async filter => {
-		const result = await runCiTestTs(["coding-agent-heavy", filter, "--dry-run", "--full"]);
+	])(
+		"normalizes %s to the package-relative coding-agent command",
+		async filter => {
+			const result = await runCiTestTs(["coding-agent-heavy", filter, "--dry-run", "--full"]);
 
-		expect(result.exitCode).toBe(0);
-		expect(result.planned).toEqual([plannedCliCommand]);
-	}, 30_000);
+			expect(result.exitCode).toBe(0);
+			expect(result.planned).toEqual([plannedCliCommand]);
+		},
+		30_000,
+	);
 
 	test("fails when requested coding-agent filters match no tests", async () => {
 		const result = await runCiTestTs(["coding-agent-heavy", "test/does-not-exist.test.ts", "--dry-run", "--full"]);

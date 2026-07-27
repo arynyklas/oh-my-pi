@@ -4,6 +4,7 @@ import type {
 	AssistantMessageEventStream,
 	CacheRetention,
 	Context,
+	OpenAIResponseInclude,
 	ServiceTier,
 	TokenTaskBudget,
 } from "../types";
@@ -23,7 +24,7 @@ import type { AuthGatewayAccessStore } from "./access-store";
 /** Default bind. Loopback-only — front with reverse proxy for remote access. */
 export const DEFAULT_AUTH_GATEWAY_BIND = "127.0.0.1:4000";
 
-export type AuthGatewayToolChoice = "auto" | "none" | "required" | { name: string };
+export type AuthGatewayToolChoice = "auto" | "none" | "required" | { name: string } | { type: "computer" };
 
 export interface AuthGatewayParsedRequestOptions {
 	// ── Sampling ──────────────────────────────────────────────────────────
@@ -52,7 +53,8 @@ export interface AuthGatewayParsedRequestOptions {
 	toolChoice?: AuthGatewayToolChoice;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
-
+	/** OpenAI Responses fields requested in the response payload. */
+	include?: OpenAIResponseInclude[];
 	// ── Reasoning ─────────────────────────────────────────────────────────
 	/** Effort-level reasoning request (OpenAI Responses / Chat `reasoning_effort`). */
 	reasoning?: Effort;

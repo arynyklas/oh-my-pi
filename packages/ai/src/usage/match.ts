@@ -146,6 +146,29 @@ export function findMatchingUsageReportIndex(reports: readonly UsageReport[], ov
 	return match ? reports.indexOf(match) : -1;
 }
 
+/**
+ * Strict membership test: does `report` belong to exactly this identity?
+ *
+ * Unlike {@link matchUsageReportToIdentity} there is no lone-candidate
+ * fallback — organization must line up exactly (both org-scoped and equal, or
+ * both org-less), and any base identifier the identity carries must appear in
+ * the report. Used to filter a broker's aggregate report list down to the rows
+ * one credential owns.
+ */
+export function usageReportMatchesIdentity(report: UsageReport, identity: UsageReportIdentity): boolean {
+	const orgId = normalizeIdentity(identity.orgId);
+	const reportOrgIds = normalizedReportOrgIds(report);
+	if (orgId === undefined ? reportOrgIds.length > 0 : !reportOrgIds.includes(orgId)) return false;
+
+	const accountId = normalizeIdentity(identity.accountId);
+	const email = normalizeIdentity(identity.email);
+	const projectId = normalizeIdentity(identity.projectId);
+	if (accountId === undefined && email === undefined && projectId === undefined) return orgId !== undefined;
+	if (accountId !== undefined && normalizedReportAccountIds(report).includes(accountId)) return true;
+	if (email !== undefined && normalizedReportEmails(report).includes(email)) return true;
+	return projectId !== undefined && normalizedReportProjectIds(report).includes(projectId);
+}
+
 function reportHasAccountConflict(report: UsageReport, accountId: string | undefined): boolean {
 	const accountIds = normalizedReportAccountIds(report);
 	return accountId !== undefined && accountIds.length > 0 && !accountIds.includes(accountId);

@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as kimiOauth from "../../registry/oauth/kimi";
-import type { Context } from "../../types";
+import { streamSimple } from "../../stream";
+import type { Context, Model } from "../../types";
 import type { MessageCreateParamsStreaming } from "../anthropic-wire";
-import { streamKimi } from "../kimi";
+import { type KimiApiFormat, type KimiOptions, streamKimi } from "../kimi";
 import { streamOpenAIAnthropicShim } from "../openai-anthropic-shim";
 import {
 	applyChatCompletionsCompatPolicy,
@@ -38,8 +42,307 @@ const TITLE_CONTEXT: Context = {
 	],
 };
 
+const K3_MODEL = buildModel({
+	id: "k3",
+	name: "K3",
+	api: "openai-completions",
+	provider: "kimi-code",
+	baseUrl: "https://api.kimi.com/coding/v1",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1_048_576,
+	maxTokens: 32_000,
+	thinking: {
+		mode: "effort",
+		efforts: [Effort.Low, Effort.High, Effort.Max],
+		defaultLevel: Effort.Max,
+		requiresEffort: true,
+	},
+	compat: {
+		thinkingFormat: "kimi",
+		kimiApiFormat: "openai",
+		reasoningContentField: "reasoning_content",
+		supportsDeveloperRole: false,
+	},
+} satisfies ModelSpec<"openai-completions">);
+
+async function captureKimiPayload(
+	model: Model<"openai-completions">,
+	reasoning: Effort,
+	format?: KimiApiFormat,
+): Promise<unknown> {
+	let payload: unknown;
+	const stream = streamKimi(
+		model,
+		{
+			systemPrompt: [],
+			messages: [{ role: "user", content: "Reply OK", timestamp: 0 }],
+			tools: [],
+		},
+		{
+			...(format ? { format } : {}),
+			apiKey: "test-key",
+			reasoning,
+			onPayload: body => {
+				payload = body;
+				throw new Error("stop after payload capture");
+			},
+		},
+	);
+	await stream.result();
+	if (payload === undefined) throw new Error("Kimi request payload was not captured");
+	return payload;
+}
+
+async function captureKimiCachePayload(
+	format: KimiApiFormat,
+	options: Omit<KimiOptions, "apiKey" | "format" | "onPayload">,
+): Promise<Record<string, unknown>> {
+	let payload: unknown;
+	const stream = streamKimi(
+		K3_MODEL,
+		{
+			systemPrompt: [],
+			messages: [{ role: "user", content: "Reply OK", timestamp: 0 }],
+			tools: [],
+		},
+		{
+			...options,
+			apiKey: "test-key",
+			format,
+			onPayload: body => {
+				payload = body;
+				throw new Error("stop after payload capture");
+			},
+		},
+	);
+	await stream.result();
+	if (payload === undefined || typeof payload !== "object" || payload === null) {
+		throw new Error("Kimi cache-affinity payload was not captured");
+	}
+	return payload as Record<string, unknown>;
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("OpenAI/Anthropic compatibility shim cache affinity", () => {
+	it("forwards an explicit cache key through its OpenAI-compatible transport", async () => {
+		const cacheKey = "shared-shim-cache-key";
+		const cacheModel = buildModel({
+			id: "shim-cache-model",
+			name: "Shim Cache Model",
+			api: "openai-completions",
+			provider: "synthetic",
+			baseUrl: "https://shim-cache.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+			compat: { promptCacheSessionHeader: "x-grok-conv-id" },
+		} satisfies ModelSpec<"openai-completions">);
+		let requestHeaders: Headers | undefined;
+		const stream = streamOpenAIAnthropicShim(
+			cacheModel,
+			TITLE_CONTEXT,
+			{
+				apiKey: "test-key",
+				format: "openai",
+				cacheRetention: "none",
+				promptCacheKey: cacheKey,
+				fetch: async (_input, init) => {
+					requestHeaders = new Headers(init?.headers);
+					return new Response(JSON.stringify({ error: { message: "stop after header capture" } }), {
+						status: 400,
+						headers: { "content-type": "application/json" },
+					});
+				},
+			},
+			{
+				anthropicBaseUrl: "https://shim-cache.example",
+				defaultFormat: "openai",
+			},
+		);
+
+		await stream.result();
+
+		expect(requestHeaders?.get("x-grok-conv-id")).toBe(cacheKey);
+	});
+});
+
+describe("Kimi Code prompt cache affinity", () => {
+	it("sends the explicit cache key on both supported transports", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		const openaiPayload = await captureKimiCachePayload("openai", {
+			promptCacheKey: "stable-cache-key",
+			sessionId: "side-channel-session",
+		});
+		const anthropicPayload = await captureKimiCachePayload("anthropic", {
+			promptCacheKey: "stable-cache-key",
+			sessionId: "side-channel-session",
+		});
+
+		expect(openaiPayload.prompt_cache_key).toBe("stable-cache-key");
+		expect(anthropicPayload.metadata).toEqual({ user_id: "stable-cache-key" });
+	});
+
+	it("falls back to the provider session on both supported transports", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		const openaiPayload = await captureKimiCachePayload("openai", { sessionId: "stable-session" });
+		const anthropicPayload = await captureKimiCachePayload("anthropic", { sessionId: "stable-session" });
+
+		expect(openaiPayload.prompt_cache_key).toBe("stable-session");
+		expect(anthropicPayload.metadata).toEqual({ user_id: "stable-session" });
+	});
+
+	it("preserves an explicit Anthropic metadata user id", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		const payload = await captureKimiCachePayload("anthropic", {
+			metadata: { user_id: "caller-user-id" },
+			promptCacheKey: "automatic-cache-key",
+		});
+
+		expect(payload.metadata).toEqual({ user_id: "caller-user-id" });
+	});
+
+	it("falls back from an invalid Anthropic metadata user id", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		const payload = await captureKimiCachePayload("anthropic", {
+			metadata: { user_id: 0 },
+			promptCacheKey: "automatic-cache-key",
+		});
+
+		expect(payload.metadata).toEqual({ user_id: "automatic-cache-key" });
+	});
+
+	it("omits automatic affinity when prompt caching is disabled", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+		const options = {
+			cacheRetention: "none",
+			promptCacheKey: "disabled-cache-key",
+			sessionId: "disabled-session",
+		} as const;
+
+		const openaiPayload = await captureKimiCachePayload("openai", options);
+		const anthropicPayload = await captureKimiCachePayload("anthropic", options);
+
+		expect(openaiPayload).not.toHaveProperty("prompt_cache_key");
+		expect(anthropicPayload).not.toHaveProperty("metadata");
+	});
+});
+
+describe("Kimi K3 thinking transport", () => {
+	it("sends every live named effort through Kimi's native thinking object by default", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		for (const effort of [Effort.Low, Effort.High, Effort.Max]) {
+			const payload = await captureKimiPayload(K3_MODEL, effort);
+			expect(payload).toMatchObject({ thinking: { type: "enabled", effort } });
+			expect(payload).not.toHaveProperty("reasoning_effort");
+		}
+	});
+
+	it("uses adaptive named effort rather than a token budget for an explicit Anthropic override", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		const payload = await captureKimiPayload(K3_MODEL, Effort.Max, "anthropic");
+
+		expect(payload).toMatchObject({
+			thinking: { type: "adaptive" },
+			output_config: { effort: Effort.Max },
+		});
+		expect(payload).not.toHaveProperty("thinking.budget_tokens");
+	});
+
+	it("keeps the legacy K2 default on the Anthropic transport", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
+
+		const payload = await captureKimiPayload(model, Effort.High);
+
+		expect(payload).toMatchObject({ thinking: { type: "enabled" } });
+		expect(payload).toHaveProperty("thinking.budget_tokens");
+	});
+
+	it("clamps disabled thinking to the lowest effort for a mandatory-thinking K3", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		let payload: unknown;
+		const stream = streamSimple(
+			K3_MODEL,
+			{
+				systemPrompt: [],
+				messages: [{ role: "user", content: "Reply OK", timestamp: 0 }],
+				tools: [],
+			},
+			{
+				apiKey: "test-key",
+				disableReasoning: true,
+				onPayload: body => {
+					payload = body;
+					throw new Error("stop after payload capture");
+				},
+			},
+		);
+		await stream.result();
+
+		expect(payload).toMatchObject({ thinking: { type: "enabled", effort: Effort.Low } });
+		expect(payload).not.toMatchObject({ thinking: { type: "disabled" } });
+	});
+
+	it("downgrades named tool choice to required for K3 thinking", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+		const bundledModel = getBundledModel<"openai-completions">("kimi-code", "k3");
+		expect(bundledModel.compat.thinkingFormat).toBe("kimi");
+		let payload: unknown;
+		const capturePayload = async (
+			model: Model<"openai-completions">,
+			toolChoice: "required" | { type: "tool"; name: string },
+			tools = TITLE_CONTEXT.tools,
+		) => {
+			const stream = streamKimi(
+				model,
+				{ ...TITLE_CONTEXT, tools },
+				{
+					apiKey: "test-key",
+					format: "openai",
+					reasoning: Effort.Max,
+					toolChoice,
+					onPayload: body => {
+						payload = body;
+						throw new Error("stop after payload capture");
+					},
+				},
+			);
+			await stream.result();
+		};
+
+		for (const model of [K3_MODEL, bundledModel]) {
+			await capturePayload(model, { type: "tool", name: "set_title" });
+			expect(payload).toMatchObject({
+				thinking: { type: "enabled" },
+				tool_choice: "required",
+				tools: [{ type: "function", function: { name: "set_title" } }],
+			});
+
+			await capturePayload(model, "required");
+			expect(payload).toMatchObject({
+				thinking: { type: "enabled" },
+				tool_choice: "required",
+				tools: [{ type: "function", function: { name: "set_title" } }],
+			});
+		}
+
+		await capturePayload(K3_MODEL, { type: "tool", name: "missing_tool" }, []);
+		expect((payload as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+	});
 });
 
 describe("Kimi K2.7 Code thinking policy", () => {
@@ -63,7 +366,7 @@ describe("Kimi K2.7 Code thinking policy", () => {
 		expect(model.compat.disableReasoningOnForcedToolChoice).toBe(true);
 	});
 
-	it("keeps the forced tool choice and omits thinking on Kimi Code's Anthropic endpoint", async () => {
+	it("downgrades the forced tool choice on Kimi Code's Anthropic endpoint", async () => {
 		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");
 		let payload: MessageCreateParamsStreaming | undefined;
 		const stream = streamOpenAIAnthropicShim(
@@ -87,10 +390,45 @@ describe("Kimi K2.7 Code thinking policy", () => {
 
 		await stream.result();
 
-		// With reasoning disabled the Anthropic wire carries no thinking block,
-		// and the forced tool choice survives (thinking yields to the choice).
-		expect(payload?.thinking).toBeUndefined();
-		expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
+		// api.kimi.com keeps thinking enabled server-side no matter what the
+		// request carries: an omitted thinking block defaults to enabled, and an
+		// explicit disabled block is rejected (#3852). Either way a forced
+		// tool_choice 400s (`tool_choice 'specified' is incompatible with
+		// thinking enabled`), so the only viable path is downgrading the choice
+		// to auto while keeping the tool available — thinking stays on.
+		expect(payload?.tool_choice).toEqual({ type: "auto" });
+		expect(payload?.thinking).toBeDefined();
+	});
+
+	it("downgrades forced tool choice for every thinking-locked Kimi Code alias", async () => {
+		// The kimi-code catalog aliases the mandatory-thinking K2.7 Code family
+		// as `kimi-for-coding[-highspeed]` and K3 as `k3`; none match the native
+		// `kimi-k2.7-code*` id pattern, so each must be recognised explicitly.
+		for (const id of ["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]) {
+			const model = getBundledModel<"openai-completions">("kimi-code", id);
+			let payload: MessageCreateParamsStreaming | undefined;
+			const stream = streamOpenAIAnthropicShim(
+				model,
+				TITLE_CONTEXT,
+				{
+					apiKey: "test-key",
+					maxTokens: 1024,
+					toolChoice: { type: "tool", name: "set_title" },
+					onPayload: body => {
+						payload = body as MessageCreateParamsStreaming;
+						throw new Error("stop after payload capture");
+					},
+				},
+				{
+					anthropicBaseUrl: "https://api.kimi.com/coding",
+					defaultFormat: "anthropic",
+				},
+			);
+
+			await stream.result();
+
+			expect(payload?.tool_choice).toEqual({ type: "auto" });
+		}
 	});
 
 	it("uses the configured Kimi base URL for Anthropic requests", async () => {

@@ -601,6 +601,20 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Cannot read binary file");
 		});
 
+		it("does not route a legacy .xls through markit's unsupported-format error", async () => {
+			// `.xls` was advertised as convertible but markit only registers the
+			// OOXML `.xlsx` converter, so reading a legacy `.xls` surfaced
+			// "Unsupported format: .xls" instead of falling through to normal
+			// file handling (issue #5808). An OLE2 header (`D0 CF 11 E0`) is a
+			// binary blob, so the read tool now refuses it as binary.
+			const xlsFile = path.join(testDir, "legacy.xls");
+			fs.writeFileSync(xlsFile, Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+
+			const output = getTextOutput(await readTool.execute("test-call-legacy-xls", { path: xlsFile }));
+			expect(output).not.toContain("Unsupported format");
+			expect(output).toContain("Cannot read binary file");
+		});
+
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
 			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100" })).rejects.toThrow(
 				/Invalid selector ':-100'/,
@@ -734,6 +748,20 @@ describe("Coding Agent Tools", () => {
 			{
 				label: ".zip",
 				path: "fixture-subpath.zip",
+				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
+			},
+			{
+				// `.jar`/`.war` are ZIP containers under a different extension.
+				// Regression: archiveFormatFromPath / parseArchivePathCandidates
+				// previously excluded them, so `read lib.jar:member` failed with
+				// path-not-found (issue #5808).
+				label: ".jar",
+				path: "fixture-subpath.jar",
+				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
+			},
+			{
+				label: ".war",
+				path: "fixture-subpath.war",
 				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
 			},
 		]) {
@@ -1437,6 +1465,59 @@ function b() {
 			expect(deliveries[0]?.jobId).toBe(jobId);
 			expect(deliveries[0]?.text).toContain("done");
 			expect(updates).toEqual(updatesAtBackground);
+			await asyncJobManager.dispose();
+		});
+
+		it("backgrounds a running command when the steering signal fires mid-wait", async () => {
+			const asyncJobManager = new AsyncJobManager({});
+			const autoBackgroundBashTool = wrapToolWithMetaNotice(
+				new BashTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({
+							"bash.autoBackground.enabled": true,
+							// High threshold: only the steering signal can background this.
+							"bash.autoBackground.thresholdMs": 60_000,
+						}),
+						{
+							getSessionId: () => "test-session",
+							asyncJobManager,
+						},
+					),
+				),
+			);
+
+			const steering = new AbortController();
+			steering.abort();
+			const result = await autoBackgroundBashTool.execute(
+				"test-call-steer-background",
+				{ command: "printf 'start\\n'; sleep 0.05; printf 'done\\n'" },
+				undefined,
+				undefined,
+				{
+					...createTestToolContext([]),
+					toolCall: {
+						batchId: "batch-1",
+						index: 0,
+						total: 1,
+						toolCalls: [{ id: "test-call-steer-background", name: "bash" }],
+						steeringSignal: steering.signal,
+					},
+				},
+			);
+
+			// The steer backgrounds the command instead of killing it: the call
+			// returns a running job and the command finishes on its own.
+			expect(result.details?.async?.state).toBe("running");
+			expect(getTextOutput(result)).toContain("Backgrounded early to handle an incoming message");
+			const jobId = result.details?.async?.jobId;
+			if (!jobId) {
+				throw new Error("expected a steer-backgrounded job id");
+			}
+			const job = asyncJobManager.getJob(jobId);
+			expect(job?.status).toBe("running");
+			await job?.promise;
+			expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
 			await asyncJobManager.dispose();
 		});
 

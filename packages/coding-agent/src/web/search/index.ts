@@ -27,6 +27,7 @@ import {
 	type SearchProvider,
 	type SearchProviderCandidate,
 } from "./provider";
+import { applyQueryConstraints, parseSearchQuery } from "./query";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
 import type { SearchProviderId, SearchResponse } from "./types";
 import { SearchProviderError } from "./types";
@@ -57,9 +58,12 @@ function formatCount(label: string, count: number): string {
 	return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
-/** Format response for LLM consumption */
-function formatForLLM(response: SearchResponse): string {
+/** Format response for LLM consumption. `notes` lead the output (e.g. relaxed-constraint warnings). */
+function formatForLLM(response: SearchResponse, notes: readonly string[] = []): string {
 	const parts: string[] = [];
+	for (const note of notes) {
+		parts.push(`Note: ${note}`);
+	}
 
 	if (response.answer) {
 		parts.push(response.answer);
@@ -134,17 +138,14 @@ async function executeSearch(
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
-		const provider = await getSearchProvider(explicitProvider);
-		candidates = (await provider.isExplicitlyAvailable(authStorage))
-			? [{ id: explicitProvider, explicit: true }]
-			: resolveProviderCandidates("auto");
-	} else if (explicitProvider === "auto") {
-		// Explicit `--provider auto` bypasses the configured preferred provider
-		// for this invocation; exclusions still apply.
-		candidates = resolveProviderCandidates("auto");
+		candidates = [{ id: explicitProvider, explicit: true }];
 	} else {
+		// `--provider auto` and the default both walk the configured chain;
+		// exclusions still apply.
 		candidates = resolveProviderCandidates();
 	}
+
+	const parsedQuery = parseSearchQuery(params.query);
 
 	// Invariant across providers; read once and tolerate an uninitialized
 	// Settings singleton (e.g. `omp q ...` CLI path, unit tests) so the
@@ -175,12 +176,19 @@ async function executeSearch(
 			const available = candidate.explicit
 				? await provider.isExplicitlyAvailable(authStorage)
 				: await provider.isAvailable(authStorage);
-			if (!available) continue;
+			if (!available && !candidate.explicit) continue;
+			if (!available && candidate.explicit) {
+				throw new SearchProviderError(
+					provider.id,
+					`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
+				);
+			}
 			availableProviderCount++;
 			lastProvider = provider;
 
 			const response = await provider.search({
 				query: params.query,
+				parsedQuery,
 				limit: params.limit,
 				recency: params.recency,
 				systemPrompt: webSearchSystemPrompt,
@@ -195,15 +203,31 @@ async function executeSearch(
 				geminiModel,
 			});
 
-			if (!hasRenderableSearchContent(response)) {
+			// Lenient constraint pass over whatever the provider returned: enforce
+			// site:/inurl:/intitle:/filetype:/date directives the provider could
+			// not (or only partially) honor natively, relaxing any dimension that
+			// would wipe out every result. Citations/answer text stay untouched.
+			let finalResponse = response;
+			const constraintNotes: string[] = [];
+			if (parsedQuery.hasConstraints && response.sources.length > 0) {
+				const filtered = applyQueryConstraints(response.sources, parsedQuery);
+				if (filtered.sources.length !== response.sources.length) {
+					finalResponse = { ...response, sources: filtered.sources };
+				}
+				for (const label of filtered.dropped) {
+					constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
+				}
+			}
+
+			if (!hasRenderableSearchContent(finalResponse)) {
 				throw new SearchProviderError(provider.id, `${provider.label} returned no renderable search content.`, 204);
 			}
 
-			const text = formatForLLM(response);
+			const text = formatForLLM(finalResponse, constraintNotes);
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { response },
+				details: { response: finalResponse },
 			};
 		} catch (error) {
 			// Surface user-initiated cancellation immediately so the session sees
@@ -347,6 +371,6 @@ export function getSearchTools(): CustomTool<any, any>[] {
 	return [webSearchCustomTool];
 }
 
-export { getSearchProvider, setExcludedSearchProviders, setPreferredSearchProvider } from "./provider";
+export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
 export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
 export { isSearchProviderId, isSearchProviderPreference } from "./types";

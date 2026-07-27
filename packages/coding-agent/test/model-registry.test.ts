@@ -163,6 +163,11 @@ describe("ModelRegistry", () => {
 		return model?.compatConfig as OpenAICompat | undefined;
 	}
 
+	function getReplayUnsignedThinking(model: Model | undefined): boolean | undefined {
+		const compat = model?.compat;
+		return compat && "replayUnsignedThinking" in compat ? compat.replayUnsignedThinking : undefined;
+	}
+
 	/** Create a baseUrl-only override (no custom models) */
 	function overrideConfig(baseUrl: string, headers?: Record<string, string>) {
 		return { baseUrl, ...(headers && { headers }) };
@@ -268,6 +273,7 @@ describe("ModelRegistry", () => {
 		let anthropicHeadersOnly: ModelRegistry;
 		let anthropicAuthHeader: ModelRegistry;
 		let mixGoogleCustom: ModelRegistry;
+		let openaiProxy: ModelRegistry;
 		let xaiModelScopedHeaders: ModelRegistry;
 		let otherXaiModelId: string;
 		beforeAll(() => {
@@ -301,6 +307,9 @@ describe("ModelRegistry", () => {
 					),
 				},
 			});
+			openaiProxy = readonlyRegistry({
+				providers: { openai: overrideConfig("https://openai-proxy.example.com/v1") },
+			});
 			const otherXaiModel = sharedBuiltin
 				.getAll()
 				.find(model => model.provider === "xai" && model.id !== "grok-4.3");
@@ -331,6 +340,13 @@ describe("ModelRegistry", () => {
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://my-proxy.example.com/v1");
 			}
+		});
+
+		test("rerouted bundled OpenAI models recompute inferred computer capability", () => {
+			const model = openaiProxy.find("openai", "gpt-5.4");
+
+			expect(model?.baseUrl).toBe("https://openai-proxy.example.com/v1");
+			expect(model?.supportsComputerUse).toBe(false);
 		});
 
 		test("overriding headers merges with model headers", () => {
@@ -624,6 +640,7 @@ describe("ModelRegistry", () => {
 						api: "anthropic-messages",
 						compat: {
 							supportsEagerToolInputStreaming: true,
+							allowAnthropicHeaderOverrides: true,
 						},
 						models: [
 							{
@@ -715,6 +732,32 @@ describe("ModelRegistry", () => {
 			}
 		});
 
+		test("provider-level Anthropic compat survives dynamic discovery refresh", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					compat: { replayUnsignedThinking: false },
+				},
+			});
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "https://models.dev/api.json") return Response.json({});
+				if (url === "https://proxy.example/v1/models") {
+					return Response.json({
+						data: [{ id: "claude-sonnet-5", display_name: "Claude Sonnet 5" }],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
+
+			await registry.refreshProvider("anthropic", "online");
+
+			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
+		});
+
 		test("provider-level compat applies to custom models", () => {
 			const model = customCompat.find("demo", "demo-model");
 			const compat = getOpenAICompat(model);
@@ -725,7 +768,10 @@ describe("ModelRegistry", () => {
 
 		test("custom Anthropic providers can opt into eager tool input streaming", () => {
 			const model = customAnthropicCompat.find("anthropic-proxy", "claude-haiku-4.5");
-			expect(model?.compat).toMatchObject({ supportsEagerToolInputStreaming: true });
+			expect(model?.compat).toMatchObject({
+				supportsEagerToolInputStreaming: true,
+				allowAnthropicHeaderOverrides: true,
+			});
 		});
 
 		test("custom Responses providers can disable original image detail", () => {

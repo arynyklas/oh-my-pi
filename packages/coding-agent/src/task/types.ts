@@ -2,7 +2,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type BaseType, type } from "arktype";
 import type { AgentSessionEvent } from "../session/agent-session";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
@@ -106,11 +106,17 @@ export interface SubagentLifecyclePayload {
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
 export const LABEL_MAX = 80;
 
+// Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
+const outputSchemaInputSchema = type("object | boolean | string | null");
+// Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
+const effortRule = '"lo" | "med" | "hi"' as const;
+
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
-	"outputSchema?": "unknown",
+	"effort?": effortRule,
+	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
@@ -118,7 +124,8 @@ const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
-	"outputSchema?": "unknown",
+	"effort?": effortRule,
+	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
 	"+": "delete",
@@ -132,6 +139,8 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
+	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -144,7 +153,8 @@ export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
-	"outputSchema?": "unknown",
+	"effort?": effortRule,
+	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
 	"+": "delete",
@@ -153,7 +163,8 @@ const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
-	"outputSchema?": "unknown",
+	"effort?": effortRule,
+	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
@@ -197,7 +208,8 @@ function createTaskSchema(options: {
 				"name?": "string",
 				agent,
 				task: "string",
-				"outputSchema?": "unknown",
+				"effort?": effortRule,
+				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				"isolated?": "boolean",
 				"+": "delete",
@@ -212,7 +224,8 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
-			"outputSchema?": "unknown",
+			"effort?": effortRule,
+			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"+": "delete",
 		});
@@ -227,7 +240,8 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
-			"outputSchema?": "unknown",
+			"effort?": effortRule,
+			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"isolated?": "boolean",
 			"+": "delete",
@@ -237,7 +251,8 @@ function createTaskSchema(options: {
 		"name?": "string",
 		agent,
 		task: "string",
-		"outputSchema?": "unknown",
+		"effort?": effortRule,
+		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		"+": "delete",
 	});
@@ -280,6 +295,8 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
+	effort?: TaskEffort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -416,6 +433,8 @@ export interface AgentProgress {
 	modelOverride?: string | string[];
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
+	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
+	resolvedModelIsFallback?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -483,6 +502,8 @@ export interface SingleResult {
 	modelOverride?: string | string[];
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
 	resolvedModel?: string;
+	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
+	resolvedModelIsFallback?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;

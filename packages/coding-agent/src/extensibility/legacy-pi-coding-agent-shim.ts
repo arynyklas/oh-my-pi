@@ -12,12 +12,21 @@
  * the same module identity as a direct `@oh-my-pi/pi-coding-agent` import.
  */
 
-import * as fs from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TSchema } from "@oh-my-pi/pi-ai";
-import { Text } from "@oh-my-pi/pi-tui";
-import { getAgentDir, getProjectDir, parseFrontmatter as parseOmpFrontmatter } from "@oh-my-pi/pi-utils";
+import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
+import {
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	isCompiledBinary,
+	parseFrontmatter as parseOmpFrontmatter,
+} from "@oh-my-pi/pi-utils";
+import { getPackageDir as getOmpPackageDir } from "../config";
+import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -365,6 +374,11 @@ async function executeLegacyBashOperations(
 	}
 }
 
+/** Format the active shortcut for legacy extensions that render keybinding hints. */
+export function keyText(action: Keybinding): string {
+	return formatKeyHints(getKeybindings().getKeys(action));
+}
+
 /** Parse frontmatter using the historical Pi package-root helper. */
 export interface ParsedFrontmatter<T extends Record<string, unknown> = Record<string, unknown>> {
 	frontmatter: T;
@@ -606,16 +620,16 @@ export function createLsToolDefinition(cwd: string, options?: LsToolOptions): To
 			const ops = options?.operations;
 			const exists = ops
 				? await ops.exists(absolutePath)
-				: await fs.stat(absolutePath).then(
+				: await fs.promises.stat(absolutePath).then(
 						() => true,
 						() => false,
 					);
 			if (!exists) throw new Error(`Path not found: ${absolutePath}`);
-			const stat = ops ? await ops.stat(absolutePath) : await fs.stat(absolutePath);
+			const stat = ops ? await ops.stat(absolutePath) : await fs.promises.stat(absolutePath);
 			if (!stat.isDirectory()) {
 				return { content: [{ type: "text", text: rawPath }] };
 			}
-			const entries = ops ? await ops.readdir(absolutePath) : await fs.readdir(absolutePath);
+			const entries = ops ? await ops.readdir(absolutePath) : await fs.promises.readdir(absolutePath);
 			const sorted = [...entries].sort((a, b) => a.localeCompare(b));
 			const limited = sorted.slice(0, limit);
 			const output = limited.join("\n");
@@ -847,6 +861,11 @@ export interface ResourceLoader {
 	readonly __ompLegacyPiLoader?: true;
 }
 
+/** Create a pre-initialization runtime for legacy extension resource loaders. */
+export function createExtensionRuntime(): ExtensionRuntime {
+	return new ExtensionRuntime();
+}
+
 /**
  * Loader-owned inputs that {@link createAgentSession} needs regardless of
  * whether the caller provided extra options. `cwd`/`agentDir` fall back to
@@ -880,7 +899,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	readonly __ompLegacyPiLoader = true as const;
 	#state: ResolvedLoaderState;
 	#options: DefaultResourceLoaderOptions;
-	#extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: new ExtensionRuntime() };
+	#extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	#skills: Skill[] = [];
 	#skillDiagnostics: ResourceDiagnostic[] = [];
 	#prompts: PromptTemplate[] = [];
@@ -1029,7 +1048,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const { cwd, noExtensions, additionalExtensionPaths, extensionFactories, eventBus } = this.#state;
 
 		if (noExtensions && additionalExtensionPaths.length === 0 && extensionFactories.length === 0) {
-			return { extensions: [], errors: [], runtime: new ExtensionRuntime() };
+			return { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		}
 
 		const paths = await discoverSessionExtensionPaths(
@@ -1100,7 +1119,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				: path.resolve(this.#state.cwd, resourcePath);
 			const files: string[] = [];
 			try {
-				const stat = await fs.stat(resolvedPath);
+				const stat = await fs.promises.stat(resolvedPath);
 				if (stat.isDirectory()) {
 					const glob = new Bun.Glob("**/*.md");
 					for await (const entry of glob.scan({ cwd: resolvedPath, absolute: false, onlyFiles: true })) {
@@ -1288,6 +1307,78 @@ export async function createAgentSession(
 	return ompCreateAgentSession(forwarded);
 }
 
+/**
+ * Synchronous auth storage surface retained for legacy extensions.
+ *
+ * Modern OMP auth storage is asynchronous, while older provider extensions
+ * call `AuthStorage.create().get()` during module initialization.
+ */
+export class AuthStorage {
+	constructor() {
+		fs.mkdirSync(path.dirname(getAgentDbPath()), { recursive: true, mode: 0o700 });
+	}
+
+	static create(): AuthStorage {
+		return new AuthStorage();
+	}
+
+	get(provider: string): AuthCredential | undefined {
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		try {
+			return store.listAuthCredentials(provider)[0]?.credential;
+		} finally {
+			store.close();
+		}
+	}
+
+	set(provider: string, credential: AuthCredential): void {
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		try {
+			store.upsertAuthCredentialForProvider(provider, credential);
+		} finally {
+			store.close();
+		}
+	}
+}
+
+/** Read the first active credential for a legacy extension provider. */
+export function readStoredCredential(provider: string): AuthCredential | undefined {
+	const storage = AuthStorage.create();
+	return storage.get(provider);
+}
+
+// Pi SDK path helpers. `export * from "../index"` above only forwards
+// `getAgentDir`; `getProjectDir` (a `@oh-my-pi/pi-utils` helper) and
+// `getPackageDir` are absent from that barrel, so legacy extensions importing
+// either fail Bun's static export check during validation (issue #5968).
+export { getProjectDir } from "@oh-my-pi/pi-utils";
+
+/**
+ * Coding-agent package install directory, matching pi's string-valued
+ * `getPackageDir()` contract (extensions do `path.join(getPackageDir(), ...)`
+ * to auto-allow bundled docs/resources).
+ *
+ * omp's canonical `getPackageDir()` (`../config`) returns `undefined` inside a
+ * `bun --compile` binary — `import.meta.dir` is `/$bunfs/root` and no owning
+ * `package.json` exists (issue #1423). Returning `undefined` there would crash
+ * every legacy `path.join(getPackageDir(), ...)` at runtime in the shipped
+ * binary, the primary distribution. So fall back to the executable's own
+ * directory in compiled mode, where the binary *is* the install root. The
+ * `PI_PACKAGE_DIR` override and dev/source/npm-dist walk-up still win via the
+ * canonical helper.
+ */
+export function getPackageDir(): string {
+	return getOmpPackageDir() ?? (isCompiledBinary() ? path.dirname(process.execPath) : process.cwd());
+}
+
+// Legacy pi's `@earendil-works/pi-coding-agent` re-exported `estimateTokens`
+// from its package root (via `./core/compaction/index.ts`). In omp it lives in
+// `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
+// not forward it, so legacy extensions importing it fail Bun's static export
+// check during validation (issue #6583).
+export { estimateTokens } from "@oh-my-pi/pi-agent-core/compaction";
+
 export * from "../index";
 export { formatBytes as formatSize } from "../tools/render-utils";
+export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./typebox";

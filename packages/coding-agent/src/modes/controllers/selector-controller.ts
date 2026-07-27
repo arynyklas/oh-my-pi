@@ -1,4 +1,4 @@
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { AuthGatewayAdminClient } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -43,6 +43,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -53,6 +54,7 @@ import {
 	type ResetUsageAccount,
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
+import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -60,14 +62,15 @@ import {
 	parseConfiguredThinkingLevel,
 } from "../../thinking";
 import {
-	isImageProviderPreference,
 	isSearchProviderId,
-	isSearchProviderPreference,
 	setExcludedSearchProviders,
-	setPreferredImageProvider,
-	setPreferredSearchProvider,
+	setImageProviderOrder,
+	setSearchProviderOrder,
+	type ToolSession,
 } from "../../tools";
+import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask";
 import { shortenPath } from "../../tools/render-utils";
+import { ToolAbortError } from "../../tools/tool-errors";
 import { copyToClipboard } from "../../utils/clipboard";
 import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -86,6 +89,7 @@ import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
+import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
@@ -442,6 +446,11 @@ export class SelectorController {
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
+			case "advisor.enabled":
+				this.ctx.session.setAdvisorEnabled(value as boolean);
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+				break;
 			case "steeringMode":
 				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
 				break;
@@ -462,19 +471,36 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply personality: ${err}`);
 				});
 				break;
+			case "tools.xdevDocs":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
+				});
+				break;
+			case "memory.backend":
+				void this.ctx.session.applyMemoryBackend().catch(err => {
+					this.ctx.showError(`Failed to apply memory backend: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
 
 			// Settings with UI side effects
-			case "showImages":
+			case "terminal.showImages":
+			case "showImages": {
+				const visible = value as boolean;
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof ToolExecutionComponent) {
-						child.setShowImages(value as boolean);
+						child.setShowImages(visible);
+					} else if (child instanceof AssistantMessageComponent) {
+						child.setImagesVisible(visible);
 					}
 				}
+				if (!visible) this.ctx.ui.clearInlineImages();
+				this.ctx.ui.resetDisplay();
 				break;
+			}
 			case "hideThinkingBlock":
 				this.ctx.hideThinkingBlock = value as boolean;
 				for (const child of this.ctx.chatContainer.children) {
@@ -625,9 +651,9 @@ export class SelectorController {
 			}
 
 			// Provider settings - update runtime preferences
-			case "providers.webSearch":
-				if (typeof value === "string" && isSearchProviderPreference(value)) {
-					setPreferredSearchProvider(value);
+			case "providers.webSearchOrder":
+				if (Array.isArray(value)) {
+					setSearchProviderOrder(value.filter(isSearchProviderId));
 				}
 				break;
 			case "providers.webSearchExclude":
@@ -635,9 +661,9 @@ export class SelectorController {
 					setExcludedSearchProviders(value.filter(isSearchProviderId));
 				}
 				break;
-			case "providers.image":
-				if (isImageProviderPreference(value)) {
-					setPreferredImageProvider(value);
+			case "providers.imageOrder":
+				if (Array.isArray(value)) {
+					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 
@@ -1156,24 +1182,36 @@ export class SelectorController {
 				tree,
 				realLeafId,
 				this.ctx.ui.terminal.rows,
-				async entryId => {
-					// Selecting the current leaf is a no-op (already there)
+				async (entryId, options) => {
+					// Selecting the current leaf is normally a no-op (already there) —
+					// unless it's an `ask` toolResult, in which case the re-answer flow
+					// must still be allowed to reopen the picker even though the leaf
+					// doesn't move (chatgpt-codex review on #5895).
 					if (entryId === realLeafId) {
-						done();
-						this.ctx.showStatus("Already at this point");
-						return;
+						const currentEntry = this.ctx.sessionManager.getEntry(entryId);
+						const currentIsAskResult =
+							currentEntry?.type === "message" &&
+							currentEntry.message.role === "toolResult" &&
+							currentEntry.message.toolName === "ask";
+						if (!currentIsAskResult) {
+							done();
+							this.ctx.showStatus("Already at this point");
+							return;
+						}
 					}
 
 					// Ask about summarization
 					done(); // Close selector first
 
-					// Loop until user makes a complete choice or cancels to tree
-					let wantsSummary = false;
+					// Loop until user makes a complete choice or cancels to tree.
+					// Shift+Enter in the tree selector pre-answers "Summarize" and
+					// skips the prompt entirely.
+					let wantsSummary = options.summarize;
 					let customInstructions: string | undefined;
 
 					const branchSummariesEnabled = settings.get("branchSummary.enabled");
 
-					while (branchSummariesEnabled) {
+					while (!wantsSummary && branchSummariesEnabled) {
 						const summaryChoice = await this.ctx.showHookSelector("Summarize branch?", [
 							"No summary",
 							"Summarize",
@@ -1221,10 +1259,28 @@ export class SelectorController {
 					}
 
 					try {
-						const result = await this.ctx.session.navigateTree(entryId, {
+						let result = await this.ctx.session.navigateTree(entryId, {
 							summarize: wantsSummary,
 							customInstructions,
+							allowAskReopen: true,
 						});
+
+						// Selecting an `ask` toolResult doesn't land the leaf directly —
+						// re-open the picker with the original questions first, then
+						// complete the navigation as a new sibling branch (issue #5642).
+						if (result.reopenAsk) {
+							const reanswer = await this.#reanswerAsk(result.reopenAsk.questions);
+							if (!reanswer) {
+								this.ctx.showStatus("Re-answer cancelled");
+								return;
+							}
+							result = await this.ctx.session.navigateTree(entryId, {
+								summarize: wantsSummary,
+								customInstructions,
+								allowAskReopen: true,
+								reanswerAskResult: reanswer,
+							});
+						}
 
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector
@@ -1245,6 +1301,15 @@ export class SelectorController {
 							this.ctx.editor.setText(result.editorText);
 						}
 						this.ctx.showStatus("Navigated to selected point");
+
+						// Re-answering a past `ask` commits a new sibling answer but,
+						// unlike a live `ask`, leaves the agent idle. Resume it now —
+						// after the transcript rebuild above — so the model consumes the
+						// new answer without the resumed turn rendering against the stale
+						// pre-rebuild UI (issue #6483).
+						if (result.askReanswerCommitted) {
+							this.ctx.session.resumeAfterAskReanswer();
+						}
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					} finally {
@@ -1267,6 +1332,51 @@ export class SelectorController {
 			);
 			return { component: selector, focus: selector };
 		});
+	}
+
+	/**
+	 * Re-open the `ask` picker with the original `questions` (issue #5642):
+	 * runs a standalone `AskTool.execute()` outside a normal agent turn,
+	 * reusing the same picker/dialog primitives a live `ask` tool call gets.
+	 * Returns `undefined` when the user cancels — mirrors `navigateTree`'s
+	 * cancellation contract instead of throwing.
+	 */
+	async #reanswerAsk(questions: AskToolInput["questions"]): Promise<AgentToolResult<AskToolDetails> | undefined> {
+		const uiContext = this.ctx.getToolUIContext();
+		if (!uiContext) {
+			this.ctx.showError("Ask tool UI is not ready");
+			return undefined;
+		}
+		const toolSession: ToolSession = {
+			cwd: this.ctx.sessionManager.getCwd(),
+			hasUI: true,
+			settings: this.ctx.settings,
+			getSessionFile: () => this.ctx.sessionManager.getSessionFile() ?? null,
+			getSessionSpawns: () => null,
+			getPlanModeState: () => this.ctx.session.getPlanModeState(),
+		};
+		const askTool = new AskTool(toolSession);
+		const context = this.ctx.session.buildAskReanswerContext(uiContext);
+		let result: AgentToolResult<AskToolDetails>;
+		try {
+			result = await askTool.execute("tree-reanswer", { questions }, undefined, undefined, context);
+		} catch (error) {
+			if (error instanceof ToolAbortError) return undefined;
+			throw error;
+		}
+		// The rich ask dialog can race a collab guest choosing "Chat about this"
+		// (`AskTool`'s `chatRedirect` result); that's meaningful inside a live
+		// agent turn, where the model sees the redirect and starts a
+		// conversation, but this standalone re-answer has no turn to hand it
+		// to — completing the navigation with it would silently drop the
+		// user's intent to chat (roboomp review on #5895).
+		if (result.details?.chatRedirect) {
+			this.ctx.showError(
+				"Chat about this isn't available when re-answering from the tree — pick an option or type a custom answer instead.",
+			);
+			return undefined;
+		}
+		return result;
 	}
 
 	async showSessionSelector(): Promise<void> {
@@ -1502,7 +1612,14 @@ export class SelectorController {
 				// focus (#5339).
 				onManualCodeInput: useManualInput ? () => dialog.showManualInput(MANUAL_LOGIN_PROMPT) : undefined,
 			});
-			this.ctx.session.modelRegistry.refreshInBackground();
+			// Scope the post-login refresh to the just-authenticated provider with an
+			// `online` strategy: the default all-provider `online-if-uncached` reuses
+			// a fresh authoritative cache row (e.g. an empty result fetched before
+			// login), so newly persisted credentials would never re-run discovery and
+			// models would stay unavailable in-session (#5780). Unrelated providers
+			// are left untouched. `refreshProvider` swallows discovery failures, so
+			// awaiting cannot reject the login.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -1542,7 +1659,12 @@ export class SelectorController {
 				return;
 			}
 
-			await this.ctx.session.modelRegistry.refresh();
+			// Provider-scoped online refresh so the removed credential's stale
+			// endpoint/deployment models are invalidated deterministically; the
+			// default all-provider `online-if-uncached` would reuse the fresh
+			// authoritative cache row and keep showing models the credential
+			// unlocked (#5780). Other providers are left untouched.
+			await this.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			const block = new TranscriptBlock();
 			block.addChild(
 				new Text(
@@ -1658,6 +1780,65 @@ export class SelectorController {
 					requestRender: () => {
 						this.ctx.ui.requestRender();
 					},
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	async showSessionPinSelector(): Promise<void> {
+		const session = this.ctx.session;
+		if (session.isStreaming) {
+			this.ctx.showStatus("Cannot pin an account while the session is streaming.");
+			return;
+		}
+		this.ctx.showStatus("Loading provider accounts…", { dim: true });
+		let accountList: SessionOAuthAccountList | undefined;
+		try {
+			accountList = await session.listCurrentProviderOAuthAccounts();
+		} catch (error) {
+			this.ctx.showError(
+				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		if (!accountList) {
+			this.ctx.showStatus("Select a model before pinning a provider account.");
+			return;
+		}
+		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
+		const providerName = provider?.name ?? accountList.provider;
+		const accounts = toSessionPinAccounts(accountList.accounts);
+		if (accounts.length === 0) {
+			const source = session.modelRegistry.authStorage.describeCredentialSource(
+				accountList.provider,
+				session.sessionId,
+			);
+			this.ctx.showStatus(
+				source
+					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
+					: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+			);
+			return;
+		}
+
+		this.showSelector(done => {
+			const selector = new SessionAccountSelectorComponent(
+				providerName,
+				accounts,
+				account => {
+					done();
+					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
+						return;
+					}
+					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
 				},
 			);
 			return { component: selector, focus: selector };

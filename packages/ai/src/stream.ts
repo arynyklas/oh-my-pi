@@ -73,6 +73,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
@@ -775,6 +776,7 @@ function streamDispatch<TApi extends Api>(
 		...debugOptions,
 		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
 	} as OptionsForApi<TApi>;
+	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -1012,6 +1014,7 @@ export function streamSimple<TApi extends Api>(
 		...debugOptions,
 		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
 	} as SimpleStreamOptions;
+
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
@@ -1178,12 +1181,17 @@ export function streamSimple<TApi extends Api>(
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
 	if (isKimiModel(model)) {
-		// Pass raw SimpleStreamOptions - streamKimi handles mapping internally
-		return withProviderInFlightLimit(model, requestOptions, () =>
+		// streamKimi handles openai/anthropic format mapping internally, but the
+		// mandatory-reasoning clamp is a request-shaping concern owned here: K3's
+		// `supports_thinking_type: "only"` endpoint rejects disabled/omitted
+		// thinking, so clamp disabled requests to the lowest supported effort
+		// (mirrors the mapOptionsForApi path every other provider takes).
+		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
+		return withProviderInFlightLimit(model, kimiOptions, () =>
 			streamKimi(model as Model<"openai-completions">, context, {
-				...requestOptions,
+				...kimiOptions,
 				apiKey,
-				format: requestOptions?.kimiApiFormat ?? "anthropic",
+				format: kimiOptions?.kimiApiFormat,
 			}),
 		);
 	}
@@ -1396,6 +1404,41 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	return { ...options, reasoning: floor, disableReasoning: undefined };
 }
 
+function supportsExplicitOpenAIResponsesPromptCache(compat: unknown): boolean {
+	return (
+		typeof compat === "object" &&
+		compat !== null &&
+		"supportsPromptCacheBreakpoints" in compat &&
+		compat.supportsPromptCacheBreakpoints === true
+	);
+}
+
+function isOpenAIResponsesPromptCacheSurface<TApi extends Api>(model: Model<TApi>): boolean {
+	return (
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		(model.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0")
+	);
+}
+
+function assertExplicitOpenAIResponsesPromptCacheSupport<TApi extends Api>(
+	model: Model<TApi>,
+	options?: StreamOptions,
+): void {
+	if (
+		model.transport === "pi-native" ||
+		resolveCacheRetention(options?.cacheRetention) === "none" ||
+		options?.promptCache?.mode !== "explicit" ||
+		!isOpenAIResponsesPromptCacheSurface(model) ||
+		supportsExplicitOpenAIResponsesPromptCache(model.compat)
+	) {
+		return;
+	}
+	throw new AIError.ConfigurationError(
+		`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; enable compat.supportsPromptCacheBreakpoints only for a compatible endpoint.`,
+	);
+}
+
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	rawOptions?: SimpleStreamOptions,
@@ -1422,6 +1465,7 @@ function mapOptionsForApi<TApi extends Api>(
 		promptCacheKey: options?.promptCacheKey,
 		streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
+		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		maxInFlightRequests: options?.maxInFlightRequests,
 		onPayload: options?.onPayload,
@@ -1434,9 +1478,13 @@ function mapOptionsForApi<TApi extends Api>(
 
 	switch (model.api) {
 		case "anthropic-messages": {
-			// Explicitly disable thinking when reasoning is not specified or model doesn't support it
+			// Explicitly disable thinking when reasoning is not specified, the caller
+			// disabled it, or the model doesn't support it. `disableReasoning` is a
+			// SimpleStreamOptions flag that never reaches AnthropicOptions on its own,
+			// so it must be folded into `thinkingEnabled` here (mandatory-reasoning
+			// models already clamp it away in normalizeMandatoryReasoningOptions).
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning) {
+			if (!reasoning || !model.reasoning || options?.disableReasoning) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -1570,6 +1618,8 @@ function mapOptionsForApi<TApi extends Api>(
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 					disableReasoning: options?.disableReasoning,
 					textVerbosity: options?.textVerbosity,
+					promptCache: options?.promptCache,
+					statefulResponses: options?.statefulResponses,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -1580,6 +1630,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
+				promptCache: options?.promptCache,
 			});
 		}
 
@@ -1592,6 +1643,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
+				promptCache: options?.promptCache,
 			});
 
 		case "openai-responses":
@@ -1605,6 +1657,8 @@ function mapOptionsForApi<TApi extends Api>(
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				disableReasoning: options?.disableReasoning,
 				textVerbosity: options?.textVerbosity,
+				promptCache: options?.promptCache,
+				statefulResponses: options?.statefulResponses,
 			});
 
 		case "azure-openai-responses":
@@ -1614,6 +1668,8 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+				promptCache: options?.promptCache,
+				statefulResponses: options?.statefulResponses,
 			});
 
 		case "openai-codex-responses":
@@ -1638,6 +1694,7 @@ function mapOptionsForApi<TApi extends Api>(
 					serviceTier: options?.serviceTier,
 					thinking: { enabled: false },
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
+					cachedContent: options?.cachedContent,
 				});
 			}
 
@@ -1656,10 +1713,11 @@ function mapOptionsForApi<TApi extends Api>(
 					},
 					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
+					cachedContent: options?.cachedContent,
 				});
 			}
 
-			return castApi<"google-gemini-cli">({
+			return castApi<"google-generative-ai">({
 				...base,
 				thinking: {
 					enabled: true,
@@ -1667,6 +1725,7 @@ function mapOptionsForApi<TApi extends Api>(
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
+				cachedContent: options?.cachedContent,
 			});
 		}
 
@@ -1740,6 +1799,7 @@ function mapOptionsForApi<TApi extends Api>(
 					serviceTier: options?.serviceTier,
 					thinking: { enabled: false },
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
+					cachedContent: options?.cachedContent,
 				});
 			}
 
@@ -1757,6 +1817,7 @@ function mapOptionsForApi<TApi extends Api>(
 					},
 					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
+					cachedContent: options?.cachedContent,
 				});
 			}
 
@@ -1769,6 +1830,7 @@ function mapOptionsForApi<TApi extends Api>(
 				},
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
+				cachedContent: options?.cachedContent,
 			});
 		}
 

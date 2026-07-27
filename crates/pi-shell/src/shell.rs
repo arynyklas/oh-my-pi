@@ -623,6 +623,7 @@ async fn create_session_for_run(
 		shell.register_builtin("cat", crate::coreutils::cat_builtin());
 		shell.register_builtin("uniq", crate::coreutils::uniq_builtin());
 		shell.register_builtin("base64", crate::coreutils::base64_builtin());
+		shell.register_builtin("cmp", crate::coreutils::cmp_builtin());
 		shell.register_builtin("md5sum", crate::coreutils::md5sum_builtin());
 		shell.register_builtin("sha1sum", crate::coreutils::sha1sum_builtin());
 		shell.register_builtin("sha224sum", crate::coreutils::sha224sum_builtin());
@@ -657,6 +658,14 @@ async fn create_session_for_run(
 		shell.register_builtin("sed", crate::coreutils::sed_builtin());
 		shell.register_builtin("xargs", crate::coreutils::xargs_builtin());
 		shell.register_builtin("jq", crate::coreutils::jq_builtin());
+		// moreutils-inspired in-process builtins (see crate::moreutils).
+		shell.register_builtin("ts", crate::coreutils::ts_builtin());
+		shell.register_builtin("sponge", crate::coreutils::sponge_builtin());
+		shell.register_builtin("ifne", crate::coreutils::ifne_builtin());
+		shell.register_builtin("isutf8", crate::coreutils::isutf8_builtin());
+		shell.register_builtin("combine", crate::coreutils::combine_builtin());
+		#[cfg(unix)]
+		shell.register_builtin("errno", crate::coreutils::errno_builtin());
 		if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE") {
 			if !uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN") {
 				shell.register_builtin("rm", crate::coreutils::rm_builtin());
@@ -2167,6 +2176,89 @@ fn uutils_env_disabled(config: &ShellConfig, key: &str) -> bool {
 mod tests {
 	use super::*;
 
+	/// `cmp` remains available with no executable search path, proving the shell
+	/// dispatches the in-process builtin rather than a platform binary.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cmp_is_registered_as_an_in_process_builtin() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
+		std::fs::write(root.join("a"), b"same").expect("write a");
+		std::fs::write(root.join("b"), b"same").expect("write b");
+		std::fs::write(root.join("c"), b"different").expect("write c");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let equal = session
+			.shell
+			.run_string("PATH=/definitely-missing cmp -s a b", &source_info, &params)
+			.await
+			.expect("equal cmp");
+		assert_eq!(exit_code(&equal), 0);
+
+		let different = session
+			.shell
+			.run_string("PATH=/definitely-missing cmp -s a c", &source_info, &params)
+			.await
+			.expect("different cmp");
+		assert_eq!(exit_code(&different), 1);
+	}
+
+	/// The moreutils-style builtins (`ts`, `sponge`, `isutf8`, `combine`,
+	/// `ifne`, `errno`) dispatch in-process: the script runs with no usable
+	/// executable search path, and the `ts | sponge` pipeline must land its
+	/// output in the shell's working directory.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn moreutils_builtins_are_registered_in_process() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let script = "PATH=/definitely-missing\necho x | ts -s '%H:%M:%S' | sponge out || exit \
+		              10\nisutf8 out || exit 11\necho x | combine - and out || exit 12\nifne \
+		              /definitely-missing/tool || exit 13";
+		let result = session
+			.shell
+			.run_string(script, &source_info, &params)
+			.await
+			.expect("moreutils script");
+		assert_eq!(exit_code(&result), 0);
+
+		// `ts -s` stamps the first line with zero elapsed time: `HH:MM:SS x`.
+		let out = std::fs::read_to_string(root.join("out")).expect("sponge output");
+		assert!(out.len() == 11 && out.ends_with(" x\n"), "unexpected ts+sponge output: {out:?}");
+
+		#[cfg(unix)]
+		{
+			let errno = session
+				.shell
+				.run_string("errno ENOENT", &source_info, &params)
+				.await
+				.expect("errno lookup");
+			assert_eq!(exit_code(&errno), 0);
+		}
+	}
+
 	/// The uutils-backed `mkdir` builtin must (1) create directories under the
 	/// shell's working directory rather than the host process cwd, (2) route
 	/// `-v` output through the command's (here redirected) stdout, and (3)
@@ -2208,6 +2300,50 @@ mod tests {
 		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
 
 		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Regression test for issue #5819: `mkdir -p ~/proj/{a,b}` must create both
+	/// `a` and `b` under `$HOME/proj`. Brace expansion runs before tilde
+	/// expansion and previously left every element after the first with a
+	/// literal `~`, so `b` was created as `./~/proj/b` in the shell cwd instead.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_mkdir_expands_tilde_for_every_brace_element() {
+		let base = std::env::temp_dir().join(format!("pi-mkdir-brace-{}", std::process::id()));
+		let home = base.join("home");
+		let cwd = base.join("cwd");
+		let _ = std::fs::remove_dir_all(&base);
+		std::fs::create_dir_all(&home).expect("home dir");
+		std::fs::create_dir_all(&cwd).expect("cwd dir");
+		let cwd_str = cwd.to_str().expect("utf8 cwd path");
+
+		let mut env = HashMap::new();
+		env.insert("HOME".to_string(), home.to_string_lossy().to_string());
+		let config =
+			ShellConfig { session_env: Some(env), snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(cwd_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+
+		let source_info = SourceInfo::from("pi-natives:test");
+		let exec = session
+			.shell
+			.run_string("mkdir -p ~/proj/{a,b}", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert!(matches!(exec.exit_code, ExecutionExitCode::Success), "exit {}", exit_code(&exec));
+
+		// Both elements' tildes expanded: dirs land under $HOME/proj.
+		assert!(home.join("proj/a").is_dir(), "~/proj/a not created under HOME");
+		assert!(home.join("proj/b").is_dir(), "~/proj/b not created under HOME");
+		// The buggy path created a literal `~` tree in the shell cwd.
+		assert!(!cwd.join("~").exists(), "literal ~ tree leaked into cwd");
+		assert!(!cwd.join("a").exists(), "unexpanded element leaked into cwd");
+
+		let _ = std::fs::remove_dir_all(&base);
 	}
 
 	/// `mkdir --help` and an invalid flag must be handled in-process: rendered
@@ -2885,6 +3021,25 @@ mod tests {
 			read("ex.txt"),
 			"./keep.log",
 			"-exec {{}} should be operand-relative and run in the shell cwd"
+		);
+
+		// -exec children must write through the scope streams — an inherited
+		// process stdout would bypass the shell redirect and spam the host
+		// TUI's terminal — and must see the shell's exported environment.
+		session
+			.shell
+			.run_string(
+				"export PI_EXEC_ENV=zed; find . -name keep.log -exec sh -c 'echo \"$PI_EXEC_ENV $1\"' \
+				 sh {} ';' > cap.txt",
+				&si,
+				&params,
+			)
+			.await
+			.expect("exec capture");
+		assert_eq!(
+			read("cap.txt"),
+			"zed ./keep.log\n",
+			"-exec child stdout must flow through the shell redirect with the shell's exported env"
 		);
 
 		let _ = std::fs::remove_dir_all(&tmp);

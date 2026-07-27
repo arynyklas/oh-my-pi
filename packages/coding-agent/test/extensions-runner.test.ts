@@ -2,11 +2,12 @@
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTypeOf, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { discoverAndLoadExtensions, ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
@@ -14,7 +15,7 @@ import {
 	ExtensionRunner,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionError, ExtensionServiceTier } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { Type } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -481,6 +482,78 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("before_provider_request chaining", () => {
+		it("exposes the request model instead of the primary session model", async () => {
+			const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+			const requestModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!primaryModel || !requestModel) throw new Error("Expected bundled cross-provider models to exist");
+
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_request", async (_event, ctx) => {
+						const current = ctx.models.current();
+						return {
+							model: ctx.model && {
+								provider: ctx.model.provider,
+								id: ctx.model.id,
+								api: ctx.model.api,
+							},
+							current: current && {
+								provider: current.provider,
+								id: current.id,
+								api: current.api,
+							},
+						};
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "request-model.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => primaryModel,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			const payload = await runner.emitBeforeProviderRequest({}, requestModel);
+
+			const expected = {
+				provider: requestModel.provider,
+				id: requestModel.id,
+				api: requestModel.api,
+			};
+			expect(payload).toEqual({ model: expected, current: expected });
+		});
+
 		it("chains payload replacements across handlers in load order", async () => {
 			const extCode1 = `
 				export default function(pi) {
@@ -686,6 +759,7 @@ describe("ExtensionRunner", () => {
 				session_id: "session-123",
 				session_file: "/tmp/session.jsonl",
 				stop_hook_active: false,
+				signal: new AbortController().signal,
 			});
 
 			const events = (await Bun.file(eventsPath).text())
@@ -704,6 +778,81 @@ describe("ExtensionRunner", () => {
 				},
 			]);
 			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("skips cancelled handlers, releases in-flight handlers, and preserves timeout errors", async () => {
+			const extensionPath = path.join(tempDir.path(), "cancel-session-stop.ts");
+			const startedPath = path.join(tempDir.path(), "session-stop-started.txt");
+			await Bun.write(
+				extensionPath,
+				`
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("session_stop", async () => {
+						fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+						await Promise.withResolvers().promise;
+					});
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+			testSetExtensionHandlerTimeoutMs(100);
+			const controller = new AbortController();
+			const preAborted = new AbortController();
+			preAborted.abort();
+			await expect(
+				runner.emitSessionStop({
+					messages: [],
+					turn_id: 0,
+					session_id: "session-123",
+					stop_hook_active: false,
+					signal: preAborted.signal,
+				}),
+			).resolves.toBeUndefined();
+			expect(await Bun.file(startedPath).exists()).toBe(false);
+
+			const emission = runner.emitSessionStop({
+				messages: [],
+				turn_id: 0,
+				session_id: "session-123",
+				stop_hook_active: false,
+				signal: controller.signal,
+			});
+			expect(await Bun.file(startedPath).text()).toBe("started");
+			controller.abort();
+
+			await expect(emission).resolves.toBeUndefined();
+			expect(errors).toEqual([]);
+
+			// A non-cancelled handler still exercises the production timer and reports its timeout.
+			testSetExtensionHandlerTimeoutMs(10);
+			await expect(
+				runner.emitSessionStop({
+					messages: [],
+					turn_id: 1,
+					session_id: "session-123",
+					stop_hook_active: false,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toBeUndefined();
+			expect(errors).toEqual([
+				{
+					extensionPath,
+					event: "session_stop",
+					error: "handler timed out after 10ms",
+				},
+			]);
 		});
 
 		it("continues to later handlers after empty continuation feedback", async () => {
@@ -748,6 +897,7 @@ describe("ExtensionRunner", () => {
 					messages: [completedMessage],
 					turn_id: 0,
 					last_assistant_message: completedMessage,
+					signal: new AbortController().signal,
 					session_id: "session-123",
 					session_file: "/tmp/session.jsonl",
 					stop_hook_active: false,
@@ -1156,6 +1306,98 @@ describe("ExtensionRunner", () => {
 				searchable: true,
 			});
 			delete globalState.__ompMemoryStatus;
+		});
+	});
+
+	describe("service tier API", () => {
+		it("restricts tiers to values supported by each provider family", () => {
+			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
+			expectTypeOf<"flex">().toExtend<ExtensionServiceTier<"google">>();
+			expectTypeOf<"priority">().toExtend<ExtensionServiceTier<"anthropic">>();
+			expectTypeOf<"scale">().not.toExtend<ExtensionServiceTier<"google">>();
+			expectTypeOf<"flex">().not.toExtend<ExtensionServiceTier<"anthropic">>();
+		});
+
+		it("returns a detached snapshot, forwards valid changes, and rejects invalid family tiers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", () => {
+						const tiers = pi.getServiceTiers();
+						tiers.openai = "scale";
+						pi.appendEntry("service-tier-snapshot", tiers);
+						pi.setServiceTier("google", "flex");
+						pi.setServiceTier("openai", undefined);
+					});
+					pi.on("session_start", () => {
+						pi.setServiceTier("anthropic", "scale");
+					});
+					pi.on("session_start", () => {
+						pi.setServiceTier("bogus", "priority");
+					});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "service-tiers.ts");
+			await Bun.write(explicitExtensionPath, extCode);
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const serviceTiers = { openai: "priority" as const };
+			const snapshots: unknown[] = [];
+			const setCalls: Array<[string, unknown]> = [];
+			const errors: string[] = [];
+			runner.onError(error => {
+				errors.push(error.error);
+			});
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: (_customType, data) => {
+						snapshots.push(data);
+					},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getServiceTiers: () => serviceTiers,
+					setServiceTier: (family, tier) => {
+						setCalls.push([family, tier]);
+					},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			await runner.emit({ type: "session_start" });
+
+			expect(serviceTiers).toEqual({ openai: "priority" });
+			expect(snapshots).toEqual([{ openai: "scale" }]);
+			expect(setCalls).toEqual([
+				["google", "flex"],
+				["openai", undefined],
+			]);
+			expect(errors).toHaveLength(2);
+			expect(errors[0]).toContain('Invalid service tier "scale" for family "anthropic"');
+			expect(errors[1]).toContain('Invalid service tier "priority" for family "bogus"');
 		});
 	});
 

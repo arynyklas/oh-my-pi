@@ -1,7 +1,7 @@
 import { VERSION } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
-const UPSTREAM_RELEASE_REPO = "can1357/oh-my-pi";
+export const UPSTREAM_RELEASE_REPO = "can1357/oh-my-pi";
 const AUTH_GATEWAY_BETA_REPO = "arynyklas/oh-my-pi";
 const AUTH_GATEWAY_BETA_VERSION_RE = /^auth-gateway-v(\d+\.\d+\.\d+)-beta\.(\d+)$/;
 const AUTH_GATEWAY_BETA_MARKER = "-authgw.";

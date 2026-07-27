@@ -175,7 +175,11 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
-			typeof options.toolChoice === "object" ? { type: "tool", name: options.toolChoice.name } : options.toolChoice;
+			typeof options.toolChoice !== "object"
+				? options.toolChoice
+				: "type" in options.toolChoice
+					? options.toolChoice
+					: { type: "tool", name: options.toolChoice.name };
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
@@ -183,6 +187,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
+	if (options.include !== undefined) opts.include = options.include;
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
@@ -1652,7 +1657,7 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 		seenIds.add(id);
 		data.push({
 			id,
-			object: "model" as const,
+			object: "model",
 			owned_by: model.provider,
 			api: model.api,
 		});

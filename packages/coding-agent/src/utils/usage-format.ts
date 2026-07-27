@@ -1,3 +1,4 @@
+import { ANTHROPIC_OAUTH_GRANT_TTL_MS, type DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
 import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
@@ -19,6 +20,8 @@ export interface UsageAccountIdentity {
 	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
+	authorizedAt?: number;
 }
 
 export type LimitStatus = NonNullable<UsageLimit["status"]>;
@@ -76,14 +79,23 @@ function describeAmount(limit: UsageLimit): string {
 	const amount = limit.amount;
 	const parts: string[] = [];
 	const absoluteUnit = amount.unit !== "percent" && amount.unit !== "unknown";
+	const fraction = resolveUsedFraction(limit);
 	if (absoluteUnit && amount.used !== undefined && amount.limit !== undefined) {
 		parts.push(
 			`${formatUnitValue(amount.used, amount.unit)} / ${formatUnitValue(amount.limit, amount.unit)}${UNIT_SUFFIX[amount.unit]}`,
 		);
 	} else if (absoluteUnit && amount.remaining !== undefined) {
 		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
+	} else if (
+		absoluteUnit &&
+		amount.used !== undefined &&
+		Number.isFinite(amount.used) &&
+		amount.limit === undefined &&
+		amount.remaining === undefined &&
+		fraction === undefined
+	) {
+		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
 	}
-	const fraction = resolveUsedFraction(limit);
 	if (fraction !== undefined) {
 		parts.push(`${(fraction * 100).toFixed(1)}% used`);
 	} else if (amount.remainingFraction !== undefined) {
@@ -181,9 +193,15 @@ export function collectUnreportedAccounts(
 			}
 		}
 		if (accountOrg || sawReportOrg) {
-			if (!accountOrg || sameOrgReports.length === 0) return true;
+			const candidates = accountOrg
+				? sameOrgReports
+				: providerReports.filter(report => {
+						const metaOrg = report.metadata?.orgId;
+						return !(typeof metaOrg === "string" && metaOrg);
+					});
+			if (candidates.length === 0) return true;
 			if (ids.length === 0) return false;
-			return !sameOrgReports.some(report => {
+			return !candidates.some(report => {
 				const identifiers = reportIdentifiers(report);
 				return ids.some(id => identifiers.has(id));
 			});
@@ -263,7 +281,7 @@ function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): 
 	const details: string[] = [describeAmount(limit)];
 	const resetsAt = limit.window?.resetsAt;
 	if (resetsAt !== undefined && resetsAt > nowMs) {
-		details.push(`resets in ${formatDuration(resetsAt - nowMs)}`);
+		details.push(`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`);
 	}
 	const lines = [
 		`      ${STATUS_COLOR[status]("●")} ${padded}  ${renderBar(limit)}  ${chalk.dim(details.join(" · "))}`,
@@ -391,6 +409,58 @@ export function computeProviderWindowStats(reports: UsageReport[]): ProviderWind
 		});
 }
 
+/** Re-login warnings render once remaining grant life drops below this. */
+const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Re-login deadline line for providers whose OAuth grants expire a fixed
+ * period after the interactive login (today: Anthropic, ~30 days regardless
+ * of refresh rotation). Silent until the deadline is under a week out — a
+ * nudge before the broker auto-disables the row, not a permanent countdown.
+ */
+function formatReloginDeadline(
+	account: UsageAccountIdentity,
+	nowMs: number,
+	redaction?: Map<string, string>,
+): string | undefined {
+	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
+	const remaining = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS - nowMs;
+	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
+	const label = accountIdentityLabel(account, redaction);
+	if (remaining <= 0) {
+		return `  ${chalk.red(`⚠ ${label} — grant is past Anthropic's ~30d lifetime; re-login now`)}`;
+	}
+	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (Anthropic expires OAuth grants ~30d after login)`)}`;
+}
+
+/**
+ * Tombstones worth a row in `omp usage`: OAuth credentials torn down
+ * automatically (refresh failure, upstream invalidation). Rows the user
+ * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ */
+export function isActionableDisable(summary: DisabledCredentialSummary): boolean {
+	if (summary.type !== "oauth") return false;
+	return !/^(replaced by|deleted by user)/i.test(summary.cause);
+}
+
+/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
+function shortDisableCause(cause: string): string {
+	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
+	if (description) return description;
+	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
+	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
+	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
+}
+
+/** Label for a disabled tombstone, masking each identity part under `--redact`. */
+function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
+	const base = summary.email ?? summary.accountId ?? "OAuth account";
+	const masked = redaction?.get(base) ?? base;
+	const org = summary.orgName ?? summary.orgId;
+	if (!org || org === base) return masked;
+	return `${masked} · ${redaction?.get(org) ?? org}`;
+}
+
 /**
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
@@ -401,6 +471,7 @@ export function formatUsageBreakdown(
 	accounts: UsageAccountIdentity[],
 	nowMs: number,
 	redaction?: Map<string, string>,
+	disabled: DisabledCredentialSummary[] = [],
 ): string {
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of reports) {
@@ -415,10 +486,17 @@ export function formatUsageBreakdown(
 		list.push(account);
 		unreportedByProvider.set(account.provider, list);
 	}
+	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
+	for (const summary of disabled) {
+		if (!isActionableDisable(summary)) continue;
+		const list = disabledByProvider.get(summary.provider) ?? [];
+		list.push(summary);
+		disabledByProvider.set(summary.provider, list);
+	}
 
-	const providers = [...new Set([...reportsByProvider.keys(), ...unreportedByProvider.keys()])].sort((a, b) =>
-		a.localeCompare(b),
-	);
+	const providers = [
+		...new Set([...reportsByProvider.keys(), ...unreportedByProvider.keys(), ...disabledByProvider.keys()]),
+	].sort((a, b) => a.localeCompare(b));
 
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
@@ -452,6 +530,20 @@ export function formatUsageBreakdown(
 		for (const account of providerUnreported) {
 			const label = accountIdentityLabel(account, redaction);
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
+		}
+
+		for (const summary of disabledByProvider.get(provider) ?? []) {
+			const label = disabledIdentityLabel(summary, redaction);
+			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+			lines.push(
+				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+			);
+		}
+
+		for (const account of accounts) {
+			if (account.provider !== provider) continue;
+			const warning = formatReloginDeadline(account, nowMs, redaction);
+			if (warning) lines.push(warning);
 		}
 
 		const stats = computeProviderWindowStats(providerReports);

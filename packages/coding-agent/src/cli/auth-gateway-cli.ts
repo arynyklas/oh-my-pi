@@ -24,7 +24,12 @@ import {
 	completeSimple,
 	type Model,
 } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	loadAuthBrokerAccountPool,
+	RemoteAuthCredentialStore,
+	type SnapshotResponse,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthGatewayAclEffect,
 	type AuthGatewayAclKind,
@@ -40,7 +45,7 @@ import {
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { runAuthGatewayTui } from "../auth-gateway/run-tui";
 import { ModelRegistry } from "../config/model-registry";
@@ -251,6 +256,33 @@ async function loadBrokerCredentials(
 	return snapshot.credentials.map(entry => ({ id: entry.id, provider: entry.provider, type: entry.credential.type }));
 }
 
+/**
+ * How often a long-lived `serve` rebuilds its catalog from the registry so
+ * models discovered after boot become routable without a restart. `refresh()`
+ * reuses the `models.db` cache and only hits the network when a provider's
+ * cached row is stale, so a short interval stays cheap.
+ */
+const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * Index resolvable models by the request ids clients may send: the
+ * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
+ * fallback for legacy clients). Scoped to providers the gateway holds broker
+ * credentials for, since only those are routable.
+ */
+export function indexModelsByRequestId(
+	models: readonly Model<Api>[],
+	providersWithCreds: ReadonlySet<string>,
+): Map<string, Model<Api>> {
+	const modelById = new Map<string, Model<Api>>();
+	for (const model of models) {
+		if (!providersWithCreds.has(model.provider)) continue;
+		modelById.set(`${model.provider}/${model.id}`, model);
+		if (!modelById.has(model.id)) modelById.set(model.id, model);
+	}
+	return modelById;
+}
+
 async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatewayCommandDependencies): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -266,9 +298,10 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 	try {
 		// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 		// in sdk.ts. The gateway never touches local SQLite for provider secrets.
+		const accountPool = await loadAuthBrokerAccountPool();
 		const client = createBrokerClient(brokerConfig);
 		const initialSnapshot = await fetchBrokerSnapshot(client);
-		const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
+		const store = new RemoteAuthCredentialStore({ client, initialSnapshot, accountPool });
 		// Refresh + usage both flow through the store's broker hooks automatically —
 		// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
 		storage = new AuthStorage(store, {
@@ -282,7 +315,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 		// discoveries, and explicit `auth: none` self-hosted models.
 		const modelRegistry = new ModelRegistry(storage);
 		await modelRegistry.refresh("online-if-uncached");
-		const modelIndex = buildAuthGatewayModelIndex(modelRegistry);
+		let modelIndex = buildAuthGatewayModelIndex(modelRegistry);
 
 		const handle = startAuthGateway({
 			storage,
@@ -290,9 +323,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 			bind,
 			bearerTokens: gatewayToken ? [gatewayToken] : [],
 			version: VERSION,
-			resolveModel: modelIndex.resolveModel,
-			listModels: modelIndex.listModels,
-			isKeylessModel: modelIndex.isKeylessModel,
+			resolveModel: (modelId: string) => modelIndex.resolveModel(modelId),
+			listModels: () => modelIndex.listModels(),
+			isKeylessModel: (model: Model<Api>) => modelIndex.isKeylessModel(model),
 		});
 		process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 		if (gatewayToken) {
@@ -303,12 +336,31 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 		process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
 		process.stdout.write(`access database: ${getAccessDbPath(deps)}\n`);
 
+		// `serve` is long-lived: rebuild the catalog periodically so models
+		// discovered after boot become routable without a restart. A failed refresh
+		// keeps serving the previous catalog. `unref()` so the timer never keeps the
+		// process alive on its own.
+		const catalogRefresh = setInterval(() => {
+			void modelRegistry
+				.refresh()
+				.then(() => {
+					modelIndex = buildAuthGatewayModelIndex(modelRegistry);
+				})
+				.catch(error => {
+					logger.warn("auth-gateway catalog refresh failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}, CATALOG_REFRESH_INTERVAL_MS);
+		catalogRefresh.unref();
+
 		const stopped = Promise.withResolvers<void>();
 		let shutdownStarted = false;
 		const stop = async (signal: NodeJS.Signals): Promise<void> => {
 			if (shutdownStarted) return;
 			shutdownStarted = true;
 			process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
+			clearInterval(catalogRefresh);
 			let closeError: unknown;
 			try {
 				await handle.close();
@@ -1269,9 +1321,14 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		);
 	}
 
+	const accountPool = await loadAuthBrokerAccountPool();
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
-	const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
+	const store = new RemoteAuthCredentialStore({
+		client,
+		initialSnapshot,
+		accountPool,
+	});
 	const storage = new AuthStorage(store, { sourceLabel: `broker ${brokerConfig.url}` });
 	try {
 		await storage.reload();

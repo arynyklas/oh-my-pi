@@ -7,7 +7,7 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
-import type { AuthStorage, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AuthStorage, DisabledCredentialSummary, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -17,6 +17,7 @@ import {
 	computeProviderWindowStats,
 	formatProviderName,
 	formatUsageBreakdown,
+	isActionableDisable,
 	type LimitStatus,
 	type ProviderWindowStat,
 	STATUS_COLOR,
@@ -116,7 +117,11 @@ function findDistinguishingInfix(value: string, peers: string[]): string | undef
 }
 
 /** Every identity string the output could surface — input for {@link buildRedactionMap}. */
-function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountIdentity[]): string[] {
+function collectIdentityStrings(
+	reports: UsageReport[],
+	accounts: UsageAccountIdentity[],
+	disabled: DisabledCredentialSummary[] = [],
+): string[] {
 	const values: string[] = [];
 	const add = (value: unknown): void => {
 		if (typeof value === "string" && value) values.push(value);
@@ -141,6 +146,12 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 		add(account.orgId);
 		add(account.orgName);
 		add(account.enterpriseUrl);
+	}
+	for (const summary of disabled) {
+		add(summary.email);
+		add(summary.accountId);
+		add(summary.orgId);
+		add(summary.orgName);
 	}
 	return values;
 }
@@ -300,6 +311,7 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 					enterpriseUrl: credential.enterpriseUrl,
 					orgId: credential.orgId,
 					orgName: credential.orgName,
+					authorizedAt: credential.authorizedAt,
 				});
 			} else {
 				accounts.push({ provider, type: "api_key" });
@@ -412,20 +424,41 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			(await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
 			})) ?? [];
+		// Reports are always fresh (broker-side fetch) but the account list can
+		// come from a disk-cached snapshot up to an hour old — revalidate so a
+		// just-logged-in (or just-rotated-identity) credential isn't rendered
+		// as a stale duplicate. Best-effort: offline broker keeps the cache.
+		try {
+			await authStorage.revalidateCredentials();
+		} catch {
+			// Stale identities beat no output.
+		}
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(
 			storedAccounts,
 			provider => authStorage.usageProviderFor(provider) !== undefined,
 			cmd.provider,
 		);
+		// Tombstones ride alongside the live pool so an auto-disabled account
+		// (e.g. an expired Anthropic grant) is loudly visible instead of just
+		// missing. Best-effort: a broker predating the endpoint yields [].
+		let disabled: DisabledCredentialSummary[] = [];
+		try {
+			disabled = await authStorage.listDisabledCredentials();
+		} catch {
+			// Usage output must not fail because tombstone listing did.
+		}
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
 			filteredReports = reports.filter(report => report.provider.toLowerCase() === wanted);
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
+			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
 
-		const redaction = cmd.redact ? buildRedactionMap(collectIdentityStrings(filteredReports, accounts)) : undefined;
+		const redaction = cmd.redact
+			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
+			: undefined;
 
 		if (cmd.json) {
 			// Drop the heavy provider-specific `raw` payload — same shape as the
@@ -450,10 +483,21 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
+			let disabledForJson = disabled.filter(isActionableDisable);
+			if (redaction) {
+				disabledForJson = disabledForJson.map(summary => ({
+					...summary,
+					email: maskIdentity(redaction, summary.email),
+					accountId: maskIdentity(redaction, summary.accountId),
+					orgId: maskIdentity(redaction, summary.orgId),
+					orgName: maskIdentity(redaction, summary.orgName),
+				}));
+			}
 			const payload = {
 				generatedAt: Date.now(),
 				reports: trimmed,
 				accountsWithoutUsage: unreportedAccounts,
+				disabledCredentials: disabledForJson,
 				capacity,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -473,7 +517,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction)}\n`);
+		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
 	} finally {
 		authStorage.close();
 	}
