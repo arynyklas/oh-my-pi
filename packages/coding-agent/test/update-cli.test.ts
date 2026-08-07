@@ -69,17 +69,17 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-// Pinned far above any real release so the beta channel assertions stay valid
+// Pinned far above any real release so the fork channel assertions stay valid
 // across version bumps: `runUpdateCommand` compares against the built VERSION.
-const BETA_TAG = "auth-gateway-v999.0.0-beta.1";
-const BETA_VERSION = "999.0.0-authgw.beta.1";
-const BETA_RELEASES_URL = "https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20";
-const BETA_TAG_URL = `https://api.github.com/repos/arynyklas/oh-my-pi/releases/tags/${BETA_TAG}`;
+const FORK_TAG = "v999.0.0-fork.1";
+const FORK_VERSION = "999.0.0-fork.1";
+const FORK_RELEASES_URL = "https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20";
+const FORK_TAG_URL = `https://api.github.com/repos/arynyklas/oh-my-pi/releases/tags/${FORK_TAG}`;
 
-describe("update-cli auth-gateway beta updater", () => {
-	it("checks fork prerelease metadata instead of upstream npm metadata", async () => {
+describe("update-cli fork release updater", () => {
+	it("checks fork GitHub releases instead of upstream npm metadata", async () => {
 		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
-			Response.json([{ tag_name: BETA_TAG, draft: false, prerelease: true }]),
+			Response.json([{ tag_name: FORK_TAG, draft: false, prerelease: false }]),
 		);
 		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
 		const logs: string[] = [];
@@ -90,35 +90,54 @@ describe("update-cli auth-gateway beta updater", () => {
 		await updateCli.runUpdateCommand({ force: false, check: true });
 
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
-		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(BETA_RELEASES_URL);
+		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(FORK_RELEASES_URL);
 		expect(stderrSpy).not.toHaveBeenCalled();
-		expect(logs.some(line => line.includes(`New version available: ${BETA_VERSION}`))).toBe(true);
+		expect(logs.some(line => line.includes(`New version available: ${FORK_VERSION}`))).toBe(true);
+	});
+
+	it("ignores fork prereleases and drafts when picking the latest release", async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json([
+				{ tag_name: "v999.0.1-fork.1", draft: true, prerelease: false },
+				{ tag_name: "v999.0.2-fork.1", draft: false, prerelease: true },
+				{ tag_name: FORK_TAG, draft: false, prerelease: false },
+			]),
+		);
+		const logs: string[] = [];
+		spyOn(console, "log").mockImplementation(message => {
+			logs.push(String(message));
+		});
+
+		await updateCli.runUpdateCommand({ force: false, check: true });
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(logs.some(line => line.includes(`New version available: ${FORK_VERSION}`))).toBe(true);
 	});
 
 	it.skipIf(process.platform !== "linux")(
-		"installs fork beta assets through verified binary replacement even from a bun-bin path",
+		"installs fork release assets through verified binary replacement even from a bun-bin path",
 		async () => {
 			const dir = await makeTempDir();
 			const bunHome = path.join(dir, "bun-home");
 			const binDir = path.join(bunHome, "bin");
 			await fs.mkdir(binDir, { recursive: true });
 			const ompPath = path.join(binDir, "omp");
-			await Bun.write(ompPath, "#!/bin/sh\necho omp/16.5.0-authgw.beta.1\n");
+			await Bun.write(ompPath, "#!/bin/sh\necho omp/16.5.0-fork.1\n");
 			await fs.chmod(ompPath, 0o755);
-			const upgradedBinary = `#!/bin/sh\necho omp/${BETA_VERSION}\n`;
+			const upgradedBinary = `#!/bin/sh\necho omp/${FORK_VERSION}\n`;
 			const digest = `sha256:${new Bun.CryptoHasher("sha256").update(upgradedBinary).digest("hex")}`;
-			const expectedDownloadUrl = `https://github.com/arynyklas/oh-my-pi/releases/download/${BETA_TAG}/omp-linux-x64`;
+			const expectedDownloadUrl = `https://github.com/arynyklas/oh-my-pi/releases/download/${FORK_TAG}/omp-linux-x64`;
 			const fetchMock: typeof globalThis.fetch = Object.assign(
 				async (input: string | URL | Request): Promise<Response> => {
 					const url = String(input);
-					if (url === BETA_RELEASES_URL) {
-						return Response.json([{ tag_name: BETA_TAG, draft: false, prerelease: true }]);
+					if (url === FORK_RELEASES_URL) {
+						return Response.json([{ tag_name: FORK_TAG, draft: false, prerelease: false }]);
 					}
-					if (url === BETA_TAG_URL) {
+					if (url === FORK_TAG_URL) {
 						return Response.json({
-							tag_name: BETA_TAG,
+							tag_name: FORK_TAG,
 							draft: false,
-							prerelease: true,
+							prerelease: false,
 							assets: [
 								{
 									name: "omp-linux-x64",
@@ -150,11 +169,11 @@ describe("update-cli auth-gateway beta updater", () => {
 				process.env.BUN_INSTALL = previousBunInstall;
 			}
 
-			// The prerelease asset is resolved through the same size/digest gate as a
-			// stable upstream release before anything replaces the installed binary.
+			// The fork asset is resolved through the same size/digest gate as an
+			// upstream release before anything replaces the installed binary.
 			expect(fetchSpy.mock.calls.map(call => String(call[0]))).toEqual([
-				BETA_RELEASES_URL,
-				BETA_TAG_URL,
+				FORK_RELEASES_URL,
+				FORK_TAG_URL,
 				expectedDownloadUrl,
 			]);
 			expect(await Bun.file(ompPath).text()).toBe(upgradedBinary);

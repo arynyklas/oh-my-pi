@@ -2,9 +2,9 @@ import { VERSION } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 export const UPSTREAM_RELEASE_REPO = "can1357/oh-my-pi";
-const AUTH_GATEWAY_BETA_REPO = "arynyklas/oh-my-pi";
-const AUTH_GATEWAY_BETA_VERSION_RE = /^auth-gateway-v(\d+\.\d+\.\d+)-beta\.(\d+)$/;
-const AUTH_GATEWAY_BETA_MARKER = "-authgw.";
+const FORK_RELEASE_REPO = "arynyklas/oh-my-pi";
+const FORK_TAG_RE = /^v(\d+\.\d+\.\d+)-fork\.(\d+)$/;
+const FORK_MARKER = "-fork.";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 
@@ -20,8 +20,9 @@ interface GitHubReleaseInfo {
 	prerelease: boolean;
 }
 
-export function isAuthGatewayBetaVersion(version: string = VERSION): boolean {
-	return version.includes(AUTH_GATEWAY_BETA_MARKER);
+/** Whether this build came from the fork's `vX.Y.Z-fork.N` release line. */
+export function isForkVersion(version: string = VERSION): boolean {
+	return version.includes(FORK_MARKER);
 }
 
 export function buildBinaryDownloadUrl(repo: string, tag: string, binaryName: string): string {
@@ -32,8 +33,8 @@ export async function getLatestReleaseForVersion(
 	currentVersion: string = VERSION,
 	timeoutMs = RELEASE_METADATA_TIMEOUT_MS,
 ): Promise<ReleaseInfo> {
-	return isAuthGatewayBetaVersion(currentVersion)
-		? await getLatestAuthGatewayBetaRelease(timeoutMs)
+	return isForkVersion(currentVersion)
+		? await getLatestForkRelease(timeoutMs)
 		: await getLatestUpstreamRelease(timeoutMs);
 }
 
@@ -64,19 +65,19 @@ export async function getLatestUpstreamRelease(timeoutMs = RELEASE_METADATA_TIME
 	};
 }
 
-function versionFromAuthGatewayBetaTag(tag: string): string | undefined {
-	const match = AUTH_GATEWAY_BETA_VERSION_RE.exec(tag);
+function versionFromForkTag(tag: string): string | undefined {
+	const match = FORK_TAG_RE.exec(tag);
 	if (!match) return undefined;
-	return `${match[1]}-authgw.beta.${match[2]}`;
+	return `${match[1]}-fork.${match[2]}`;
 }
 
-function selectAuthGatewayBetaRelease(releases: GitHubReleaseInfo[]): ReleaseInfo | undefined {
+function selectForkRelease(releases: GitHubReleaseInfo[]): ReleaseInfo | undefined {
 	let latest: ReleaseInfo | undefined;
 	for (const release of releases) {
-		if (release.draft || !release.prerelease) continue;
-		const version = versionFromAuthGatewayBetaTag(release.tag_name);
+		if (release.draft || release.prerelease) continue;
+		const version = versionFromForkTag(release.tag_name);
 		if (!version) continue;
-		const candidate = { repo: AUTH_GATEWAY_BETA_REPO, tag: release.tag_name, version };
+		const candidate = { repo: FORK_RELEASE_REPO, tag: release.tag_name, version };
 		if (!latest || Bun.semver.order(candidate.version, latest.version) > 0) {
 			latest = candidate;
 		}
@@ -84,27 +85,27 @@ function selectAuthGatewayBetaRelease(releases: GitHubReleaseInfo[]): ReleaseInf
 	return latest;
 }
 
-export async function getLatestAuthGatewayBetaRelease(timeoutMs = RELEASE_METADATA_TIMEOUT_MS): Promise<ReleaseInfo> {
+export async function getLatestForkRelease(timeoutMs = RELEASE_METADATA_TIMEOUT_MS): Promise<ReleaseInfo> {
 	let response: Response;
 	try {
-		response = await fetch(`https://api.github.com/repos/${AUTH_GATEWAY_BETA_REPO}/releases?per_page=20`, {
+		response = await fetch(`https://api.github.com/repos/${FORK_RELEASE_REPO}/releases?per_page=20`, {
 			signal: withTimeoutSignal(timeoutMs),
 		});
 	} catch (err) {
 		if (isTimeoutError(err)) {
-			throw new Error(`Timed out fetching auth-gateway beta release info after ${Math.round(timeoutMs / 1000)}s`, {
+			throw new Error(`Timed out fetching fork release info after ${Math.round(timeoutMs / 1000)}s`, {
 				cause: err,
 			});
 		}
 		throw err;
 	}
 	if (!response.ok) {
-		throw new Error(`Failed to fetch auth-gateway beta release info: ${response.statusText}`);
+		throw new Error(`Failed to fetch fork release info: ${response.statusText}`);
 	}
 
-	const release = selectAuthGatewayBetaRelease((await response.json()) as GitHubReleaseInfo[]);
+	const release = selectForkRelease((await response.json()) as GitHubReleaseInfo[]);
 	if (!release) {
-		throw new Error(`No auth-gateway beta releases found in ${AUTH_GATEWAY_BETA_REPO}`);
+		throw new Error(`No releases found in ${FORK_RELEASE_REPO}`);
 	}
 	return release;
 }

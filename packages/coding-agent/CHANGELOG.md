@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the fork's distribution line: builds are now versioned `X.Y.Z-fork.N`, tagged `vX.Y.Z-fork.N`, and published as full GitHub releases instead of `X.Y.Z-authgw.beta.N` / `auth-gateway-vX.Y.Z-beta.N` prereleases. `omp update` and the startup notice discover the new line and require a non-draft, non-prerelease GitHub release, so the binary-asset integrity gate is now identical to upstream's. Builds still on the old `-authgw.beta.N` line cannot see the new releases and must be replaced once by hand.
+
 ### Added
 
 - Added `requestModelId` support for custom `models.yml` entries so a user-facing model id can route to a different upstream wire id.
@@ -9,15 +13,15 @@
 
 ### Changed
 
-- Synced the auth-gateway beta onto upstream v17.1.5 (1839-commit merge), folding upstream's Anthropic prompt-cache-warmth session stickiness, `omp usage` disabled-credential tombstones and re-login deadlines, and verified release-binary downloads into the fork's credential selection-policy, gateway ACL, and admin console work.
+- Synced the fork onto upstream v17.1.5 (1839-commit merge), folding upstream's Anthropic prompt-cache-warmth session stickiness, `omp usage` disabled-credential tombstones and re-login deadlines, and verified release-binary downloads into the fork's credential selection-policy, gateway ACL, and admin console work.
 
 ### Fixed
 
 - Fixed open sessions retaining revoked command-backed provider credentials after token-file rotation by expiring successful command results and invalidating them on provider refresh.
 - Fixed TUI `/usage` to include active self-hosted auth gateway usage totals alongside connected-account reports.
 - Fixed `omp auth-gateway serve` to expose custom and discovered `models.yml` entries, including `auth: none` self-hosted providers.
-- Fixed unofficial auth-gateway beta builds to check fork GitHub prereleases for startup notices and `omp update` self-updates instead of upstream npm metadata.
-- Fixed auth-gateway beta self-updates skipping upstream's release-asset integrity gate; fork prereleases now resolve through the same GitHub size and SHA-256 digest verification as stable upstream releases.
+- Fixed unofficial fork builds checking upstream npm metadata for startup notices and `omp update` self-updates; they now resolve the fork's own GitHub releases.
+- Fixed fork self-updates skipping upstream's release-asset integrity gate; fork releases now resolve through the same GitHub size and SHA-256 digest verification as upstream releases.
 - Fixed `models.yml` providers whose auth headers come from config (`apiKey`, `authHeader`, or an explicit `Authorization`) losing every cached discovery model after upstream stopped persisting headers in the model cache; those rows are kept and re-headered from config instead of forcing an online refetch.
 
 ## [17.1.5] - 2026-07-27

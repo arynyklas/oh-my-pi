@@ -18,7 +18,7 @@ import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import {
 	buildBinaryDownloadUrl,
 	getLatestReleaseForVersion,
-	isAuthGatewayBetaVersion,
+	isForkVersion,
 	type ReleaseInfo,
 	UPSTREAM_RELEASE_REPO,
 } from "./release-info";
@@ -84,25 +84,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Select and validate the binary asset from GitHub release metadata.
  *
- * `repo`/`allowPrerelease` default to the upstream stable channel. The
- * auth-gateway beta ships as a prerelease on the fork repo, so that channel
- * passes both explicitly rather than skipping the integrity checks.
+ * `repo` defaults to the upstream channel; the fork release line passes its own
+ * repo. Both channels publish stable (non-draft, non-prerelease) releases, so
+ * the integrity gate is identical for either.
  */
 export function resolveReleaseBinaryAsset(
 	release: unknown,
 	expectedTag: string,
 	binaryName: string,
-	options: { repo?: string; allowPrerelease?: boolean } = {},
+	options: { repo?: string } = {},
 ): ReleaseBinaryAsset {
 	const repo = options.repo ?? UPSTREAM_RELEASE_REPO;
-	const allowPrerelease = options.allowPrerelease ?? false;
 	if (!isRecord(release)) {
 		throw new Error("Invalid GitHub release metadata");
 	}
 	if (release.tag_name !== expectedTag) {
 		throw new Error(`GitHub release tag mismatch: expected ${expectedTag}`);
 	}
-	if (release.draft !== false || (release.prerelease !== false && !allowPrerelease)) {
+	if (release.draft !== false || release.prerelease !== false) {
 		throw new Error(`GitHub release ${expectedTag} is not a published stable release`);
 	}
 	if (!Array.isArray(release.assets)) {
@@ -177,10 +176,7 @@ async function getReleaseBinaryAsset(
 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
 	}
 
-	return resolveReleaseBinaryAsset(await response.json(), release.tag, binaryName, {
-		repo: release.repo,
-		allowPrerelease: release.repo !== UPSTREAM_RELEASE_REPO,
-	});
+	return resolveReleaseBinaryAsset(await response.json(), release.tag, binaryName, { repo: release.repo });
 }
 
 export interface VerifiedBinaryDownloadOptions {
@@ -1121,7 +1117,7 @@ export async function updateViaBinaryAt(
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	const isAuthGatewayBeta = isAuthGatewayBetaVersion();
+	const isForkBuild = isForkVersion();
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
@@ -1151,7 +1147,7 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		return;
 	}
 
-	if (isAuthGatewayBeta) {
+	if (isForkBuild) {
 		try {
 			await updateViaBinaryAt(resolveOmpBinaryPathForUpdate(), release.version, { release });
 		} catch (err) {
