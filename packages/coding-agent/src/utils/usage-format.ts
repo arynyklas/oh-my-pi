@@ -1,7 +1,7 @@
 import { ANTHROPIC_OAUTH_GRANT_TTL_MS, type DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
 import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 
 const BAR_WIDTH = 28;
 
@@ -438,9 +438,41 @@ function formatReloginDeadline(
  * automatically (refresh failure, upstream invalidation). Rows the user
  * replaced or deleted deliberately are lifecycle noise, not lost capacity.
  */
-export function isActionableDisable(summary: DisabledCredentialSummary): boolean {
+export function isActionableDisable(
+	summary: DisabledCredentialSummary,
+	activeAccounts: UsageAccountIdentity[] = [],
+): boolean {
 	if (summary.type !== "oauth") return false;
-	return !/^(replaced by|deleted by user)/i.test(summary.cause);
+	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+
+	// Hide the tombstone only when a live credential for the same provider IS the
+	// same identity — a re-login the broker recorded as a new row. Matching email
+	// or accountId proves that; a shared organization alone does not, since two
+	// Team members share `orgId` while drawing on separate pools, and hiding a
+	// disabled teammate behind an active sibling is exactly the lost capacity
+	// these rows exist to surface. So the org-only fallback applies just when no
+	// base identifier contradicts it.
+	const summaryEmail = summary.email?.toLowerCase();
+	const summaryAccountId = summary.accountId?.toLowerCase();
+	const summaryOrgId = summary.orgId?.toLowerCase();
+
+	const matchesActive = activeAccounts.some(account => {
+		if (account.provider !== summary.provider) return false;
+
+		const accountEmail = account.email?.toLowerCase();
+		const accountAccountId = account.accountId?.toLowerCase();
+		const accountOrgId = account.orgId?.toLowerCase();
+
+		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
+		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
+
+		if (summaryEmail && accountEmail) return false;
+		if (summaryAccountId && accountAccountId) return false;
+
+		return Boolean(summaryOrgId && accountOrgId && summaryOrgId === accountOrgId);
+	});
+
+	return !matchesActive;
 }
 
 /** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
@@ -488,7 +520,7 @@ export function formatUsageBreakdown(
 	}
 	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
 	for (const summary of disabled) {
-		if (!isActionableDisable(summary)) continue;
+		if (!isActionableDisable(summary, accounts)) continue;
 		const list = disabledByProvider.get(summary.provider) ?? [];
 		list.push(summary);
 		disabledByProvider.set(summary.provider, list);

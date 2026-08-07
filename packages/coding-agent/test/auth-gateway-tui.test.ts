@@ -57,8 +57,8 @@ import {
 	createOneTimeTokenDialog,
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/dialogs";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
-import * as clipboard from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 

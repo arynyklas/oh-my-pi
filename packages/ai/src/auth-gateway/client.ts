@@ -1,4 +1,4 @@
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import { credentialUploadRequestSchema } from "../auth-broker/wire-schemas";
 import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 import type { Api } from "../types";

@@ -1,5 +1,5 @@
 import type { AuthGatewayIssuedTokenValue } from "@oh-my-pi/pi-ai/auth-gateway";
-import { copyToClipboard } from "@oh-my-pi/pi-utils";
+import { copyToClipboard } from "../../../utils/clipboard";
 
 export interface AuthGatewayOneTimeTokenDialog {
 	id: number;

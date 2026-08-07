@@ -352,6 +352,62 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("rotated@example.test");
 		expect(text).not.toContain("Fireworks");
 	});
+	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
+		const now = Date.now();
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "active@example.test",
+			},
+		];
+		const disabled = [
+			{
+				id: 30,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "active@example.test",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+			{
+				id: 31,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "truly-dead@example.test",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
+		expect(text).not.toContain("active@example.test — disabled");
+		expect(text).toContain("✗ truly-dead@example.test — disabled");
+	});
+
+	it("keeps a disabled teammate's tombstone when an active sibling only shares the organization", () => {
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "teammate-a@example.test",
+				accountId: "acct-a",
+				orgId: "org-shared",
+			},
+		];
+		const disabled = [
+			{
+				id: 40,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "teammate-b@example.test",
+				accountId: "acct-b",
+				orgId: "org-shared",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+		];
+		// Two Team seats share `orgId` but draw on separate pools, so the active
+		// sibling must not hide the dead seat's lost capacity.
+		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, Date.now(), undefined, disabled));
+		expect(text).toContain("✗ teammate-b@example.test · org-shared — disabled");
+	});
 
 	it("renders a tombstone-only provider section even when no active credential remains", () => {
 		const disabled = [

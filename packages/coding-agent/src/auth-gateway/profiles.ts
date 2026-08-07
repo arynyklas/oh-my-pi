@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { normalizeAuthGatewayAdminUrl } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getAuthGatewayProfilesPath, getAuthGatewayTokensDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { withFileLock } from "../config/file-lock";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { resolveConfigValue } from "../config/resolve-config-value";
 
 export const AUTH_GATEWAY_CONNECTION_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;

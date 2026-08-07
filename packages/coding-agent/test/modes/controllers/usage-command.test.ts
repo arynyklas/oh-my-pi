@@ -37,6 +37,7 @@ describe("CommandController /usage", () => {
 			session: createUsageSessionDouble(),
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -76,6 +77,7 @@ describe("CommandController /usage", () => {
 			session: createUsageSessionDouble(),
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -124,6 +126,7 @@ describe("CommandController /usage", () => {
 			session: createUsageSessionDouble(),
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -214,6 +217,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -286,6 +290,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -363,6 +368,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -434,6 +440,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -526,6 +533,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -602,6 +610,7 @@ describe("CommandController /usage", () => {
 			},
 			ui: { terminal: { columns: 100 } },
 			present,
+			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;

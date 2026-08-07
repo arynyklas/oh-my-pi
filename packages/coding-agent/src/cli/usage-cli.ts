@@ -9,7 +9,7 @@
  */
 import type { AuthStorage, DisabledCredentialSummary, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import {
@@ -483,7 +483,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
-			let disabledForJson = disabled.filter(isActionableDisable);
+			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
