@@ -12,6 +12,7 @@ export type {
 	AuthStorageOptions,
 	CredentialOrigin,
 	CredentialOriginKind,
+	DefaultAccountFallover,
 	OAuthAccountIdentity,
 	OAuthAccountSummary,
 	OAuthCredential,

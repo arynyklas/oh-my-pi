@@ -7,11 +7,18 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
-import type { AuthStorage, DisabledCredentialSummary, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
+import type {
+	AuthStorage,
+	DisabledCredentialSummary,
+	OAuthAccountIdentity,
+	UsageHistoryEntry,
+	UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
+import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
 import {
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
@@ -517,7 +524,28 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
-		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
+		const defaultAccountLabels = new Map<string, string>();
+		for (const provider of new Set([
+			...filteredReports.map(report => report.provider),
+			...accounts.map(account => account.provider),
+		])) {
+			const identity = authStorage.getDefaultAccountIdentity(provider);
+			if (!identity) continue;
+			const maskedIdentity: OAuthAccountIdentity = redaction
+				? {
+						email: maskIdentity(redaction, identity.email),
+						accountId: maskIdentity(redaction, identity.accountId),
+						projectId: maskIdentity(redaction, identity.projectId),
+						orgId: maskIdentity(redaction, identity.orgId),
+						orgName: maskIdentity(redaction, identity.orgName),
+					}
+				: identity;
+			const label = formatActiveAccountLabel(maskedIdentity);
+			if (label) defaultAccountLabels.set(provider, label);
+		}
+		process.stdout.write(
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, defaultAccountLabels)}\n`,
+		);
 	} finally {
 		authStorage.close();
 	}

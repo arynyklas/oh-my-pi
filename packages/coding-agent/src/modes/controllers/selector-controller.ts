@@ -1950,6 +1950,74 @@ export class SelectorController {
 		});
 	}
 
+	async showDefaultAccountSelector(): Promise<void> {
+		const session = this.ctx.session;
+		if (session.isStreaming) {
+			this.ctx.showStatus("Cannot change the default account while the session is streaming.");
+			return;
+		}
+		this.ctx.showStatus("Loading provider accounts…", { dim: true });
+		let accountList: SessionOAuthAccountList | undefined;
+		try {
+			accountList = await session.listCurrentProviderOAuthAccounts();
+		} catch (error) {
+			this.ctx.showError(
+				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		if (!accountList) {
+			this.ctx.showStatus("Select a model before setting a default account.");
+			return;
+		}
+		const authStorage = session.modelRegistry.authStorage;
+		const providerId = accountList.provider;
+		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
+		const providerName = provider?.name ?? providerId;
+		const accounts = toSessionPinAccounts(accountList.accounts);
+		if (accounts.length === 0) {
+			const source = authStorage.describeCredentialSource(providerId, session.sessionId);
+			this.ctx.showStatus(
+				source
+					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
+					: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+			);
+			return;
+		}
+
+		this.showSelector(done => {
+			const selector = new SessionAccountSelectorComponent(
+				providerName,
+				accounts,
+				account => {
+					done();
+					const chosen =
+						account.email ??
+						account.accountId ??
+						account.projectId ??
+						account.enterpriseUrl ??
+						`#${account.credentialId}`;
+					const current = { ...this.ctx.settings.get("providers.defaultAccount") };
+					current[providerId] = chosen;
+					this.ctx.settings.set("providers.defaultAccount", current);
+					authStorage.setDefaultAccountSelector(providerId, chosen);
+					if (authStorage.getDefaultAccountCredentialId(providerId) !== account.credentialId) {
+						this.ctx.showWarning(`${account.label} is no longer available.`);
+						return;
+					}
+					this.ctx.showStatus(`Default account for ${providerName} is now ${account.label}.`);
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
 	async showResetUsageSelector(): Promise<void> {
 		const session = this.ctx.session;
 		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });

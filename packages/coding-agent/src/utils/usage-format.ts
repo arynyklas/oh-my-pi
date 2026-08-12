@@ -504,6 +504,7 @@ export function formatUsageBreakdown(
 	nowMs: number,
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
+	defaultAccounts?: ReadonlyMap<string, string>,
 ): string {
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of reports) {
@@ -543,6 +544,8 @@ export function formatUsageBreakdown(
 		lines.push(
 			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}`,
 		);
+		const defaultAccountLabel = defaultAccounts?.get(provider);
+		if (defaultAccountLabel) lines.push(`  ${chalk.dim(`default account: ${defaultAccountLabel}`)}`);
 		// Provider-wide disclaimers render once per provider, not per limit.
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
