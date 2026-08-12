@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Fixed an issue where an interrupted local embedding model download could permanently corrupt the cache and silently disable semantic recall. The system now automatically detects incomplete model files, clears the corrupted cache, and retries the download.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

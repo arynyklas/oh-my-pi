@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [17.2.15] - 2026-08-12
+
+### Fixed
+
+- Fixed classification of model IDs with large minor versions (e.g., `claude-opus-5-11`) or three-part versions, ensuring they no longer fall back to stale default configurations.
+
+## [17.2.13] - 2026-08-11
+
+### Changed
+
+- Standardized catalog discovery User-Agent headers on `omp/<version>` via the shared `USER_AGENT` utility.
+
+### Fixed
+
+- Marked `meta/muse-spark-1.2` and `muse-spark-1.2-contributor` as image-capable (`input: ["text", "image"]`) with the same Responses reasoning, thinking, and cost metadata as `muse-spark-1.1` (contributor uses its discounted 0.1/0.2 pricing), so `omp models` no longer lists them as text-only.
+- Fixed GLM-5.2 thinking levels across Baseten, CoreWeave, HuggingFace, and other uppercase-ID resellers, which were getting the generic `xhigh` effort ladder instead of the GLM-5.2-specific tiers. Also added Baseten `zai-org/GLM-5.2-Fast` and Fireworks `glm-5.2-fast` as reasoning models ([#8200](https://github.com/can1357/oh-my-pi/pull/8200) by [@jcfrancisco](https://github.com/jcfrancisco)).
+
+## [17.2.12] - 2026-08-08
+
+### Fixed
+
+- Fixed dynamically discovered `alibaba-token-plan/qwen3.8-max` metadata so thinking controls and image input are available ([#8019](https://github.com/can1357/oh-my-pi/issues/8019)).
+- Routed `opencode-go/deepseek-v4-flash` through the OpenAI responses API — the OpenCode Go gateway does not serve this model at `/zen/go/v1/chat/completions`, only at `/zen/go/v1/responses` (`deepseek-v4-pro` keeps chat completions).
+
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Increased the default stream idle-timeout floor on Amazon Bedrock to 900 seconds for reasoning and adaptive-thinking models (such as Claude) to prevent premature watchdog timeouts during long reasoning stretches.
+- Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
+- Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

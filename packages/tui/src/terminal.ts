@@ -459,12 +459,13 @@ export interface Terminal {
 		callback: (appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void,
 	): (() => void) | void;
 	/**
-	 * Issue a single OSC 11 background-color re-query, driving the appearance
+	 * Start a bounded OSC 11 background-color refresh cycle, driving appearance
 	 * callbacks through the same parse/dedup pipeline used at startup and on Mode
-	 * 2031 notifications. Bounded: one probe per call, no timers. Invoked on the
-	 * user's explicit display-reset gesture so terminals that cannot
-	 * deliver end-to-end Mode 2031 notifications still pick up a light/dark switch
-	 * without a restart.
+	 * 2031 notifications. Direct terminals need one query; tmux needs a
+	 * passthrough query to update its cache followed by one delayed direct cache
+	 * read. Invoked on the user's explicit display-reset gesture so terminals
+	 * without end-to-end Mode 2031 notifications pick up a light/dark switch
+	 * without a restart. No periodic probes are armed.
 	 *
 	 * A caller-provided token must be propagated unchanged to callbacks and
 	 * returned when the request is accepted. This lets callers establish ownership
@@ -517,6 +518,7 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 }
 const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
 type Osc11QueryRoute = "direct" | "tmux";
+const TMUX_OSC11_CACHE_REFRESH_DELAY_MS = 100;
 
 function isXtermScrollToBottomMode(mode: number): boolean {
 	return mode === 1010 || mode === 1011;
@@ -596,6 +598,7 @@ export class ProcessTerminal implements Terminal {
 	#osc11QueuedQuery?: { route: Osc11QueryRoute; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
 	#osc11ResponseBuffer = "";
+	#osc11TmuxRefreshTimer?: Timer;
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
@@ -671,13 +674,14 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
-	 * Re-query the terminal background via a single OSC 11 probe. Reuses the
-	 * startup DA1-sentinel FIFO, pending/queued gating, parsing, dedup, and
-	 * appearance callbacks. Inside tmux, only this explicit path wraps the query
-	 * and sentinel together for passthrough to the outer terminal; startup and
-	 * Mode 2031 probes remain direct. Bounded to one probe per call; no timers are
-	 * armed. Suppressed while inactive, headless, or after the terminal is torn
-	 * down.
+	 * Re-query the terminal background through the startup DA1-sentinel FIFO,
+	 * pending/queued gating, parsing, dedup, and appearance callbacks. Inside
+	 * tmux, only this explicit path first passes an OSC 11 query to the outer
+	 * terminal, waits briefly for tmux to consume the response into its cache,
+	 * then reads that cache with a direct query. The outer query deliberately has
+	 * no DA1 sentinel: multiplexers can decode a fragmented DA1 response as a key
+	 * sequence and leak the remaining bytes into the editor. Startup and Mode 2031
+	 * probes remain direct. Suppressed while inactive, headless, or after teardown.
 	 */
 	refreshAppearance(requestToken?: TerminalAppearanceRequestToken): TerminalAppearanceRequestToken | void {
 		if (!this.#active || this.#headless || this.#dead) return;
@@ -1041,7 +1045,7 @@ export class ProcessTerminal implements Terminal {
 				switch (owner.kind) {
 					case "osc11": {
 						if (this.#osc11Pending) {
-							// DA1 arrived before the OSC 11 reply: terminal does not support OSC 11.
+							// DA1 arrived before OSC 11 response: terminal doesn't support OSC 11.
 							this.#osc11Pending = false;
 							this.#osc11ActiveToken = undefined;
 							this.#osc11ResponseBuffer = "";
@@ -1221,11 +1225,20 @@ export class ProcessTerminal implements Terminal {
 		this.#osc11Pending = true;
 		this.#osc11ActiveToken = token;
 		this.#osc11ResponseBuffer = "";
-		this.#da1SentinelOwners.push({ kind: "osc11" });
 		if (route === "tmux") {
-			this.#safeWrite(wrapTmuxPassthrough("\x1b]11;?\x07\x1b[c"));
+			this.#safeWrite(wrapTmuxPassthrough("\x1b]11;?\x07"));
+			this.#osc11TmuxRefreshTimer = setTimeout(() => {
+				this.#osc11TmuxRefreshTimer = undefined;
+				if (this.#dead || !this.#osc11Pending) return;
+				this.#startDirectOsc11Query();
+			}, TMUX_OSC11_CACHE_REFRESH_DELAY_MS);
 			return;
 		}
+		this.#startDirectOsc11Query();
+	}
+
+	#startDirectOsc11Query(): void {
+		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 	}
@@ -1561,6 +1574,10 @@ export class ProcessTerminal implements Terminal {
 		if (this.#mode2031DebounceTimer) {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;
+		}
+		if (this.#osc11TmuxRefreshTimer) {
+			clearTimeout(this.#osc11TmuxRefreshTimer);
+			this.#osc11TmuxRefreshTimer = undefined;
 		}
 		this.#appearanceCallbacks = [];
 		this.#appearanceReportCallbacks = [];

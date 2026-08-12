@@ -30,7 +30,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { Theme } from "../../modes/theme/theme";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import type { TodoItem } from "../../tools/todo";
-import type { RecoveredRetryError } from "../shared-events";
+import type { RetryErrorUpdate } from "../shared-events";
 
 /** Alias for clarity */
 export type CustomToolUIContext = HookUIContext;
@@ -139,7 +139,7 @@ export type CustomToolSessionEvent =
 			success: boolean;
 			attempt: number;
 			finalError?: string;
-			recoveredErrors?: RecoveredRetryError[];
+			retryErrors?: RetryErrorUpdate[];
 	  }
 	| {
 			reason: "ttsr_triggered";

@@ -1333,6 +1333,14 @@ type OAuthCandidate = UsageCandidate<OAuthCredential>;
 type ApiKeyCandidate = UsageCandidate<ApiKeyCredential>;
 type UsageRankingResult<T extends AuthCredential> = UsageCandidate<T> & { blockedUntil: number | undefined };
 
+type CredentialBlockRouting = {
+	providerKey: string;
+	strategy: CredentialRankingStrategy | undefined;
+	rankingContext: CredentialRankingContext;
+	blockScope: string | undefined;
+	siblingBlockScopes: readonly string[];
+};
+
 type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
@@ -1693,7 +1701,11 @@ export class AuthStorage {
 			this.#data.set(provider, credentials);
 		}
 		this.#bumpGeneration("credentials");
-		if (credentialOrderChanged) this.#resetProviderAssignments(provider);
+		// Only a *reordering* invalidates positional assignments. First population
+		// (a fresh AuthStorage.reload()) has nothing to invalidate, and resetting
+		// there also wipes the persisted session-sticky rows — which is exactly the
+		// pin a restarted process is trying to restore.
+		if (credentialOrderChanged && current.length > 0) this.#resetProviderAssignments(provider);
 	}
 
 	#recordOAuthBearerCredentialId(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -4649,6 +4661,71 @@ export class AuthStorage {
 		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
 	}
 
+	#credentialBlockRouting(
+		provider: string,
+		credentialType: AuthCredential["type"],
+		modelId: string | undefined,
+	): CredentialBlockRouting {
+		const providerKey = this.#getProviderTypeKey(provider, credentialType);
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const rankingContext: CredentialRankingContext = { modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		return {
+			providerKey,
+			strategy,
+			rankingContext,
+			blockScope,
+			siblingBlockScopes: strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []),
+		};
+	}
+
+	/**
+	 * Blocks `targetIndex` and reports whether an eligible sibling remains.
+	 *
+	 * With a selection policy in play the sibling scan runs over durable row ids
+	 * rather than positions, and admits credentials of any type: the policy —
+	 * not the failing credential's type — defines the pool the caller may rotate
+	 * into.
+	 */
+	#blockCredentialForRotation(
+		provider: string,
+		credentialType: AuthCredential["type"],
+		targetIndex: number,
+		blockedUntil: number,
+		routing: CredentialBlockRouting,
+		selection?: AuthCredentialSelectionPolicy,
+	): UsageLimitMarkResult {
+		const stored = this.#getStoredCredentials(provider);
+		const targetCredentialId = targetIndex >= 0 ? stored[targetIndex]?.id : undefined;
+		if (targetIndex >= 0) {
+			this.#markCredentialBlocked(provider, routing.providerKey, targetIndex, blockedUntil, routing.blockScope);
+		}
+
+		const remainingCredentials = this.#getStoredCredentials(provider)
+			.map((entry, index) => ({ id: entry.id, credential: entry.credential, index }))
+			.filter(
+				entry =>
+					this.#isCredentialIdEligible(entry.id, selection) &&
+					entry.id !== targetCredentialId &&
+					(selection !== undefined || entry.credential.type === credentialType),
+			);
+
+		let retryAtMs: number | undefined;
+		for (const candidate of remainingCredentials) {
+			// Sibling availability must use the same scope set selection reads, or
+			// this reports a sibling as free that selection will then refuse.
+			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				this.#getProviderTypeKey(provider, candidate.credential.type),
+				candidate.index,
+				routing.siblingBlockScopes,
+			);
+			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+		}
+		return { switched: false, retryAtMs };
+	}
+
 	/**
 	 * Marks the current session's credential as temporarily blocked due to usage limits.
 	 * Uses usage reports to determine accurate reset time when available.
@@ -4695,21 +4772,17 @@ export class AuthStorage {
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
-		const providerKey = this.#getProviderTypeKey(provider, credentialType);
-		const strategy = this.#rankingStrategyResolver?.(provider);
-		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
-		const blockScope = strategy?.blockScope?.(rankingContext);
-		const siblingBlockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
-		if (credentialType === "oauth" && target.credential.type === "oauth" && strategy) {
+		if (credentialType === "oauth" && target.credential.type === "oauth" && routing.strategy) {
 			const report = await raceUsageWithSignal(
 				this.#getUsageReport(provider, target.credential, options),
 				options?.signal,
 			);
 			if (report) {
-				const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+				const scopedLimits = this.#getScopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (this.#isUsageLimitReached(scopedLimits)) {
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
 					if (resetAtMs && resetAtMs > blockedUntil) {
@@ -4725,34 +4798,7 @@ export class AuthStorage {
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
-		if (targetIndex >= 0) {
-			this.#markCredentialBlocked(provider, providerKey, targetIndex, blockedUntil, blockScope);
-		}
-
-		const remainingCredentials = this.#getStoredCredentials(provider)
-			.map((entry, index) => ({ id: entry.id, credential: entry.credential, index }))
-			.filter(
-				(entry): entry is { id: number; credential: AuthCredential; index: number } =>
-					this.#isCredentialIdEligible(entry.id, selection) &&
-					entry.id !== targetCredentialId &&
-					(selection !== undefined || entry.credential.type === credentialType),
-			);
-
-		let retryAtMs: number | undefined;
-		for (const candidate of remainingCredentials) {
-			// Sibling availability must use the same scope set selection reads, or
-			// this reports a sibling as free that selection will then refuse, most
-			// visibly when the sibling still carries a legacy shared block.
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
-				provider,
-				this.#getProviderTypeKey(provider, candidate.credential.type),
-				candidate.index,
-				siblingBlockScopes,
-			);
-			if (candidateBlockedUntil === undefined) return { switched: true };
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
-		}
-		return { switched: false, retryAtMs };
+		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing, selection);
 	}
 
 	/**
@@ -6811,6 +6857,8 @@ export class AuthStorage {
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
+	 * - account-scoped policy denial → temporarily block that account without
+	 *   marking its credential suspect, then rotate through eligible siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
@@ -6856,6 +6904,18 @@ export class AuthStorage {
 			selection,
 		});
 		if (!sessionCredential) return false;
+
+		if (AIError.isAccountPolicyError(error)) {
+			const routing = this.#credentialBlockRouting(provider, sessionCredential.type, options?.modelId);
+			return this.#blockCredentialForRotation(
+				provider,
+				sessionCredential.type,
+				sessionCredential.index,
+				Date.now() + AuthStorage.#defaultBackoffMs,
+				routing,
+				selection,
+			).switched;
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting

@@ -31,15 +31,14 @@ pub struct WaylandBackend {
 
 impl WaylandBackend {
 	pub fn new(display: DisplaySelector) -> Self {
+		// Remove the world-readable RemoteDesktop restore token that pre-#7884
+		// builds wrote during read-only calls; nothing reads it anymore (#7884).
+		portal::remove_orphaned_remote_desktop_token();
 		let (ax, ax_error) = match AtSpiAx::new() {
 			Ok(ax) => (Some(ax), None),
 			Err(err) => (None, Some(err)),
 		};
-		let (input, input_error) = match libei::Libei::new() {
-			Ok(input) => (Some(input), None),
-			Err(err) => (None, Some(err)),
-		};
-		Self { display, ax, ax_error, input, input_error, displays: Vec::new() }
+		Self { display, ax, ax_error, input: None, input_error: None, displays: Vec::new() }
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -53,16 +52,22 @@ impl WaylandBackend {
 		Ok(())
 	}
 
-	fn prepare_input(&self, target: &Target, kind: &str) -> CoreResult<()> {
+	fn prepare_input(&mut self, target: &Target, kind: &str) -> CoreResult<&mut libei::Libei> {
 		Self::window_input_error(target, kind)?;
-		if self.input.is_none() {
-			return Err(self.input_error.clone().unwrap_or_else(|| {
-				DesktopError::permission_denied(
-					"RemoteDesktop portal or LIBEI_SOCKET is required for Wayland input",
-				)
-			}));
+		if self.input.is_none() && self.input_error.is_none() {
+			match libei::Libei::new() {
+				Ok(input) => self.input = Some(input),
+				Err(err) => self.input_error = Some(err),
+			}
 		}
-		Ok(())
+		if let Some(input) = self.input.as_mut() {
+			return Ok(input);
+		}
+		Err(self.input_error.clone().unwrap_or_else(|| {
+			DesktopError::permission_denied(
+				"RemoteDesktop portal or LIBEI_SOCKET is required for Wayland input",
+			)
+		}))
 	}
 
 	#[cfg(feature = "wayland-pipewire")]
@@ -97,6 +102,13 @@ impl WaylandBackend {
 
 impl Backend for WaylandBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
+		let input_permission = if self.input.is_some() {
+			"granted"
+		} else if self.input_error.is_some() {
+			"unavailable"
+		} else {
+			"prompt-or-granted"
+		};
 		DesktopCapabilities {
 			backend: "wayland".to_string(),
 			display_server: Some("wayland".to_string()),
@@ -104,7 +116,7 @@ impl Backend for WaylandBackend {
 			// wayland-pipewire feature; without it capture() hard-errors, so the
 			// capability report must not advertise a capture the binary cannot do.
 			capture: cfg!(feature = "wayland-pipewire"),
-			input: self.input.is_some(),
+			input: self.input_error.is_none(),
 			ax: self.ax.is_some(),
 			background_window_input: false,
 			delivery_modes: vec!["background".to_string()],
@@ -113,11 +125,7 @@ impl Backend for WaylandBackend {
 			} else {
 				"unavailable".to_string()
 			},
-			input_permission: if self.input.is_some() {
-				"granted".to_string()
-			} else {
-				"unavailable".to_string()
-			},
+			input_permission: input_permission.to_string(),
 			ax_permission: if self.ax.is_some() {
 				"granted".to_string()
 			} else {
@@ -203,20 +211,12 @@ impl Backend for WaylandBackend {
 		_frame: &FrameGeometry,
 		_mode: DeliveryMode,
 	) -> CoreResult<()> {
-		self.prepare_input(target, "pointer input")?;
-		self
-			.input
-			.as_mut()
-			.ok_or_else(|| DesktopError::internal("Wayland input backend disappeared"))?
-			.pointer(ev)
+		self.prepare_input(target, "pointer input")?.pointer(ev)
 	}
 
 	fn type_text(&mut self, target: &Target, text: &str, _mode: DeliveryMode) -> CoreResult<()> {
-		self.prepare_input(target, "keyboard input")?;
 		self
-			.input
-			.as_mut()
-			.ok_or_else(|| DesktopError::internal("Wayland input backend disappeared"))?
+			.prepare_input(target, "keyboard input")?
 			.type_text(text)
 	}
 
@@ -226,11 +226,8 @@ impl Backend for WaylandBackend {
 		keys: &[KeyName],
 		_mode: DeliveryMode,
 	) -> CoreResult<()> {
-		self.prepare_input(target, "keyboard input")?;
 		self
-			.input
-			.as_mut()
-			.ok_or_else(|| DesktopError::internal("Wayland input backend disappeared"))?
+			.prepare_input(target, "keyboard input")?
 			.key_chord(keys)
 	}
 
@@ -248,7 +245,16 @@ impl Backend for WaylandBackend {
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		io::ErrorKind,
+		os::unix::net::UnixListener,
+		sync::{Mutex, mpsc},
+		thread,
+	};
+
 	use super::*;
+
+	static LIBEI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
@@ -259,6 +265,63 @@ mod tests {
 			input_error: None,
 			displays:    Vec::new(),
 		}
+	}
+	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
+		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
+		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
+		let _ = std::fs::remove_file(&socket);
+		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
+		listener
+			.set_nonblocking(true)
+			.expect("make fake libei socket nonblocking");
+		let (stop_tx, stop_rx) = mpsc::channel();
+		let accepted = thread::spawn(move || {
+			loop {
+				match listener.accept() {
+					Ok(_) => return true,
+					Err(err) if err.kind() == ErrorKind::WouldBlock => {
+						if !matches!(
+							stop_rx.recv_timeout(std::time::Duration::from_millis(10)),
+							Err(mpsc::RecvTimeoutError::Timeout)
+						) {
+							return false;
+						}
+					},
+					Err(err) => panic!("fake libei listener: {err}"),
+				}
+			}
+		});
+		let previous = std::env::var_os("LIBEI_SOCKET");
+		unsafe { std::env::set_var("LIBEI_SOCKET", &socket) };
+		let mut backend = WaylandBackend::new(DisplaySelector::All);
+		action(&mut backend);
+		let _ = stop_tx.send(());
+		if let Some(previous) = previous {
+			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
+		} else {
+			unsafe { std::env::remove_var("LIBEI_SOCKET") };
+		}
+		let connected = accepted.join().expect("fake libei listener");
+		let _ = std::fs::remove_file(socket);
+		connected
+	}
+
+	#[test]
+	fn readonly_backend_creation_does_not_connect_to_libei() {
+		let mut capabilities = None;
+		let connected = with_fake_libei(|backend| capabilities = Some(backend.capabilities()));
+		assert!(!connected, "read-only backend construction connected to libei");
+		let capabilities = capabilities.expect("Wayland capabilities");
+		assert!(capabilities.input);
+		assert_eq!(capabilities.input_permission, "prompt-or-granted");
+	}
+
+	#[test]
+	fn desktop_input_connects_to_libei_lazily() {
+		let connected = with_fake_libei(|backend| {
+			let _ = backend.type_text(&Target::Desktop, "hello", DeliveryMode::Foreground);
+		});
+		assert!(connected, "desktop input did not connect to libei");
 	}
 
 	#[test]

@@ -1,4 +1,4 @@
-import { VERSION } from "@oh-my-pi/pi-utils";
+import { isRecord, VERSION } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 export const UPSTREAM_RELEASE_REPO = "can1357/oh-my-pi";
@@ -8,10 +8,15 @@ const FORK_MARKER = "-fork.";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 
+/** Distribution channel advertised by a release's published npm manifest. */
+export type ReleaseDist = "npm" | "binary";
+
 export interface ReleaseInfo {
 	repo: string;
 	tag: string;
 	version: string;
+	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
+	dist?: ReleaseDist;
 }
 
 interface GitHubReleaseInfo {
@@ -27,6 +32,23 @@ export function isForkVersion(version: string = VERSION): boolean {
 
 export function buildBinaryDownloadUrl(repo: string, tag: string, binaryName: string): string {
 	return `https://github.com/${repo}/releases/download/${tag}/${binaryName}`;
+}
+
+/**
+ * Parse the `omp.dist` field from a published package manifest.
+ *
+ * Forward-compatibility contract with future releases: a release that is not
+ * installable as an npm package (e.g. a native rewrite) publishes
+ * `"omp": { "dist": "binary" }` in its package.json. Any value other than
+ * "npm" — including values this updater does not know yet — maps to "binary"
+ * so already-deployed updaters never run a package-manager install against a
+ * release that no longer supports it.
+ */
+export function resolveReleaseDist(manifest: unknown): ReleaseDist | undefined {
+	if (!isRecord(manifest) || !isRecord(manifest.omp)) return undefined;
+	const dist = manifest.omp.dist;
+	if (dist === undefined) return undefined;
+	return dist === "npm" ? "npm" : "binary";
 }
 
 export async function getLatestReleaseForVersion(
@@ -53,15 +75,16 @@ export async function getLatestUpstreamRelease(timeoutMs = RELEASE_METADATA_TIME
 	if (!response.ok) {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
-	const data = (await response.json()) as { version?: string };
-	const version = data.version;
-	if (!version) {
+	const data: unknown = await response.json();
+	if (!isRecord(data) || typeof data.version !== "string") {
 		throw new Error("No version found in release info");
 	}
+	const version = data.version;
 	return {
 		repo: UPSTREAM_RELEASE_REPO,
 		tag: `v${version}`,
 		version,
+		dist: resolveReleaseDist(data),
 	};
 }
 

@@ -826,23 +826,23 @@ function parseList(lines: string[], index: number, lexer: Lexer): { token: Token
 			if (/^\s*\n$/.test(next)) {
 				let lookahead = cursor + 1;
 				while (lookahead < lines.length && /^\s*\n$/.test(lines[lookahead]!)) lookahead++;
-				if (lookahead < lines.length) {
-					// A blank line closes the list unless the next top-level line is a
-					// compatible item (same bullet char / ordered delimiter) or indented
-					// item content. The blank must stay OUTSIDE the list raw (it becomes
-					// a `space` token) so token shape never depends on what follows —
-					// real marked does the same, and the TUI's streaming freeze relies
-					// on that append-stability.
-					const following = lines[lookahead]!;
-					const followingIndent = /^ */.exec(following)![0].length;
-					if (followingIndent <= first[1]!.length) {
-						const followingList = isList(following);
-						const compatible =
-							followingList !== null &&
-							/^\d/.test(followingList[2]!) === ordered &&
-							(ordered ? followingList[2]!.at(-1) === delimiter : followingList[2] === delimiter);
-						if (!compatible) break;
-					}
+				// A blank line closes the list unless the next top-level line is a
+				// compatible item (same bullet char / ordered delimiter) or indented
+				// item content. The blank must stay OUTSIDE the list raw (it becomes
+				// a `space` token) so token shape never depends on what follows —
+				// real marked does the same, and the TUI's streaming freeze relies
+				// on that append-stability. A blank run at end of input closes the
+				// list the same way, keeping it tight and its raw blank-free.
+				if (lookahead >= lines.length) break;
+				const following = lines[lookahead]!;
+				const followingIndent = /^ */.exec(following)![0].length;
+				if (followingIndent <= first[1]!.length) {
+					const followingList = isList(following);
+					const compatible =
+						followingList !== null &&
+						/^\d/.test(followingList[2]!) === ordered &&
+						(ordered ? followingList[2]!.at(-1) === delimiter : followingList[2] === delimiter);
+					if (!compatible) break;
 				}
 				text += next;
 			} else {

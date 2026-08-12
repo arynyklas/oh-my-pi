@@ -10,6 +10,77 @@ describe("marked compatibility", () => {
 		});
 	}
 
+	// Token-shape parity with real marked (verified against marked v15) at the
+	// list/blank-line boundary. The TUI streaming lexer freezes prefixes on
+	// these shapes, so a list's raw must never absorb a trailing blank run —
+	// mid-document OR at end of input — and looseness must not flip with the
+	// follower. The tui incremental tests compare this lexer to itself and
+	// cannot catch a shape drift.
+	const listBoundaryShapes: Array<[string, Array<[string, string] | [string, string, boolean]>]> = [
+		[
+			"- item\n\n",
+			[
+				["list", "- item", false],
+				["space", "\n\n"],
+			],
+		],
+		[
+			"1. a\n2. b\n\n",
+			[
+				["list", "1. a\n2. b", false],
+				["space", "\n\n"],
+			],
+		],
+		[
+			"- a\n\n\n",
+			[
+				["list", "- a", false],
+				["space", "\n\n\n"],
+			],
+		],
+		[
+			"- [x] done\n\n",
+			[
+				["list", "- [x] done", false],
+				["space", "\n\n"],
+			],
+		],
+		[
+			"- item\n\nhello",
+			[
+				["list", "- item", false],
+				["space", "\n\n"],
+				["paragraph", "hello"],
+			],
+		],
+		[
+			"1. a\n2. b\n\n1) x",
+			[
+				["list", "1. a\n2. b", false],
+				["space", "\n\n"],
+				["list", "1) x", false],
+			],
+		],
+		// Same-marker continuation across the blank still merges into one loose list.
+		["1. a\n2. b\n\n1. c", [["list", "1. a\n2. b\n\n1. c", true]]],
+		// A blank inside an item (indented continuation) stays in the item raw.
+		[
+			"- a\n\n  b\n\n",
+			[
+				["list", "- a\n\n  b", true],
+				["space", "\n\n"],
+			],
+		],
+	];
+	for (const [source, shape] of listBoundaryShapes) {
+		test(`keeps the list/blank boundary shape for ${JSON.stringify(source)}`, () => {
+			const tokens = [...Lexer.lex(source)].map(token =>
+				token.type === "list" ? [token.type, token.raw, token.loose] : [token.type, token.raw],
+			);
+			expect(tokens).toEqual(shape);
+		});
+	}
+
 	test("runs block and inline tokenizer/renderer extensions", () => {
 		const latexBlock: TokenizerAndRendererExtension = {
 			name: "latexBlock",

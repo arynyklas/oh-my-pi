@@ -101,7 +101,6 @@ import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
-import { StrippedToolCallsPlaceholder } from "../components/stripped-tool-calls-placeholder";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -505,6 +504,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
+			case "externalThinking":
+				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
+					this.ctx.showError(`Failed to apply external thinking: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -516,15 +520,13 @@ export class SelectorController {
 				this.ctx.hideToolActivity = hidden;
 				if (!hidden) this.ctx.toolOutputExpanded = false;
 				for (const child of this.ctx.chatContainer.children) {
-					if (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent) {
-						if (!hidden) child.setExpanded(false);
-						child.setToolActivityVisible(!hidden);
+					if (!hidden && (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)) {
+						child.setExpanded(false);
 					} else if (child instanceof AssistantMessageComponent) {
 						child.setToolResultImagesVisible(!hidden);
-					} else if (child instanceof StrippedToolCallsPlaceholder) {
-						child.setToolActivityVisible(!hidden);
 					}
 				}
+				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
 				this.ctx.ui.resetDisplay();
 				break;
@@ -2120,6 +2122,7 @@ export class SelectorController {
 			remote: this.ctx.collabGuest?.hubRemote,
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
+			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,

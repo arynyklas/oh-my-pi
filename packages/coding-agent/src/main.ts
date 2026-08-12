@@ -1022,11 +1022,12 @@ export async function buildSessionOptions(
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
+	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
 	const prewalkEnabled = parsed.noPrewalk
 		? false
-		: parsed.prewalk === true || parsed.prewalkInto !== undefined
+		: explicitPrewalk
 			? true
-			: activeSettings.get("prewalk.enabled");
+			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
@@ -1320,6 +1321,10 @@ export async function runRootCommand(
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
+	}
+	// Apply --external-thinking CLI flag (ephemeral, not persisted)
+	if (parsedArgs.externalThinking) {
+		settingsInstance.override("externalThinking", true);
 	}
 
 	await logger.time(

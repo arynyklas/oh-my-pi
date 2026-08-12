@@ -36,6 +36,7 @@ interface FakeAcpBuiltinSession {
 	messages: unknown[];
 	settings: Settings;
 	model: { provider: string; id: string } | undefined;
+	modelRegistry: { authStorage: { getDefaultAccountIdentity: (provider: string) => undefined } };
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
@@ -151,6 +152,7 @@ function createRuntime() {
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
+		modelRegistry: { authStorage: { getDefaultAccountIdentity: () => undefined } },
 		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},

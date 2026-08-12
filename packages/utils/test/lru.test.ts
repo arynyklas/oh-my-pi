@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { LRUCache } from "../src/lru";
 
 describe("LRUCache", () => {
@@ -86,15 +86,22 @@ describe("LRUCache", () => {
 		});
 	});
 
-	test("matches updateAgeOnGet", async () => {
-		const cache = new LRUCache<string, number>({ max: 2, ttl: 30, updateAgeOnGet: true });
-		cache.set("a", 1);
-		// Integration against the cache's performance-based clock requires real elapsed time.
-		await Bun.sleep(20);
-		expect(cache.get("a")).toBe(1);
-		await Bun.sleep(20);
-		expect(cache.has("a")).toBe(true);
-		await Bun.sleep(20);
-		expect(cache.has("a")).toBe(false);
+	test("matches updateAgeOnGet", () => {
+		// Drive the cache's performance.now() clock deterministically — the real
+		// clock version (30ms TTL, 20ms sleeps) raced CI load and flaked.
+		let now = 0;
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+		try {
+			const cache = new LRUCache<string, number>({ max: 2, ttl: 30, updateAgeOnGet: true });
+			cache.set("a", 1);
+			now = 20;
+			expect(cache.get("a")).toBe(1); // refreshes the entry's age to t=20
+			now = 40;
+			expect(cache.has("a")).toBe(true); // 20ms since refresh < 30ms TTL
+			now = 60;
+			expect(cache.has("a")).toBe(false); // 40ms since refresh > 30ms TTL
+		} finally {
+			clock.mockRestore();
+		}
 	});
 });

@@ -2237,6 +2237,59 @@ describe("Anthropic request fingerprint alignment", () => {
 		);
 	});
 
+	it("routes chat through ANTHROPIC_BASE_URL for the stock Anthropic provider (#7874)", async () => {
+		await withEnv(
+			{
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+				ANTHROPIC_BASE_URL: "https://my-gateway.example.com",
+				ANTHROPIC_CUSTOM_HEADERS: "x-api-key: gateway-key",
+			},
+			() => {
+				const options = buildAnthropicClientOptions({
+					model: ANTHROPIC_MODEL,
+					apiKey: "sk-ant-api-gateway-key",
+					extraBetas: [],
+					stream: true,
+					interleavedThinking: false,
+					dynamicHeaders: {},
+				});
+
+				// Chat no longer leaks a gateway-scoped key to api.anthropic.com.
+				expect(options.baseURL).toBe("https://my-gateway.example.com");
+				// A non-official gateway forwards ANTHROPIC_CUSTOM_HEADERS, so gateways
+				// that require x-api-key work without enabling Foundry mode.
+				expect(options.defaultHeaders["X-Api-Key"]).toBe("gateway-key");
+			},
+		);
+	});
+
+	it("keeps an explicit non-official model.baseUrl ahead of ANTHROPIC_BASE_URL (#7874)", async () => {
+		const configuredModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			baseUrl: "https://configured.example.com",
+		});
+		await withEnv(
+			{
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+				ANTHROPIC_BASE_URL: "https://my-gateway.example.com",
+			},
+			() => {
+				const options = buildAnthropicClientOptions({
+					model: configuredModel,
+					apiKey: "sk-ant-api-test",
+					extraBetas: [],
+					stream: true,
+					interleavedThinking: false,
+					dynamicHeaders: {},
+				});
+
+				expect(options.baseURL).toBe("https://configured.example.com");
+			},
+		);
+	});
+
 	it("loads Foundry mTLS and CA material from file paths", async () => {
 		const tmpDir = path.join(os.tmpdir(), `pi-ai-foundry-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 		fs.mkdirSync(tmpDir, { recursive: true });
@@ -2703,39 +2756,60 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("disables adaptive-only thinking when the caller sets disableReasoning via the public stream() path", async () => {
-		// #6589: disableReasoning is a SimpleStreamOptions flag that never reaches
-		// AnthropicOptions directly; mapOptionsForApi must fold it into
-		// thinkingEnabled:false so adaptive-only Opus 4.7 omits thinking + pins low
-		// effort instead of defaulting to adaptive-ON at the requested effort.
-		const { promise, resolve } = Promise.withResolvers<unknown>();
-		streamSimple(
-			buildModel({
-				...ANTHROPIC_MODEL_SPEC,
-				id: "claude-opus-4-7",
-				name: "Claude Opus 4.7",
-				thinking: {
-					mode: "anthropic-adaptive",
-					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+	for (const flag of ["disableReasoning", "forceReasoningOff"] as const) {
+		it(`disables Fable adaptive thinking when the public stream sets ${flag}`, async () => {
+			const { promise, resolve } = Promise.withResolvers<unknown>();
+			streamSimple(
+				buildModel({
+					...ANTHROPIC_MODEL_SPEC,
+					id: "claude-fable-5",
+					name: "Claude Fable 5",
+					thinking: {
+						mode: "anthropic-adaptive",
+						efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+					},
+				}),
+				{
+					systemPrompt: ["Stay concise."],
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [
+						{
+							name: "think",
+							description: "Private scratchpad; not shown to user.",
+							strict: true,
+							parameters: {
+								type: "object",
+								properties: { thoughts: { type: "string" } },
+								required: ["thoughts"],
+								additionalProperties: false,
+							} as TJsonSchema,
+						},
+					],
 				},
-			}),
-			{
-				systemPrompt: ["Stay concise."],
-				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-			},
-			{
-				apiKey: "sk-ant-oat-test",
-				signal: createAbortedSignal(),
-				reasoning: Effort.High,
-				disableReasoning: true,
-				onPayload: payload => resolve(payload),
-			},
-		);
-		const payload = (await promise) as { thinking?: unknown; output_config?: { effort?: string } };
+				{
+					apiKey: "sk-ant-oat-test",
+					signal: createAbortedSignal(),
+					reasoning: Effort.High,
+					[flag]: true,
+					onPayload: payload => resolve(payload),
+				},
+			);
+			const payload = (await promise) as {
+				thinking?: unknown;
+				output_config?: { effort?: string };
+				tools?: Array<{
+					eager_input_streaming?: boolean;
+					input_schema?: { properties?: Record<string, unknown>; required?: string[] };
+				}>;
+			};
 
-		expect(payload.thinking).toBeUndefined();
-		expect(payload.output_config).toEqual({ effort: "low" });
-	});
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.output_config).toEqual({ effort: "low" });
+			expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
+			expect(payload.tools?.[0]?.input_schema?.properties).toHaveProperty("thoughts");
+			expect(payload.tools?.[0]?.input_schema?.required).toEqual(["thoughts"]);
+		});
+	}
 
 	it("deletes thinking without an effort pin for non-adaptive reasoning models on forced tool choice", async () => {
 		// Budget-thinking models (Sonnet 4.5) turn thinking off by simple omission,
