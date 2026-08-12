@@ -187,9 +187,37 @@ describe("priority service-tier premium-request backfill", () => {
 		const tierLineEnd = bytes.indexOf(0x0a, bytes.indexOf(Buffer.from("service_tier_change"))) + 1;
 		expect(tierLineEnd).toBeGreaterThan(0);
 
-		const second = await parseSessionFile(sessionFile, tierLineEnd);
+		const second = await parseSessionFile(sessionFile, { fromOffset: tierLineEnd });
 		expect(second.stats).toHaveLength(1);
 		expect(second.stats[0]?.entryId).toBe("d1");
 		expect(second.stats[0]?.usage.premiumRequests).toBe(1);
+	});
+
+	it("resumes a second sync with the persisted service tier instead of losing it", async () => {
+		const sessionFile = await writeSession("--tmp--proj", "05.jsonl", {
+			lines: [
+				{ type: "session", version: 1, id: "s5", timestamp: new Date().toISOString(), cwd: "/tmp/proj" },
+				{ type: "service_tier_change", id: "stc", timestamp: new Date().toISOString(), serviceTier: "priority" },
+				assistantEntry({ id: "e1", provider: "openai" }),
+			],
+		});
+
+		await syncAllSessions({ workers: 1 });
+
+		await fs.appendFile(sessionFile, `${JSON.stringify(assistantEntry({ id: "e2", provider: "openai" }))}\n`);
+		// Both writes can land in the same millisecond, which the mtime guard
+		// would read as "nothing new".
+		const future = new Date(Date.now() + 1000);
+		await fs.utimes(sessionFile, future, future);
+
+		await syncAllSessions({ workers: 1 });
+
+		// The second sync starts past the tier line, so crediting `e2` proves the
+		// tier came back from `file_offsets.service_tier`.
+		const requests = getRecentRequests(50)
+			.filter(r => r.sessionFile === sessionFile)
+			.sort((a, b) => a.entryId.localeCompare(b.entryId));
+		expect(requests.map(r => r.entryId)).toEqual(["e1", "e2"]);
+		expect(requests.map(r => r.usage.premiumRequests)).toEqual([1, 1]);
 	});
 });

@@ -25,6 +25,7 @@
 - Fixed fork self-updates skipping upstream's release-asset integrity gate; fork releases now resolve through the same GitHub size and SHA-256 digest verification as upstream releases.
 - Fixed `models.yml` providers whose auth headers come from config (`apiKey`, `authHeader`, or an explicit `Authorization`) losing every cached discovery model after upstream stopped persisting headers in the model cache; those rows are kept and re-headered from config instead of forcing an online refetch.
 - Fixed `omp usage` hiding a disabled teammate's tombstone whenever another active account merely shared its organization: upstream's new active-account filter accepted an org-only match even after emails or account ids disagreed, so lost capacity in a shared Anthropic/ChatGPT org went unreported. The org fallback now applies only when no base identifier contradicts it.
+- Fixed `omp stats` crashing with `ENOMEM` while syncing multi-gigabyte session transcripts; sync now parses in bounded chunks, resumes after an interruption, and reports intra-file byte progress.
 
 ## [17.2.10] - 2026-08-06
 

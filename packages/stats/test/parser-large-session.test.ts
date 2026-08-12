@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
+import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -80,5 +81,30 @@ describe("large session parsing", () => {
 
 		expect(result.stats).toHaveLength(256);
 		expect(result.newOffset).toBeGreaterThan(4 * 1024 * 1024);
+	});
+
+	it("resumes across byte-budgeted chunks without dropping or duplicating entries", async () => {
+		const sessionFile = await writeLargeSessionFile();
+		const size = (await fs.stat(sessionFile)).size;
+		const seen: string[] = [];
+		let offset = 0;
+		let tier: ServiceTierByFamily | null = null;
+		let calls = 0;
+		for (;;) {
+			const chunk = await parseSessionFile(sessionFile, {
+				fromOffset: offset,
+				serviceTier: tier,
+				maxBytes: 512 * 1024,
+			});
+			calls++;
+			seen.push(...chunk.stats.map(s => s.entryId));
+			expect(chunk.newOffset).toBeGreaterThan(offset);
+			offset = chunk.newOffset;
+			tier = chunk.serviceTier;
+			if (chunk.done) break;
+		}
+		expect(calls).toBeGreaterThan(1);
+		expect(offset).toBe(size);
+		expect(seen).toEqual(Array.from({ length: 256 }, (_, i) => `assistant-${i}`));
 	});
 });

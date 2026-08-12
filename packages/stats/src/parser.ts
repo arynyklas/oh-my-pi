@@ -10,7 +10,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
@@ -298,68 +298,146 @@ const LF = 0x0a;
 const CR = 0x0d;
 const jsonLineDecoder = new TextDecoder();
 
-function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEntry | null {
-	while (end > start && bytes[end - 1] === CR) end--;
-	if (end <= start) return null;
+/** Positional read granularity. Verified flat-RSS on a 6.3 GB transcript. */
+const READ_CHUNK_BYTES = 4 * 1024 * 1024;
+/** Bytes of a transcript one `parseSessionFile` call consumes before yielding. */
+export const PARSE_CHUNK_BYTES = 256 * 1024 * 1024;
+/** A single JSONL line longer than this is discarded rather than buffered. */
+const MAX_LINE_BYTES = 64 * 1024 * 1024;
+
+function parseJsonLine(line: Uint8Array): SessionEntry | null {
+	let end = line.length;
+	while (end > 0 && line[end - 1] === CR) end--;
+	if (end === 0) return null;
 	try {
-		return JSON.parse(jsonLineDecoder.decode(bytes.subarray(start, end))) as SessionEntry;
+		return JSON.parse(jsonLineDecoder.decode(line.subarray(0, end))) as SessionEntry;
 	} catch {
 		return null;
 	}
 }
 
-function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
-	let cursor = 0;
-	let read = 0;
+/**
+ * Walk the JSONL lines of `sessionPath` starting at byte `start`, reading at
+ * most {@link READ_CHUNK_BYTES} per positional read so peak memory stays flat
+ * regardless of file size (advisor transcripts on real machines reach 13 GB,
+ * which no single allocation can serve).
+ *
+ * `visit` receives a view into the read buffer and must not retain it past the
+ * call; returning `false` stops the scan without committing that line.
+ *
+ * Returns the absolute offset just past the last committed line terminator —
+ * always a line boundary, so it is safe to persist and resume from — and
+ * whether the scan reached end of file. The scan also stops once `maxBytes`
+ * have been committed since `start`.
+ */
+async function scanSessionLines(
+	sessionPath: string,
+	start: number,
+	maxBytes: number,
+	visit: (line: Uint8Array) => boolean,
+): Promise<{ read: number; done: boolean }> {
+	const file = Bun.file(sessionPath);
+	const size = file.size;
+	let pos = Math.min(Math.max(0, start), size);
+	const begin = pos;
+	let read = pos;
+	if (pos >= size) return { read, done: true };
 
-	while (cursor < bytes.length) {
-		const newline = bytes.indexOf(LF, cursor);
-		const hasNewline = newline !== -1;
-		const lineEnd = hasNewline ? newline : bytes.length;
-		const entry = parseJsonLine(bytes, cursor, lineEnd);
-		if (entry) {
-			visit(entry);
-			read = hasNewline ? newline + 1 : lineEnd;
-		} else if (hasNewline) {
-			read = newline + 1;
-		} else {
-			break;
+	let carry: Uint8Array | null = null;
+	let discarding = false;
+
+	while (pos < size) {
+		const chunk = await file.slice(pos, Math.min(size, pos + READ_CHUNK_BYTES)).bytes();
+		// File shrank mid-scan (rotation/truncation); commit what we have.
+		if (chunk.length === 0) return { read, done: true };
+		const chunkBase = pos;
+		pos += chunk.length;
+
+		let c = 0;
+		while (c < chunk.length) {
+			const nl = chunk.indexOf(LF, c);
+			if (nl === -1) {
+				if (!discarding) {
+					const rest = chunk.subarray(c);
+					const carried: number = carry?.length ?? 0;
+					if (carried + rest.length > MAX_LINE_BYTES) {
+						carry = null;
+						discarding = true;
+						logger.warn("stats: skipping oversized session line", { sessionPath, offset: read });
+					} else {
+						// Copy: `rest` views the chunk buffer, which the next read replaces.
+						const merged = new Uint8Array(carried + rest.length);
+						if (carry) merged.set(carry, 0);
+						merged.set(rest, carried);
+						carry = merged;
+					}
+				}
+				break;
+			}
+			if (discarding) {
+				discarding = false;
+			} else {
+				let line: Uint8Array;
+				if (carry) {
+					const merged = new Uint8Array(carry.length + (nl - c));
+					merged.set(carry, 0);
+					merged.set(chunk.subarray(c, nl), carry.length);
+					line = merged;
+					carry = null;
+				} else {
+					line = chunk.subarray(c, nl);
+				}
+				if (!visit(line)) return { read, done: false };
+			}
+			read = chunkBase + nl + 1;
+			c = nl + 1;
+			// Budget exhausted. If it ran out exactly at EOF the caller has the
+			// whole file, so report `done` and save it a no-op round trip.
+			if (read - begin >= maxBytes) return { read, done: read >= size };
 		}
-		cursor = hasNewline ? newline + 1 : lineEnd;
 	}
 
-	return read;
+	// Final line without a trailing newline: surface it, but leave its bytes
+	// uncommitted so a later append completes the line. Every insert path is an
+	// idempotent upsert, so re-visiting it on the next sync is harmless.
+	if (carry && !discarding && carry.length > 0) visit(carry);
+	return { read, done: true };
 }
 
-function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
-	const entries: SessionEntry[] = [];
-	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
-	return { entries, read };
-}
+const SERVICE_TIER_NEEDLE = Buffer.from('"service_tier_change"');
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	visitSessionEntriesLenient(bytes, entry => {
-		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-	});
-	return currentServiceTier;
-}
 /**
- * Parse a session file and extract all assistant message stats.
- * Uses incremental reading with offset tracking.
- *
- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
- * state derived from `service_tier_change` entries that affects whether
- * subsequent OpenAI assistant replies count as premium requests. Incremental
- * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
+ * Recover the service tier active at `endOffset` by replaying the preceding
+ * bytes without materializing them. `endOffset` always comes from a previous
+ * `newOffset` and is therefore a line boundary, so passing it as the byte
+ * budget stops the scan exactly there. Lines are prefiltered with a raw byte
+ * search, keeping the pass memory-scan bound rather than JSON bound.
  */
+async function scanServiceTierPrefix(sessionPath: string, endOffset: number): Promise<ServiceTierByFamily | null> {
+	let tier: ServiceTierByFamily | undefined;
+	await scanSessionLines(sessionPath, 0, endOffset, line => {
+		const view = Buffer.from(line.buffer as ArrayBuffer, line.byteOffset, line.length);
+		if (!view.includes(SERVICE_TIER_NEEDLE)) return true;
+		const entry = parseJsonLine(line);
+		if (entry && isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
+		return true;
+	});
+	return tier ?? null;
+}
+
+export interface ParseSessionOptions {
+	/** Resume offset; must be a line boundary from a previous `newOffset`. Default 0. */
+	fromOffset?: number;
+	/**
+	 * Active service tier at `fromOffset`. `null` = none active (fresh file, or a
+	 * recorded absence). `undefined` = unknown, which makes this call replay the
+	 * prefix with {@link scanServiceTierPrefix} to recover it.
+	 */
+	serviceTier?: ServiceTierByFamily | null;
+	/** Soft byte budget for this call; the scan stops at the next line boundary past it. */
+	maxBytes?: number;
+}
+
 export interface ParseSessionResult {
 	stats: MessageStats[];
 	userStats: UserMessageStats[];
@@ -367,16 +445,36 @@ export interface ParseSessionResult {
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
+	/** Active tier at `newOffset`; feed back into the next call for this file. */
+	serviceTier: ServiceTierByFamily | null;
+	/** True when `newOffset` reached end of file as observed by this pass. */
+	done: boolean;
 }
-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
-	let bytes: Uint8Array;
-	try {
-		bytes = await Bun.file(sessionPath).bytes();
-	} catch (err) {
-		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
-		throw err;
-	}
+
+/**
+ * Parse a slice of a session file and extract assistant/user/tool stats.
+ *
+ * Reading is incremental in two dimensions: `fromOffset` skips bytes already
+ * committed by an earlier sync, and `maxBytes` caps how much this call
+ * consumes so multi-gigabyte transcripts are ingested in bounded-memory
+ * chunks. Callers loop until `done`, feeding `newOffset`/`serviceTier` back in.
+ *
+ * Service-tier carry-over: `serviceTier` is session-scoped state derived from
+ * `service_tier_change` entries that decides whether subsequent OpenAI
+ * assistant replies count as premium requests. Incremental syncs that resume
+ * past the most-recent tier change would otherwise lose it and silently record
+ * `premiumRequests = 0` for priority traffic (the coding-agent stopped folding
+ * the tier into `usage.premiumRequests` after 13f59162e — the parser is now the
+ * sole source of truth). Callers persist the returned tier; when they cannot
+ * (rows predating tier persistence) they pass `undefined` and this call
+ * replays the prefix to recover it.
+ */
+export async function parseSessionFile(
+	sessionPath: string,
+	options: ParseSessionOptions = {},
+): Promise<ParseSessionResult> {
+	const fromOffset = Math.max(0, options.fromOffset ?? 0);
+	const maxBytes = options.maxBytes ?? PARSE_CHUNK_BYTES;
 
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
@@ -385,59 +483,85 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
-	const userByEntryId = new Map<string, UserMessageStats>();
-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
-	const unprocessed = bytes.subarray(start);
-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
-	}
-	for (const entry of entries) {
-		if (isServiceTierChange(entry)) {
-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-			continue;
-		}
-		if (isUserMessage(entry)) {
-			const userMsg = extractUserStats(sessionPath, folder, entry);
-			if (userMsg) {
-				userStats.push(userMsg);
-				userByEntryId.set(entry.id, userMsg);
+	let currentServiceTier: ServiceTierByFamily | null | undefined;
+
+	try {
+		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
+		currentServiceTier =
+			fromOffset === 0
+				? null
+				: options.serviceTier !== undefined
+					? options.serviceTier
+					: await scanServiceTierPrefix(sessionPath, fromOffset);
+
+		const { read, done } = await scanSessionLines(sessionPath, fromOffset, maxBytes, line => {
+			const entry = parseJsonLine(line);
+			if (!entry) return true;
+			if (isServiceTierChange(entry)) {
+				currentServiceTier = coerceServiceTierByFamily(entry.serviceTier) ?? null;
+				return true;
 			}
-			continue;
-		}
-		if (isToolResultMessage(entry)) {
-			const link = extractToolResultLink(sessionPath, entry);
-			if (link) toolResults.push(link);
-			continue;
-		}
-		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
-			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-			// Link assistant's responding model back to the user message it answered.
-			const parentId = (entry as SessionMessageEntry).parentId;
-			if (parentId) {
-				const msg = entry.message as AssistantMessage;
-				if (msg.model && msg.provider) {
-					// Emit unconditionally. The aggregator's UPDATE is guarded by
-					// `model IS NULL` so this is idempotent: a no-op for already
-					// linked rows, a fix-up for fresh inserts (which start NULL
-					// because the user row is recorded before its reply lands) and
-					// for cross-pass orphans whose parent was committed by an
-					// earlier incremental sync.
-					userLinks.push({
-						sessionFile: sessionPath,
-						entryId: parentId,
-						model: msg.model,
-						provider: msg.provider,
-					});
+			if (isUserMessage(entry)) {
+				const userMsg = extractUserStats(sessionPath, folder, entry);
+				if (userMsg) userStats.push(userMsg);
+				return true;
+			}
+			if (isToolResultMessage(entry)) {
+				const link = extractToolResultLink(sessionPath, entry);
+				if (link) toolResults.push(link);
+				return true;
+			}
+			if (isAssistantMessage(entry)) {
+				const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier ?? undefined, agentType);
+				if (msgStats) stats.push(msgStats);
+				toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+				// Link assistant's responding model back to the user message it answered.
+				const parentId = (entry as SessionMessageEntry).parentId;
+				if (parentId) {
+					const msg = entry.message as AssistantMessage;
+					if (msg.model && msg.provider) {
+						// Emit unconditionally. The aggregator's UPDATE is guarded by
+						// `model IS NULL` so this is idempotent: a no-op for already
+						// linked rows, a fix-up for fresh inserts (which start NULL
+						// because the user row is recorded before its reply lands) and
+						// for cross-pass orphans whose parent was committed by an
+						// earlier incremental sync.
+						userLinks.push({
+							sessionFile: sessionPath,
+							entryId: parentId,
+							model: msg.model,
+							provider: msg.provider,
+						});
+					}
 				}
 			}
-		}
-	}
+			return true;
+		});
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+		return {
+			stats,
+			userStats,
+			userLinks,
+			toolCalls,
+			toolResults,
+			newOffset: read,
+			serviceTier: currentServiceTier ?? null,
+			done,
+		};
+	} catch (err) {
+		if (isEnoent(err))
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				newOffset: fromOffset,
+				serviceTier: currentServiceTier ?? null,
+				done: true,
+			};
+		throw err;
+	}
 }
 
 /**
@@ -481,19 +605,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
 }
 
 /**
- * Find a specific entry in a session file.
+ * Find a specific entry in a session file. Uses the bounded scanner rather
+ * than streaming the whole file, so looking up an entry in a multi-gigabyte
+ * transcript costs one chunk of memory instead of the file's size.
  */
 export async function getSessionEntry(sessionPath: string, entryId: string): Promise<SessionEntry | null> {
+	let found: SessionEntry | null = null;
 	try {
-		for await (const line of readLines(Bun.file(sessionPath).stream())) {
-			const entry = parseJsonLine(line, 0, line.length);
+		await scanSessionLines(sessionPath, 0, Number.POSITIVE_INFINITY, line => {
+			const entry = parseJsonLine(line);
 			if (entry && "id" in entry && entry.id === entryId) {
-				return entry;
+				found = entry;
+				return false;
 			}
-		}
+			return true;
+		});
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
 	}
-	return null;
+	return found;
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { parseArgs } from "node:util";
-import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
 import { closeDb } from "./db";
 import { startServer } from "./server";
@@ -147,7 +147,11 @@ Examples:
 				const idx = event.sessionFile.indexOf(marker);
 				const short = idx >= 0 ? event.sessionFile.slice(idx + marker.length) : event.sessionFile;
 				const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
-				const line = `[${event.current}/${event.total}] ${pct}%  ${short}`;
+				const bytes =
+					event.fileBytes > 0 && event.fileOffset < event.fileBytes
+						? ` ${formatBytes(event.fileOffset)}/${formatBytes(event.fileBytes)}`
+						: "";
+				const line = `[${event.current}/${event.total}] ${pct}%  ${short}${bytes}`;
 				const columns = process.stderr.columns ?? 120;
 				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
 				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
