@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import type { GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -127,7 +127,8 @@ export async function initDb(): Promise<Database> {
 		CREATE TABLE IF NOT EXISTS file_offsets (
 			session_file TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL,
-			last_modified INTEGER NOT NULL
+			last_modified INTEGER NOT NULL,
+			service_tier TEXT
 		);
 
 		CREATE TABLE IF NOT EXISTS user_messages (
@@ -178,6 +179,15 @@ export async function initDb(): Promise<Database> {
 			value TEXT NOT NULL
 		);
 	`);
+
+	// Service tier active at `offset`, so an incremental sync of a huge
+	// transcript does not have to replay the prefix to recover it. Rows written
+	// before this column exists stay SQL NULL, which `getFileOffset` reports as
+	// "unknown" (one prefix replay) rather than "no tier active".
+	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
+	if (!offsetColumns.some(column => column.name === "service_tier")) {
+		db.run("ALTER TABLE file_offsets ADD COLUMN service_tier TEXT");
+	}
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -360,27 +370,52 @@ function backfillMissingCatalogCosts(database: Database): void {
 
 /**
  * Get the stored offset for a session file.
+ *
+ * `serviceTier` is three-state: `undefined` means unknown (a row that predates
+ * tier persistence, or unparseable JSON) and makes the parser replay the
+ * prefix once to recover the tier; `null` is a recorded absence of any active
+ * tier; an object is the recorded tier at `offset`.
  */
-export function getFileOffset(sessionFile: string): { offset: number; lastModified: number } | null {
+export function getFileOffset(
+	sessionFile: string,
+): { offset: number; lastModified: number; serviceTier: ServiceTierByFamily | null | undefined } | null {
 	if (!db) return null;
 
-	const stmt = db.prepare("SELECT offset, last_modified FROM file_offsets WHERE session_file = ?");
-	const row = stmt.get(sessionFile) as { offset: number; last_modified: number } | undefined;
+	const stmt = db.prepare("SELECT offset, last_modified, service_tier FROM file_offsets WHERE session_file = ?");
+	const row = stmt.get(sessionFile) as
+		| { offset: number; last_modified: number; service_tier: string | null }
+		| undefined;
+	if (!row) return null;
 
-	return row ? { offset: row.offset, lastModified: row.last_modified } : null;
+	let serviceTier: ServiceTierByFamily | null | undefined;
+	if (row.service_tier !== null) {
+		try {
+			serviceTier = JSON.parse(row.service_tier) as ServiceTierByFamily | null;
+		} catch {
+			serviceTier = undefined;
+		}
+	}
+	return { offset: row.offset, lastModified: row.last_modified, serviceTier };
 }
 
 /**
- * Update the stored offset for a session file.
+ * Update the stored offset for a session file. A `null` tier is persisted as
+ * the JSON literal `'null'`, which is what distinguishes a recorded absence
+ * from a legacy SQL `NULL`.
  */
-export function setFileOffset(sessionFile: string, offset: number, lastModified: number): void {
+export function setFileOffset(
+	sessionFile: string,
+	offset: number,
+	lastModified: number,
+	serviceTier: ServiceTierByFamily | null,
+): void {
 	if (!db) return;
 
 	const stmt = db.prepare(`
-		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified)
-		VALUES (?, ?, ?)
+		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified, service_tier)
+		VALUES (?, ?, ?, ?)
 	`);
-	stmt.run(sessionFile, offset, lastModified);
+	stmt.run(sessionFile, offset, lastModified, JSON.stringify(serviceTier));
 }
 
 /**

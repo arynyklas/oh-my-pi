@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp stats` aborting the whole sync with `ENOMEM: not enough memory, read` on multi-gigabyte session transcripts. Session files are now parsed through a bounded positional scanner in 256 MiB chunks instead of being slurped whole, each chunk commits its offset so an interrupted sync resumes instead of restarting, the active service tier is persisted alongside the offset (`file_offsets.service_tier`) so resumed parses keep crediting priority requests without replaying the prefix, and a single unreadable transcript is now skipped with a warning rather than killing the run. `getSessionEntry` uses the same scanner, so the dashboard's request-details route no longer reads an entire transcript into memory.
+
+### Changed
+
+- Sync progress events now carry `fileOffset`/`fileBytes`, and the progress bar shows intra-file byte progress while a large transcript is being ingested.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed

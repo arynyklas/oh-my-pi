@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	getRecentErrors as dbGetRecentErrors,
@@ -78,12 +79,13 @@ function applyParseResult(sessionFile: string, lastModified: number, result: Par
 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
 	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
 	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-	setFileOffset(sessionFile, result.newOffset, lastModified);
+	setFileOffset(sessionFile, result.newOffset, lastModified, result.serviceTier);
 	return result.stats.length + result.userStats.length;
 }
 
 /**
- * Progress event emitted after each session file is fully processed.
+ * Progress event emitted after each session file is fully processed, and after
+ * each committed chunk of a file large enough to be parsed in several passes.
  * `current` is the number of files completed (skipped + parsed),
  * `total` is the size of the work set. `processed` is the running total
  * of inserted rows.
@@ -93,6 +95,10 @@ export interface SyncProgress {
 	total: number;
 	processed: number;
 	sessionFile: string;
+	/** Bytes of `sessionFile` committed so far; equals `fileBytes` once the file completes. */
+	fileOffset: number;
+	/** Size of `sessionFile` observed when this file started; 0 when it could not be stat'd. */
+	fileBytes: number;
 }
 
 export interface SyncOptions {
@@ -255,48 +261,90 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	};
 	if (files.length === 0) return finish();
 
-	const report = (sessionFile: string) => {
+	const report = (sessionFile: string, fileBytes: number) => {
 		completed++;
 		opts?.onProgress?.({
 			current: completed,
 			total: files.length,
 			processed: totalProcessed,
 			sessionFile,
+			fileOffset: fileBytes,
+			fileBytes,
+		});
+	};
+
+	// Intra-file movement: emitted between chunks of a multi-gigabyte
+	// transcript so the bar does not look frozen. Does not advance `completed`.
+	const reportChunk = (sessionFile: string, fileOffset: number, fileBytes: number) => {
+		opts?.onProgress?.({
+			current: completed,
+			total: files.length,
+			processed: totalProcessed,
+			sessionFile,
+			fileOffset,
+			fileBytes,
 		});
 	};
 
 	const processFile = async (
 		sessionFile: string,
-		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
+		parse: (
+			sessionFile: string,
+			fromOffset: number,
+			serviceTier: ServiceTierByFamily | null | undefined,
+		) => Promise<ParseSessionResult>,
 	): Promise<void> => {
 		let fileStats: fs.Stats;
 		try {
 			fileStats = await fs.promises.stat(sessionFile);
 		} catch {
-			report(sessionFile);
+			report(sessionFile, 0);
 			return;
 		}
 		const lastModified = fileStats.mtimeMs;
 		const stored = getFileOffset(sessionFile);
 		if (stored && stored.lastModified >= lastModified) {
-			report(sessionFile);
+			report(sessionFile, fileStats.size);
 			return;
 		}
 
-		const fromOffset = stored?.offset ?? 0;
-		const result = await parse(sessionFile, fromOffset);
-		const inserted = applyParseResult(sessionFile, lastModified, result);
-		if (inserted > 0) {
-			totalProcessed += inserted;
-			filesProcessed++;
+		try {
+			let offset = stored?.offset ?? 0;
+			let tier: ServiceTierByFamily | null | undefined = stored ? stored.serviceTier : null;
+			let countedFile = false;
+			while (true) {
+				const result = await parse(sessionFile, offset, tier);
+				// Intermediate chunks store mtime 0 so an interrupted sync resumes from
+				// the committed offset instead of being skipped by the mtime guard above.
+				const inserted = applyParseResult(sessionFile, result.done ? lastModified : 0, result);
+				if (inserted > 0) {
+					totalProcessed += inserted;
+					countedFile = true;
+				}
+				const advanced = result.newOffset > offset;
+				offset = result.newOffset;
+				tier = result.serviceTier;
+				if (result.done) break;
+				if (!advanced) {
+					logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset });
+					break;
+				}
+				reportChunk(sessionFile, offset, fileStats.size);
+			}
+			if (countedFile) filesProcessed++;
+		} catch (err) {
+			// One unreadable or corrupt transcript must not abort the whole sync.
+			logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
 		}
-		report(sessionFile);
+		report(sessionFile, fileStats.size);
 	};
 
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
 	if (requestedWorkers === 1) {
 		for (const sessionFile of files) {
-			await processFile(sessionFile, parseSessionFile);
+			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
+				parseSessionFile(file, { fromOffset, serviceTier }),
+			);
 		}
 		return finish();
 	}
@@ -311,7 +359,9 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 			const idx = cursor++;
 			if (idx >= files.length) return;
 			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset) => dispatch(handle, { sessionFile: file, fromOffset }));
+			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
+				dispatch(handle, { sessionFile: file, fromOffset, serviceTier }),
+			);
 		}
 	}
 

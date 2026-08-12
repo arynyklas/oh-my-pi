@@ -5,7 +5,7 @@
  */
 
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
-import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+import { APP_NAME, formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { openPath } from "../utils/open";
 
@@ -14,7 +14,13 @@ import { openPath } from "../utils/open";
  * the final "Synced ..." summary still prints either way.
  */
 function createSyncProgressReporter(): {
-	onProgress: (event: { current: number; total: number; sessionFile: string }) => void;
+	onProgress: (event: {
+		current: number;
+		total: number;
+		sessionFile: string;
+		fileOffset: number;
+		fileBytes: number;
+	}) => void;
 	finish: () => void;
 } {
 	const stream = process.stderr;
@@ -31,7 +37,13 @@ function createSyncProgressReporter(): {
 			const label = chalk.dim(shortenSessionFile(event.sessionFile));
 			const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
 			const counter = chalk.cyan(`[${event.current}/${event.total}]`);
-			const line = `${counter} ${pct}%  ${label}`;
+			// Multi-gigabyte transcripts are parsed in chunks; show intra-file
+			// movement so a file that takes tens of seconds does not look hung.
+			const bytes =
+				event.fileBytes > 0 && event.fileOffset < event.fileBytes
+					? ` ${formatBytes(event.fileOffset)}/${formatBytes(event.fileBytes)}`
+					: "";
+			const line = `${counter} ${pct}%  ${label}${bytes}`;
 			const columns = stream.columns ?? 120;
 			const trimmed = truncateToWidth(line, columns - 1);
 			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
