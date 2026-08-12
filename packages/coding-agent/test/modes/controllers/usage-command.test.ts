@@ -21,7 +21,10 @@ function renderPresentedBlocks(value: unknown): string {
 }
 
 function createUsageSessionDouble() {
-	return { getUsageReportingModelSelectors: () => [] };
+	return {
+		getUsageReportingModelSelectors: () => [],
+		modelRegistry: { authStorage: { getDefaultAccountIdentity: () => undefined } },
+	};
 }
 
 describe("CommandController /usage", () => {
@@ -528,7 +531,7 @@ describe("CommandController /usage", () => {
 					},
 				] satisfies UsageReport[]),
 				modelRegistry: {
-					authStorage: { getApiKey, getOAuthAccountIdentity },
+					authStorage: { getApiKey, getOAuthAccountIdentity, getDefaultAccountIdentity: vi.fn() },
 				},
 			},
 			ui: { terminal: { columns: 100 } },
@@ -605,7 +608,7 @@ describe("CommandController /usage", () => {
 				getUsageReportingModelSelectors: () => [],
 				fetchUsageReports: vi.fn().mockResolvedValue([]),
 				modelRegistry: {
-					authStorage: { getApiKey, getOAuthAccountIdentity },
+					authStorage: { getApiKey, getOAuthAccountIdentity, getDefaultAccountIdentity: vi.fn() },
 				},
 			},
 			ui: { terminal: { columns: 100 } },

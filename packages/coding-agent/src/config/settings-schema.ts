@@ -540,6 +540,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.defaultAccount": {
+		type: "record",
+		default: EMPTY_STRING_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Default Account",
+			description:
+				'Preferred stored account per provider id (for example "anthropic": "me@example.com"). Matched against the account email, account id, project id, enterprise URL, or "#<credential id>". The default serves every request until it hits a usage limit; the session then switches to another account and stays there. Providers omitted here balance across accounts automatically.',
+		},
+	},
+
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoleStorage: {

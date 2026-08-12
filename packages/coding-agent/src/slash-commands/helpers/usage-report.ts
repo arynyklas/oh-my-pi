@@ -2,7 +2,7 @@ import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
-import { reportMatchesActiveAccount } from "./active-oauth-account";
+import { formatActiveAccountLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatDuration, renderAsciiBar } from "./format";
 
 function formatProviderName(provider: string): string {
@@ -63,6 +63,7 @@ function renderUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+	resolveDefaultAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 ): string {
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
@@ -84,6 +85,10 @@ function renderUsageReports(
 			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
 		}
 		const activeAccount = resolveActiveAccount?.(provider);
+		const defaultAccountLabel = formatActiveAccountLabel(resolveDefaultAccount?.(provider));
+		if (defaultAccountLabel && defaultAccountLabel !== formatActiveAccountLabel(activeAccount)) {
+			lines.push(`  default account: ${defaultAccountLabel}`);
+		}
 		// Provider-wide disclaimers render once per provider, not per limit.
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
@@ -177,6 +182,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 				reports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
+				providerId => runtime.session.modelRegistry.authStorage.getDefaultAccountIdentity(providerId),
 				usageModelSelectors,
 			);
 		}

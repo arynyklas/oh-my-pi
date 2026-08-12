@@ -731,6 +731,7 @@ export class CommandController {
 			availableWidth,
 			provider => (provider === currentProvider ? activeAccount : undefined),
 			usageModelSelectors,
+			provider => this.ctx.session.modelRegistry.authStorage.getDefaultAccountIdentity(provider),
 		);
 		const blocks: Component[] = [new Spacer(1)];
 		if (gatewayUsageUser) {
@@ -2006,6 +2007,7 @@ export function renderUsageReports(
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	resolveDefaultAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 ): string {
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
@@ -2058,6 +2060,10 @@ export function renderUsageReports(
 		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+		}
+		const defaultAccountLabel = formatActiveAccountLabel(resolveDefaultAccount?.(provider));
+		if (defaultAccountLabel && defaultAccountLabel !== activeAccountLabel) {
+			lines.push(`  ${uiTheme.fg("accent", "default account:")} ${defaultAccountLabel}`);
 		}
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {

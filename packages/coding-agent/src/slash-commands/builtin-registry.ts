@@ -14,7 +14,7 @@ import {
 	resolveCliModel,
 } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import type { SettingPath, SettingValue } from "../config/settings";
+import type { SettingPath, Settings, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
 	clearPluginRootsAndCaches,
@@ -359,6 +359,102 @@ async function handleSessionPinCommand(
 		return;
 	}
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
+}
+
+/**
+ * `/account` — show and set the per-provider default account. Mirrors
+ * {@link handleSessionPinCommand}; the default is persisted to
+ * `providers.defaultAccount` and applied to the live AuthStorage so the change
+ * takes effect without restarting.
+ */
+async function handleAccountDefaultCommand(
+	arg: string,
+	session: AgentSession,
+	settings: Settings,
+	output: SlashCommandRuntime["output"],
+): Promise<void> {
+	if (session.isStreaming) {
+		await output("Cannot change the default account while the session is streaming.");
+		return;
+	}
+	let accountList: SessionOAuthAccountList | undefined;
+	try {
+		accountList = await session.listCurrentProviderOAuthAccounts();
+	} catch (error) {
+		await output(`Could not load provider accounts: ${errorMessage(error)}`);
+		return;
+	}
+	if (!accountList) {
+		await output("Select a model before setting a default account.");
+		return;
+	}
+	const authStorage = session.modelRegistry.authStorage;
+	const providerId = accountList.provider;
+	const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
+	const providerName = provider?.name ?? providerId;
+	const accounts = toSessionPinAccounts(accountList.accounts);
+	if (accounts.length === 0) {
+		const source = authStorage.describeCredentialSource(providerId, session.sessionId);
+		await output(
+			source
+				? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
+				: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
+		);
+		return;
+	}
+
+	const { verb, rest } = parseSubcommand(arg);
+	if (verb && verb !== "default") {
+		await output("Usage: /account [default <number|email|none>]");
+		return;
+	}
+	const selectorArg = rest.trim();
+	if (!verb || !selectorArg) {
+		const defaultCredentialId = authStorage.getDefaultAccountCredentialId(providerId);
+		const lines = [`OAuth accounts for ${providerName}:`];
+		for (const account of accounts) {
+			const isDefault = account.credentialId === defaultCredentialId;
+			lines.push(
+				`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}${
+					isDefault ? " (default)" : ""
+				}`,
+			);
+		}
+		lines.push("", "Set the default with `/account default <number|email|account id>`.");
+		await output(lines.join("\n"));
+		return;
+	}
+
+	if (selectorArg.toLowerCase() === "none") {
+		const current = { ...settings.get("providers.defaultAccount") };
+		delete current[providerId];
+		settings.set("providers.defaultAccount", current);
+		authStorage.setDefaultAccountSelector(providerId, undefined);
+		await output(`Cleared the default account for ${providerName}.`);
+		return;
+	}
+
+	const matches = matchSessionPinAccounts(accounts, selectorArg);
+	if (matches.length === 0) {
+		await output(`No ${providerName} account matches "${selectorArg}".`);
+		return;
+	}
+	if (matches.length > 1) {
+		await output(
+			`"${selectorArg}" matches multiple ${providerName} accounts: ${matches
+				.map(account => `${account.position + 1}. ${account.label}`)
+				.join(", ")}. Use the account number.`,
+		);
+		return;
+	}
+	const account = matches[0]!;
+	const selector =
+		account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? `#${account.credentialId}`;
+	const current = { ...settings.get("providers.defaultAccount") };
+	current[providerId] = selector;
+	settings.set("providers.defaultAccount", current);
+	authStorage.setDefaultAccountSelector(providerId, selector);
+	await output(`Default account for ${providerName} is now ${account.label}.`);
 }
 
 /** Parse the `/shake` subcommand into a {@link ShakeMode}; empty defaults to elide. */
@@ -1346,6 +1442,36 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.ctx.handleSessionCommand();
 			} else {
 				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "account",
+		description: "Show or set the default account for the current provider",
+		acpDescription: "Show or set the default account for the current provider",
+		acpInputHint: "[default [number|email|none]]",
+		subcommands: [
+			{
+				name: "default",
+				description: "Set the default account for the current provider",
+				usage: "[number|email|none]",
+			},
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await handleAccountDefaultCommand(command.args, runtime.session, runtime.settings, runtime.output);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "default" && rest.trim()) {
+				await handleAccountDefaultCommand(command.args, runtime.ctx.session, runtime.ctx.settings, text =>
+					runtime.ctx.showStatus(text),
+				);
+				refreshStatusLine(runtime.ctx);
+			} else {
+				await runtime.ctx.showDefaultAccountSelector();
 			}
 			runtime.ctx.editor.setText("");
 		},

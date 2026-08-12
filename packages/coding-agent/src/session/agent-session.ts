@@ -176,6 +176,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import { formatDefaultAccountFalloverNotice } from "../slash-commands/helpers/active-oauth-account";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -2578,6 +2579,20 @@ export class AgentSession {
 					this.sessionId,
 					assistantMsg.provider,
 				);
+				const fallover = this.#modelRegistry.authStorage.consumeDefaultAccountFallover(
+					assistantMsg.provider,
+					this.sessionId,
+				);
+				if (fallover) {
+					this.emitNotice(
+						"warning",
+						formatDefaultAccountFalloverNotice(
+							fallover,
+							this.#modelRegistry.authStorage.listOAuthAccounts(fallover.provider),
+						),
+						fallover.provider,
+					);
+				}
 			}
 			if (event.message.role === "toolResult") {
 				const { toolName, toolCallId, isError, content } = event.message;

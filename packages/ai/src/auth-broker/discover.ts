@@ -40,6 +40,8 @@ export interface DiscoverAuthStorageOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	/** Per-provider default account, overriding `providers.defaultAccount` from config.yml. */
+	defaultAccounts?: Readonly<Record<string, string>>;
 }
 
 const SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS = 500;
@@ -75,6 +77,7 @@ async function readTokenFile(): Promise<string | null> {
 interface ConfigSnapshot {
 	url?: string;
 	token?: string;
+	defaultAccounts?: Record<string, string>;
 }
 
 /**
@@ -97,6 +100,33 @@ function readDottedString(record: Record<string, unknown>, dottedKey: string): s
 	return typeof flat === "string" ? flat : undefined;
 }
 
+/**
+ * Resolve a dotted config key to a string-valued record, accepting both nested
+ * (`providers: { defaultAccount: { … } }`) and the legacy flat literal-dot key
+ * (`"providers.defaultAccount": { … }`). Nested wins. Keeps only entries whose
+ * value is a non-empty string.
+ */
+function readDottedRecord(record: Record<string, unknown>, dottedKey: string): Record<string, string> | undefined {
+	let current: unknown = record;
+	for (const segment of dottedKey.split(".")) {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) {
+			current = undefined;
+			break;
+		}
+		current = (current as Record<string, unknown>)[segment];
+	}
+	let source = current;
+	if (source === null || typeof source !== "object" || Array.isArray(source)) {
+		source = record[dottedKey];
+	}
+	if (source === null || typeof source !== "object" || Array.isArray(source)) return undefined;
+	const result: Record<string, string> = {};
+	for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+		if (typeof value === "string" && value.trim().length > 0) result[key] = value;
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
+
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
@@ -107,7 +137,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			const record = parsed as Record<string, unknown>;
 			const url = readDottedString(record, "auth.broker.url");
 			const token = readDottedString(record, "auth.broker.token");
-			return { url, token };
+			const defaultAccounts = readDottedRecord(record, "providers.defaultAccount");
+			return { url, token, defaultAccounts };
 		} catch (err) {
 			if (isEnoent(err)) continue;
 			logger.warn("auth-broker config unreadable", { path: configPath, error: String(err) });
@@ -237,6 +268,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
+	const defaultAccounts = options.defaultAccounts ?? (await readConfigYaml(agentDir)).defaultAccounts;
 
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
@@ -295,6 +327,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		const storage = new AuthStorage(store, {
 			configValueResolver: options.configValueResolver,
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+			defaultAccounts,
 		});
 		await storage.reload();
 		return storage;
@@ -304,6 +337,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const storage = await AuthStorage.create(dbPath, {
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+		defaultAccounts,
 	});
 	await storage.reload();
 	return storage;

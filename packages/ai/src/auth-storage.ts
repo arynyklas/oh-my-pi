@@ -658,6 +658,14 @@ export type AuthStorageOptions = {
 	 */
 	configValueResolver?: (config: string) => Promise<string | undefined>;
 	/**
+	 * Per-provider default account, from `providers.defaultAccount` in
+	 * config.yml. Values are matched against a stored credential's identity
+	 * (see {@link AuthStorage.getDefaultAccountCredentialId}). Providers absent
+	 * from the map keep the existing session-hash / round-robin ordering and
+	 * live-usage ranking.
+	 */
+	defaultAccounts?: Readonly<Record<string, string>>;
+	/**
 	 * Optional callback fired when AuthStorage automatically disables a
 	 * credential because something detected it as no longer usable — today
 	 * that's the OAuth refresh-failure path in `getApiKey`. NOT fired for
@@ -810,6 +818,17 @@ export interface UsageLimitMarkResult {
 	retryAtMs?: number;
 }
 
+/** Emitted once when a session resolves to an account other than the configured default. */
+export interface DefaultAccountFallover {
+	provider: string;
+	/** Durable id of the configured default account. */
+	defaultCredentialId: number;
+	/** Durable id of the account actually serving the session. */
+	usedCredentialId: number;
+	/** Earliest ms the default's block expires, when a block is recorded. */
+	retryAtMs?: number;
+}
+
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
 
 export interface ModelUsageAccountHealth {
@@ -942,6 +961,32 @@ export interface OAuthAccountIdentity {
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+}
+
+/**
+ * Build the read-only {@link OAuthAccountIdentity} display slice from a stored
+ * OAuth credential. Shared by {@link AuthStorage.getOAuthAccountIdentity} and
+ * {@link AuthStorage.getDefaultAccountIdentity} so both surface identical shapes.
+ */
+function buildOAuthAccountIdentity(credential: OAuthCredential): OAuthAccountIdentity | undefined {
+	const identity: OAuthAccountIdentity = {};
+	if (typeof credential.accountId === "string" && credential.accountId.length > 0) {
+		identity.accountId = credential.accountId;
+	}
+	if (typeof credential.email === "string" && credential.email.length > 0) {
+		identity.email = credential.email;
+	}
+	if (typeof credential.projectId === "string" && credential.projectId.length > 0) {
+		identity.projectId = credential.projectId;
+	}
+	if (typeof credential.orgId === "string" && credential.orgId.length > 0) {
+		identity.orgId = credential.orgId;
+	}
+	if (typeof credential.orgName === "string" && credential.orgName.length > 0) {
+		identity.orgName = credential.orgName;
+	}
+	if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
+	return identity;
 }
 
 export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
@@ -1318,6 +1363,10 @@ export class AuthStorage {
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
+	/** Provider id (lowercased) -> configured default-account selector (lowercased, trimmed). */
+	#defaultAccountSelectors: Map<string, string> = new Map();
+	/** `provider\0selector` tuples whose miss/ambiguity was already logged, to avoid per-request log spam. */
+	#defaultAccountLogged: Set<string> = new Set();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -1329,6 +1378,10 @@ export class AuthStorage {
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
 	#credentialBackoff: Map<string, Map<number, number>> = new Map();
+	/** `provider\0sessionId` -> pending fallover notice, drained once by the session. */
+	#pendingDefaultFallovers: Map<string, DefaultAccountFallover> = new Map();
+	/** `provider\0sessionId\0usedCredentialId` tuples already announced. */
+	#announcedDefaultFallovers: Set<string> = new Set();
 	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
 	#credentialBackoffProbeAfter: Map<string, Map<number, number>> = new Map();
 	/**
@@ -1398,6 +1451,14 @@ export class AuthStorage {
 		this.#refreshOAuthCredentialOverride = options.refreshOAuthCredential;
 		this.#fetchUsageReportsOverride = options.fetchUsageReports;
 		this.#sourceLabel = options.sourceLabel;
+		if (options.defaultAccounts) {
+			for (const [rawProvider, rawSelector] of Object.entries(options.defaultAccounts)) {
+				const provider = rawProvider.trim().toLowerCase();
+				const selector = rawSelector.trim().toLowerCase();
+				if (provider.length === 0 || selector.length === 0) continue;
+				this.#defaultAccountSelectors.set(provider, selector);
+			}
+		}
 		if (options.onCredentialDisabled) {
 			// Constructor-registered subscribers are permanent for this AuthStorage's lifetime;
 			// the unsubscribe handle is intentionally discarded.
@@ -1717,6 +1778,44 @@ export class AuthStorage {
 	/** Returns all credentials for a provider as an array */
 	#getCredentialsForProvider(provider: string): AuthCredential[] {
 		return this.#getStoredCredentials(provider).map(entry => entry.credential);
+	}
+
+	/** True when `selector` (already lowercased/trimmed) identifies `entry`. */
+	#credentialMatchesSelector(entry: StoredCredential, selector: string): boolean {
+		if (`#${entry.id}` === selector) return true;
+		const credential = entry.credential;
+		if (credential.type !== "oauth") return false;
+		const candidates = [credential.email, credential.accountId, credential.projectId, credential.enterpriseUrl];
+		return candidates.some(value => typeof value === "string" && value.trim().toLowerCase() === selector);
+	}
+
+	/**
+	 * Index (into `#getStoredCredentials(provider)`) of the configured default
+	 * account, or `undefined` when no default is configured, the selector
+	 * matches nothing, or it matches more than one row.
+	 */
+	#defaultCredentialIndex(provider: string): number | undefined {
+		const selector = this.#defaultAccountSelectors.get(provider.toLowerCase());
+		if (!selector) return undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const matches: number[] = [];
+		for (let index = 0; index < stored.length; index += 1) {
+			if (this.#credentialMatchesSelector(stored[index]!, selector)) matches.push(index);
+		}
+		if (matches.length === 1) return matches[0];
+		const logKey = `${provider.toLowerCase()}\0${selector}`;
+		if (matches.length === 0) {
+			if (!this.#defaultAccountLogged.has(logKey)) {
+				this.#defaultAccountLogged.add(logKey);
+				logger.debug("providers.defaultAccount selector matched no stored account", { provider, selector });
+			}
+			return undefined;
+		}
+		if (!this.#defaultAccountLogged.has(logKey)) {
+			this.#defaultAccountLogged.add(logKey);
+			logger.warn("Ambiguous providers.defaultAccount selector", { provider, selector });
+		}
+		return undefined;
 	}
 
 	/** Composite key for round-robin tracking: "anthropic:oauth" or "openai:api_key" */
@@ -2401,10 +2500,14 @@ export class AuthStorage {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const defaultIndex = options?.selection === undefined ? this.#defaultCredentialIndex(provider) : undefined;
+		const defaultPos = defaultIndex !== undefined ? credentials.findIndex(entry => entry.index === defaultIndex) : -1;
+		const hasDefault = defaultPos >= 0;
+		const baseOrder = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = hasDefault ? [defaultPos, ...baseOrder.filter(pos => pos !== defaultPos)] : baseOrder;
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		if (!strategy) {
+		if (!strategy || hasDefault) {
 			for (const idx of order) {
 				const candidate = credentials[idx];
 				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
@@ -2467,6 +2570,15 @@ export class AuthStorage {
 			if (key.startsWith(`${provider}:`)) {
 				this.#credentialBackoffProbeAfter.delete(key);
 			}
+		}
+		for (const key of [...this.#defaultAccountLogged]) {
+			if (key.startsWith(`${provider.toLowerCase()}\0`)) this.#defaultAccountLogged.delete(key);
+		}
+		for (const key of [...this.#announcedDefaultFallovers]) {
+			if (key.startsWith(`${provider}\0`)) this.#announcedDefaultFallovers.delete(key);
+		}
+		for (const key of [...this.#pendingDefaultFallovers.keys()]) {
+			if (key.startsWith(`${provider}\0`)) this.#pendingDefaultFallovers.delete(key);
 		}
 	}
 
@@ -3083,24 +3195,7 @@ export class AuthStorage {
 	getOAuthAccountIdentity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
 		const preferred = this.#resolveActiveOAuthCredential(provider, sessionId);
 		if (!preferred) return undefined;
-		const identity: OAuthAccountIdentity = {};
-		if (typeof preferred.accountId === "string" && preferred.accountId.length > 0) {
-			identity.accountId = preferred.accountId;
-		}
-		if (typeof preferred.email === "string" && preferred.email.length > 0) {
-			identity.email = preferred.email;
-		}
-		if (typeof preferred.projectId === "string" && preferred.projectId.length > 0) {
-			identity.projectId = preferred.projectId;
-		}
-		if (typeof preferred.orgId === "string" && preferred.orgId.length > 0) {
-			identity.orgId = preferred.orgId;
-		}
-		if (typeof preferred.orgName === "string" && preferred.orgName.length > 0) {
-			identity.orgName = preferred.orgName;
-		}
-		if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
-		return identity;
+		return buildOAuthAccountIdentity(preferred);
 	}
 
 	/**
@@ -4660,6 +4755,41 @@ export class AuthStorage {
 		return { switched: false, retryAtMs };
 	}
 
+	/**
+	 * Note which credential actually served a resolve. When a default is
+	 * configured for `provider` and a different credential won, queue a
+	 * one-shot fallover notice for `sessionId`. Announced at most once per
+	 * (provider, session, winning credential), so a second fallover to a
+	 * *different* account is reported again.
+	 */
+	#noteDefaultAccountSelection(provider: string, sessionId: string | undefined, credentialId: number): void {
+		if (sessionId === undefined) return;
+		const defaultIndex = this.#defaultCredentialIndex(provider);
+		if (defaultIndex === undefined) return;
+		const defaultEntry = this.#getStoredCredentials(provider)[defaultIndex];
+		const defaultCredentialId = defaultEntry?.id;
+		if (defaultCredentialId === undefined || defaultCredentialId === credentialId) return;
+		const announceKey = `${provider}\0${sessionId}\0${credentialId}`;
+		if (this.#announcedDefaultFallovers.has(announceKey)) return;
+		this.#announcedDefaultFallovers.add(announceKey);
+		const providerKey = this.#getProviderTypeKey(provider, defaultEntry.credential.type);
+		const retryAtMs = this.#getCredentialBlockedUntil(provider, providerKey, defaultIndex);
+		this.#pendingDefaultFallovers.set(`${provider}\0${sessionId}`, {
+			provider,
+			defaultCredentialId,
+			usedCredentialId: credentialId,
+			retryAtMs,
+		});
+	}
+
+	/** Take the pending fallover notice for `(provider, sessionId)`, if any. Consumes it. */
+	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
+		const key = `${provider}\0${sessionId}`;
+		const pending = this.#pendingDefaultFallovers.get(key);
+		if (pending) this.#pendingDefaultFallovers.delete(key);
+		return pending;
+	}
+
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
 		if (!window) return undefined;
 		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
@@ -4921,6 +5051,8 @@ export class AuthStorage {
 		if (credentials.length === 0) return undefined;
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
+		const defaultIndex = options?.selection === undefined ? this.#defaultCredentialIndex(provider) : undefined;
+		const hasDefault = defaultIndex !== undefined && credentials.some(entry => entry.index === defaultIndex);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
@@ -4949,6 +5081,7 @@ export class AuthStorage {
 		const sessionPreferredLastUsedAtMs =
 			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
 		const sessionPreferredIsWarm =
+			hasDefault ||
 			provider !== "anthropic" ||
 			sessionPreferredLastUsedAtMs === undefined ||
 			Date.now() - sessionPreferredLastUsedAtMs < ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS;
@@ -4978,6 +5111,18 @@ export class AuthStorage {
 			}
 		} else if (selectionPolicy?.strategy === "least-used" || selectionPolicy?.strategy === "failover") {
 			order = credentials.map((_credential, index) => index);
+		} else if (hasDefault) {
+			const baseOrder = this.#getCredentialOrder(
+				this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
+				sessionId,
+				credentials.length,
+			);
+			const defaultPos = credentials.findIndex(entry => entry.index === defaultIndex);
+			const sessionPreferredPos = sessionPreferredIsAvailable
+				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
+				: -1;
+			const prefix = [sessionPreferredPos, defaultPos].filter(pos => pos >= 0);
+			order = [...new Set([...prefix, ...baseOrder])];
 		} else {
 			order = this.#getCredentialOrder(
 				this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
@@ -4989,12 +5134,14 @@ export class AuthStorage {
 		// A pinned credential only suppresses ranking while it is both usable and prompt-cache warm.
 		const sessionPreferredIsSticky = sessionPreferredIsAvailable && sessionPreferredIsWarm;
 		const shouldRank =
-			checkUsage &&
-			(selectionPolicy?.strategy === "least-used"
-				? !sessionPreferredIsSticky || hasPlanRequirement
-				: selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
-					? hasPlanRequirement
-					: !sessionPreferredIsSticky || hasPlanRequirement);
+			hasDefault && !hasPlanRequirement
+				? false
+				: checkUsage &&
+					(selectionPolicy?.strategy === "least-used"
+						? !sessionPreferredIsSticky || hasPlanRequirement
+						: selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
+							? hasPlanRequirement
+							: !sessionPreferredIsSticky || hasPlanRequirement);
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
 		// sibling — this respects the residual value of a same-account shared static prefix that other
@@ -5527,6 +5674,9 @@ export class AuthStorage {
 			}
 			this.#recordOAuthBearerCredentialId(provider, result.apiKey, credentialId);
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index, options?.selection);
+			if (options?.selection === undefined && credentialId !== undefined) {
+				this.#noteDefaultAccountSelection(provider, sessionId, credentialId);
+			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);
@@ -5827,6 +5977,7 @@ export class AuthStorage {
 			);
 			if (loginApiKeySelection) {
 				this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
+				this.#noteDefaultAccountSelection(provider, sessionId, loginApiKeySelection.id);
 				const apiKey = await this.#configValueResolver(loginApiKeySelection.credential.key);
 				if (apiKey) {
 					return {
@@ -5854,6 +6005,7 @@ export class AuthStorage {
 			);
 			if (apiKeySelection) {
 				this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
+				this.#noteDefaultAccountSelection(provider, sessionId, apiKeySelection.id);
 				const apiKey = await this.#configValueResolver(apiKeySelection.credential.key);
 				if (apiKey) {
 					return {
@@ -6022,6 +6174,50 @@ export class AuthStorage {
 			orgName: selection.credential.orgName,
 			active: selection.credentialId === activeCredentialId,
 		}));
+	}
+
+	/** Configured default-account selector for `provider`, verbatim, or undefined. */
+	getDefaultAccountSelector(provider: string): string | undefined {
+		return this.#defaultAccountSelectors.get(provider.toLowerCase());
+	}
+
+	/** Durable credential id the configured default resolves to, or undefined. */
+	getDefaultAccountCredentialId(provider: string): number | undefined {
+		const index = this.#defaultCredentialIndex(provider);
+		if (index === undefined) return undefined;
+		return this.#getStoredCredentials(provider)[index]?.id;
+	}
+
+	/** Identity of the configured default OAuth account, for display. Undefined for api_key rows. */
+	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
+		const index = this.#defaultCredentialIndex(provider);
+		if (index === undefined) return undefined;
+		const credential = this.#getStoredCredentials(provider)[index]?.credential;
+		if (credential?.type !== "oauth") return undefined;
+		return buildOAuthAccountIdentity(credential);
+	}
+
+	/**
+	 * Replace the in-memory default selector so a `/account default` change
+	 * takes effect without restarting. Passing `undefined` clears it.
+	 */
+	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
+		const key = provider.toLowerCase();
+		const normalized = selector?.trim().toLowerCase();
+		if (!normalized) {
+			this.#defaultAccountSelectors.delete(key);
+		} else {
+			this.#defaultAccountSelectors.set(key, normalized);
+		}
+		for (const logKey of [...this.#defaultAccountLogged]) {
+			if (logKey.startsWith(`${key}\0`)) this.#defaultAccountLogged.delete(logKey);
+		}
+		for (const announceKey of [...this.#announcedDefaultFallovers]) {
+			if (announceKey.startsWith(`${provider}\0`)) this.#announcedDefaultFallovers.delete(announceKey);
+		}
+		for (const pendingKey of [...this.#pendingDefaultFallovers.keys()]) {
+			if (pendingKey.startsWith(`${provider}\0`)) this.#pendingDefaultFallovers.delete(pendingKey);
+		}
 	}
 
 	/**

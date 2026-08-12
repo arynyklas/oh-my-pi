@@ -5,6 +5,7 @@
 ### Added
 
 - Added auth-gateway admin operations for per-credential usage attribution and confirmed OpenAI Codex saved-reset activation.
+- Added an opt-in per-provider default account (`providers.defaultAccount`): `AuthStorage` pins every request for a provider to the configured account, suppressing session-hash/round-robin ordering and live-usage ranking, and falls over to a sibling only when the default is blocked by a usage limit — staying on the sibling for the rest of the session. Broker- and local-backed stores read the map from `config.yml` via `discoverAuthStorage`.
 
 ### Fixed
 

@@ -1,5 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { DefaultAccountFallover, OAuthAccountIdentity, OAuthAccountSummary } from "../../session/auth-storage";
+import { formatDuration } from "./format";
 
 function normalizeIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
@@ -77,4 +79,30 @@ export function limitMatchesActiveAccount(
 export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
 	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
+}
+
+/**
+ * One-line warning shown when a session falls over from its configured default
+ * account to a sibling. Resolves both credential ids to display labels via the
+ * provider's stored OAuth accounts, falling back to `account #<id>` when an id
+ * no longer resolves (e.g. logged out mid-session).
+ */
+export function formatDefaultAccountFalloverNotice(
+	fallover: DefaultAccountFallover,
+	accounts: readonly OAuthAccountSummary[],
+): string {
+	const label = (credentialId: number): string => {
+		const account = accounts.find(candidate => candidate.credentialId === credentialId);
+		if (!account) return `account #${credentialId}`;
+		const enterpriseUrl = account.enterpriseUrl?.trim();
+		return (formatActiveAccountLabel(account) ?? enterpriseUrl) || `account #${credentialId}`;
+	};
+	const provider = getOAuthProviders().find(candidate => candidate.id === fallover.provider);
+	const providerName = provider?.name ?? fallover.provider;
+	const now = Date.now();
+	const untilClause =
+		fallover.retryAtMs !== undefined && fallover.retryAtMs > now
+			? ` until in ${formatDuration(fallover.retryAtMs - now)}`
+			: "";
+	return `${providerName}: default account ${label(fallover.defaultCredentialId)} is out of quota${untilClause} — using ${label(fallover.usedCredentialId)} for the rest of this session.`;
 }

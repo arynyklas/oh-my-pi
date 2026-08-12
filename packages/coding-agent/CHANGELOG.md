@@ -10,6 +10,7 @@
 
 - Added `requestModelId` support for custom `models.yml` entries so a user-facing model id can route to a different upstream wire id.
 - Added per-account upstream usage and confirmed saved-reset activation to the auth-gateway admin console Accounts tab, with safe attribution and stale/unavailable states when usage refreshes fail.
+- Added an opt-in default account per provider. Set `providers.defaultAccount` (or use the new `/account` command) to pin a provider to one stored account; it serves every request until it hits a usage limit, then the session switches to a sibling once — surfaced as a one-time warning — and stays there. All three `/usage` renderers show the configured `default account:` line.
 
 ### Changed
 
