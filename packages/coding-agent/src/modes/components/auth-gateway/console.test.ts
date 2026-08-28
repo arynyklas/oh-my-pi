@@ -1,5 +1,11 @@
 import { beforeAll, describe, expect, it, spyOn } from "bun:test";
-import type { AuthGatewayAdminClient, AuthGatewayCredentialSummary } from "@oh-my-pi/pi-ai/auth-gateway";
+import type {
+	AuthGatewayAdminClient,
+	AuthGatewayCredentialSummary,
+	AuthGatewayUsageSummary,
+	AuthGatewayUser,
+	AuthGatewayUserDetails,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import type { ResetCreditRedeemOutcome } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Provider } from "@oh-my-pi/pi-ai/types";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
@@ -333,5 +339,82 @@ describe("AuthGatewayConsole accounts usage", () => {
 		const text = await renderAccounts(makeClient({ reports: [usageReport] }));
 
 		expect(text).not.toContain("s spend reset");
+	});
+});
+
+const gatewayUser: AuthGatewayUser = {
+	id: 6,
+	name: "s_vaisov",
+	description: null,
+	owner: null,
+	role: "user",
+	enabled: true,
+	createdAt: 1,
+	updatedAt: 1,
+	lastUsedAt: null,
+};
+
+const gatewayUserDetails: AuthGatewayUserDetails = {
+	user: gatewayUser,
+	tokens: [],
+	acl: [],
+	poolBindings: [],
+};
+
+const gatewayUserUsage: AuthGatewayUsageSummary = {
+	userId: 6,
+	since: 0,
+	generatedAt: reportNowMs,
+	totals: {
+		requests: 903,
+		inputTokens: 119_650,
+		outputTokens: 551_004,
+		cacheReadTokens: 153_832_640,
+		cacheWriteTokens: 2_419_279,
+		totalTokens: 156_922_573,
+		costUsd: 115.484028,
+	},
+	byProviderModel: [
+		{ provider: "anthropic", model: "claude-opus-5", requests: 901, totalTokens: 156_922_283, costUsd: 115.48057 },
+	],
+};
+
+function makeUserClient(usage: AuthGatewayUsageSummary = gatewayUserUsage): AuthGatewayAdminClient {
+	const client = {
+		status: async () => ({
+			ok: true as const,
+			version: "test",
+			serverTime: 1,
+			principal: { kind: "managed" as const, userId: 1, name: "admin", role: "admin" as const, tokenId: 1 },
+			counts: { users: 1, activeTokens: 1, pools: 0, credentials: 0 },
+		}),
+		listUsers: async () => [gatewayUser],
+		getUser: async () => gatewayUserDetails,
+		getUserUsage: async () => usage,
+	} satisfies Partial<AuthGatewayAdminClient>;
+	return client as unknown as AuthGatewayAdminClient;
+}
+
+async function renderUsers(client: AuthGatewayAdminClient, width = 220): Promise<string> {
+	const console = createConsole(client);
+	try {
+		await console.ready;
+		await console.controller.switchTab("users");
+		return renderConsole(console, width);
+	} finally {
+		console.dispose();
+	}
+}
+
+describe("AuthGatewayConsole user usage", () => {
+	it("renders full usage totals and per-model breakdown for the selected user", async () => {
+		const text = await renderUsers(makeUserClient());
+
+		expect(text).toContain("Requests: 903");
+		expect(text).toContain("Cost: $115.48");
+		expect(text).toContain("total 157M");
+		expect(text).toContain("Cache: read 154M · write 2.4M");
+		expect(text).toContain("Since: all time");
+		expect(text).toContain("anthropic/claude-opus-5 · 901 req · 157M tok · $115.48");
 	});
 });

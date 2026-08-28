@@ -6,6 +6,7 @@
 
 - Added `scripts/install-fork.ps1`, a Windows installer for the fork's binary release line. It resolves the newest stable `vX.Y.Z-fork.N` release (or a tag pinned with `-Version`), verifies the download against the release `SHA256SUMS`, installs to `%LOCALAPPDATA%\omp`, updates the user `PATH`, and warns when another omp shadows it. Upstream's `scripts/install.ps1` cannot serve the fork — its default path installs upstream's npm package and `-Binary` pulls from the upstream repo.
 - Added [`docs/fork-install.md`](../../docs/fork-install.md) covering fork installation on Windows and Linux, verification, `omp update` behaviour on the fork release line, the one-time manual migration off the retired `-authgw.beta.N` line, headless auth-gateway/broker deployment and upgrade, building from source, and uninstall.
+- Added full per-user usage stats to the auth-gateway admin console Users tab detail panel — request count, cost, input/output/total tokens, cache read/write tokens, the usage window, and a per-provider-model breakdown — replacing the previous request-count-only line.
 
 ## [17.2.15-fork.1] - 2026-08-12
 
