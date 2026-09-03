@@ -7,6 +7,7 @@ import type {
 	AuthGatewayCredentialSummary,
 	AuthGatewayPool,
 	AuthGatewayPoolStrategy,
+	AuthGatewayUsageSummary,
 	AuthGatewayUserPoolBinding,
 	CreatePoolInput,
 	CreateUserInput,
@@ -29,6 +30,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
+import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
 import { describeRedeemOutcome } from "../../../slash-commands/helpers/reset-usage";
 import { copyToClipboard } from "../../../utils/clipboard";
@@ -2057,7 +2059,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 						width,
 					),
 				) ?? []),
-			`Usage requests: ${usage?.totals.requests ?? 0}`,
+			...userUsageLines(usage),
 		];
 		return lines.map(line => truncateToWidth(line, width));
 	}
@@ -2291,4 +2293,31 @@ function fitRows(lines: string[], rows: number, width: number): string[] {
 function formatTime(value: number | null): string {
 	if (value === null) return "never";
 	return new Date(value).toISOString();
+}
+
+function formatUsd(value: number): string {
+	if (value <= 0) return "$0.00";
+	if (value < 0.01) return `$${value.toFixed(4)}`;
+	return `$${value.toFixed(2)}`;
+}
+
+function userUsageLines(usage: AuthGatewayUsageSummary | undefined): string[] {
+	if (!usage) return ["Usage: loading"];
+	const totals = usage.totals;
+	const lines = [
+		"Usage",
+		`  Requests: ${formatNumber(totals.requests)} · Cost: ${formatUsd(totals.costUsd)}`,
+		`  Tokens: in ${formatNumber(totals.inputTokens)} · out ${formatNumber(totals.outputTokens)} · total ${formatNumber(totals.totalTokens)}`,
+		`  Cache: read ${formatNumber(totals.cacheReadTokens)} · write ${formatNumber(totals.cacheWriteTokens)}`,
+		`  Since: ${usage.since > 0 ? new Date(usage.since).toISOString() : "all time"}`,
+	];
+	if (usage.byProviderModel.length > 0) {
+		lines.push("  By model:");
+		for (const entry of usage.byProviderModel) {
+			lines.push(
+				`    ${sanitizeCell(entry.provider)}/${sanitizeCell(entry.model)} · ${formatNumber(entry.requests)} req · ${formatNumber(entry.totalTokens)} tok · ${formatUsd(entry.costUsd)}`,
+			);
+		}
+	}
+	return lines;
 }
