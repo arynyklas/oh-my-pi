@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 interface RenderableBlock {
@@ -20,31 +21,14 @@ function renderPresentedBlocks(value: unknown): string {
 		.join("\n");
 }
 
-function createUsageSessionDouble() {
-	return {
-		getUsageReportingModelSelectors: () => [],
-		modelRegistry: { authStorage: { getDefaultAccountIdentity: () => undefined } },
-	};
-}
-
 describe("CommandController /usage", () => {
 	beforeAll(async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		setThemeInstance(theme);
+		const darkTheme = await getThemeByName("dark");
+		if (!darkTheme) throw new Error("Expected dark theme");
+		setThemeInstance(darkTheme);
 	});
 
-	it("renders bars and free percentage for limits that only report remainingFraction", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders bars and free percentage for limits that only report remainingFraction", () => {
 		const reports: UsageReport[] = [
 			{
 				provider: "openai-codex",
@@ -63,28 +47,13 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 98));
 		expect(output).toContain("25% free");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
 
-	it("renders Cursor request quotas in the /usage view", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders Cursor request quotas in the /usage view", () => {
 		const now = Date.now();
 		const reports: UsageReport[] = [
 			{
@@ -111,29 +80,14 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
 		expect(output).toContain("Cursor");
 		expect(output).toContain("gpt-4 requests");
 		expect(output).toContain("70% free");
 		expect(output).toContain("resets in 1d");
 	});
 
-	it("renders saved reset expiry lines for future and expired credits", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
+	it("renders saved reset expiry lines for future and expired credits", () => {
 		const now = Date.now();
 		const dayMs = 24 * 60 * 60 * 1000;
 		const futureIso = new Date(now + 2 * dayMs).toISOString();
@@ -151,12 +105,7 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
-
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 98));
 		expect(output).toContain("Saved rate-limit resets");
 		expect(output).toContain("user@example.com: 2 saved resets");
 		expect(output).toContain(`expires in`);
@@ -463,6 +412,7 @@ describe("CommandController /usage", () => {
 
 	it("renders auth-gateway self usage alongside connected-account reports", async () => {
 		const present = vi.fn();
+		const showUsageDashboard = vi.fn();
 		const fetchedAt = Date.now();
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(
@@ -537,6 +487,7 @@ describe("CommandController /usage", () => {
 			ui: { terminal: { columns: 100 } },
 			present,
 			presentCommandOutput: present,
+			showUsageDashboard,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -547,18 +498,23 @@ describe("CommandController /usage", () => {
 			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
 				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
 			});
-			expect(present).toHaveBeenCalledTimes(1);
-			const firstCall = present.mock.calls[0];
-			expect(firstCall).toBeDefined();
-			const output = renderPresentedBlocks(firstCall?.[0]);
-			expect(output).toContain("Openai Codex");
-			expect(output).toContain("connected@example.com");
-			expect(output).toContain("Weekly");
-			expect(output).toContain("Gateway Usage");
-			expect(output).toContain("User: alice (user #3)");
-			expect(output).toContain("Requests: 3");
-			expect(output).toContain("65,340 tokens");
-			expect(output).toContain("openai-codex/gpt-5.6-sol");
+			expect(showUsageDashboard).toHaveBeenCalledTimes(1);
+			const [reportsArg, userArg, summaryArg] = showUsageDashboard.mock.calls[0] as [
+				UsageReport[],
+				string | undefined,
+				string | undefined,
+			];
+			expect(reportsArg).toHaveLength(1);
+			expect(reportsArg[0]).toMatchObject({
+				provider: "openai-codex",
+				metadata: { email: "connected@example.com" },
+			});
+			expect(userArg).toBeUndefined();
+			expect(summaryArg).toContain("Gateway Usage");
+			expect(summaryArg).toContain("User: alice (user #3)");
+			expect(summaryArg).toContain("Requests: 3");
+			expect(summaryArg).toContain("65,340 tokens");
+			expect(summaryArg).toContain("openai-codex/gpt-5.6-sol");
 			expect(ctx.showWarning).not.toHaveBeenCalled();
 		} finally {
 			fetchSpy.mockRestore();
@@ -567,6 +523,7 @@ describe("CommandController /usage", () => {
 
 	it("renders auth-gateway provider reports when the gateway token is admin-scoped", async () => {
 		const present = vi.fn();
+		const showUsageDashboard = vi.fn();
 		const fetchedAt = Date.now();
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
 			new Response(
@@ -614,6 +571,7 @@ describe("CommandController /usage", () => {
 			ui: { terminal: { columns: 100 } },
 			present,
 			presentCommandOutput: present,
+			showUsageDashboard,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext;
@@ -624,16 +582,16 @@ describe("CommandController /usage", () => {
 			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
 				headers: { Accept: "application/json", Authorization: "Bearer admin-token" },
 			});
-			expect(present).toHaveBeenCalledTimes(1);
-			const firstCall = present.mock.calls[0];
-			expect(firstCall).toBeDefined();
-			const output = renderPresentedBlocks(firstCall?.[0]);
-			expect(output).toContain("Usage");
-			expect(output).toContain("User: alice (admin #3)");
-			expect(output).toContain("Openai Codex");
-			expect(output).toContain("Weekly");
-			expect(output).toContain("admin@example.com");
-			expect(output).toContain("25% free");
+			expect(showUsageDashboard).toHaveBeenCalledTimes(1);
+			const [reportsArg, userArg, summaryArg] = showUsageDashboard.mock.calls[0] as [
+				UsageReport[],
+				string | undefined,
+				string | undefined,
+			];
+			expect(reportsArg).toHaveLength(1);
+			expect(reportsArg[0]).toMatchObject({ provider: "openai-codex", metadata: { email: "admin@example.com" } });
+			expect(userArg).toBe("User: alice (admin #3)");
+			expect(summaryArg).toBeUndefined();
 			expect(ctx.showWarning).not.toHaveBeenCalled();
 		} finally {
 			fetchSpy.mockRestore();

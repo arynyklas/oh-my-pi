@@ -135,6 +135,7 @@ function createFixture(streamingMessage?: AssistantMessage) {
 			return viewSession;
 		},
 		clearTransientSessionUi: () => {},
+		syncRetryHintRow: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
@@ -195,6 +196,143 @@ describe("EventController error banner", () => {
 		expect(showPinnedError).toHaveBeenCalledTimes(1);
 		expect(showPinnedError).toHaveBeenCalledWith(errorMessage);
 		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("suppresses a recoverable empty-output error while session continuation starts", async () => {
+		const message = makeAssistantMessage({
+			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.EmptyResponse),
+			errorMessage: "Cloud Code Assist API returned a thought-only response without final output",
+		});
+		const { controller, showPinnedError, streamingComponent } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+
+		expect(streamingComponent.setErrorPinned).toHaveBeenCalledWith(true);
+		expect(showPinnedError).not.toHaveBeenCalled();
+		streamingComponent.setErrorPinned.mockClear();
+
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+
+		expect(streamingComponent.setErrorPinned).not.toHaveBeenCalled();
+	});
+
+	it("keeps a terminal empty-output error pinned without adding a duplicate failure banner", async () => {
+		const message = makeAssistantMessage({
+			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.EmptyResponse),
+			errorMessage: "Cloud Code Assist API returned a thought-only response without final output",
+		});
+		const { controller, showPinnedError, clearPinnedError, showError } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(showPinnedError).not.toHaveBeenCalled();
+
+		const finalError = "Assistant returned no final output after retry cap; try switching models";
+		message.errorId = AIError.create();
+		message.errorMessage = finalError;
+		clearPinnedError.mockClear();
+		showPinnedError.mockClear();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(clearPinnedError).not.toHaveBeenCalled();
+		expect(showError).not.toHaveBeenCalled();
+		expect(showPinnedError).toHaveBeenCalledWith(finalError);
+	});
+
+	it("keeps retry-attempt context when a terminal provider error is pinned", async () => {
+		const errorMessage = "Service unavailable";
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient),
+			errorMessage,
+		});
+		const { controller, showPinnedError, showError } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		showPinnedError.mockClear();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError: errorMessage,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(showPinnedError).toHaveBeenCalledWith("Retry failed after 3 attempts: Service unavailable");
+	});
+
+	it("surfaces a local continuation failure instead of the stale pinned provider error", async () => {
+		const providerError = "Service unavailable";
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient),
+			errorMessage: providerError,
+		});
+		const { controller, showPinnedError, clearPinnedError, showError, streamingComponent } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 2,
+			delayMs: 0,
+			errorMessage: providerError,
+			errorId: message.errorId,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
+		showPinnedError.mockClear();
+		clearPinnedError.mockClear();
+		showError.mockClear();
+		streamingComponent.setErrorPinned.mockClear();
+
+		const finalError = `Retry continuation failed locally: local hook failed. Original error: ${providerError}`;
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 1,
+			finalError,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(showPinnedError).not.toHaveBeenCalled();
+		expect(clearPinnedError).toHaveBeenCalledTimes(1);
+		expect(streamingComponent.setErrorPinned).toHaveBeenCalledWith(false);
+		expect(showError).toHaveBeenCalledWith(`Retry failed after 1 attempts: ${finalError}`);
+	});
+
+	it("shows a failed retry banner when no terminal assistant error exists", async () => {
+		const { controller, showError } = createFixture();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError: "Assistant returned empty stop after retry cap",
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(showError).toHaveBeenCalledWith(
+			"Retry failed after 3 attempts: Assistant returned empty stop after retry cap",
+		);
 	});
 
 	it("restores the transcript inline error when the next turn starts", async () => {
@@ -437,13 +575,21 @@ describe("ErrorBannerComponent", () => {
 		expect(rendered).toContain("Dismissed when you send your next message.");
 	});
 
-	it("caps an oversized multi-line error to a few lines", () => {
+	it("caps an oversized multi-line error to a few rows and points at expansion", () => {
 		const huge = Array.from({ length: 50 }, (_, i) => `error detail line ${i}`).join("\n");
 		const banner = new ErrorBannerComponent(huge);
-		const lines = Bun.stripANSI(banner.render(120).join("\n")).split("\n");
-		const detailLines = lines.filter(line => line.includes("error detail line"));
-		expect(detailLines.length).toBeLessThanOrEqual(3);
-		expect(detailLines.length).toBeGreaterThan(0);
+		const rendered = Bun.stripANSI(banner.render(120).join("\n"));
+		const detailLines = rendered.split("\n").filter(line => line.includes("error detail line"));
+		expect(detailLines.length).toBe(4);
+		expect(rendered).toMatch(/\+46 more lines \(.+ to expand\)/);
+	});
+
+	it("wraps a long single-line error across rows instead of cutting it", () => {
+		const body = `400 ${JSON.stringify({ error: { message: "The requested model is not supported.", code: "model_not_supported", param: "model", type: "invalid_request_error" } })}`;
+		const banner = new ErrorBannerComponent(body);
+		const rendered = Bun.stripANSI(banner.render(60).join("\n"));
+		expect(rendered.replace(/\n\s*/g, "")).toContain('"type":"invalid_request_error"}}');
+		expect(rendered).not.toContain("more line");
 	});
 });
 

@@ -2329,7 +2329,10 @@ describe("AuthGatewayConsole", () => {
 
 		const rawLines = component.render(80);
 		const innerPlainLines = rawLines.map(line =>
-			Bun.stripANSI(line).replace(/^│ ?/, "").replace(/ ?│$/, "").trimEnd(),
+			Bun.stripANSI(line)
+				.replace(/^│ ?/, "")
+				.replace(/ ?│$/, "")
+				.trimEnd(),
 		);
 		for (const line of innerPlainLines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);

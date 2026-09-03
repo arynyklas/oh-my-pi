@@ -232,7 +232,13 @@ describe("auth-gateway managed users", () => {
 		expect(response.status).toBe(200);
 		const body = expectObject(await readJson(response));
 		const data = body.data as Array<{ id: string; object: "model"; owned_by: string; api: string }>;
-		expect(data).toEqual([{ id: "openai-codex/gpt-5.5", object: "model", owned_by: "openai-codex", api: "mock" }]);
+		expect(data).toHaveLength(1);
+		expect(data[0]).toMatchObject({
+			id: "openai-codex/gpt-5.5",
+			object: "model",
+			owned_by: "openai-codex",
+			api: "mock",
+		});
 	});
 
 	test("filters /v1/models by ACL, pool binding, and live matching pool members", async () => {

@@ -85,9 +85,9 @@ function readPoolCredentialRows(dbPath: string, poolId: number): PoolCredentialR
 function indexExists(dbPath: string, indexName: string): boolean {
 	const db = new Database(dbPath, { readonly: true });
 	try {
-		const row = db.prepare("SELECT 1 AS count FROM sqlite_master WHERE type = 'index' AND name = ?").get(indexName) as
-			| CountRow
-			| undefined;
+		const row = db
+			.prepare("SELECT 1 AS count FROM sqlite_master WHERE type = 'index' AND name = ?")
+			.get(indexName) as CountRow | undefined;
 		return row != null;
 	} finally {
 		db.close();

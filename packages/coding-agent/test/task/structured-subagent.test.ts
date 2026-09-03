@@ -35,7 +35,7 @@ function session(
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
-		isolationMode?: "none" | "worktree";
+		isolationEnabled?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 	} = {},
@@ -46,7 +46,8 @@ function session(
 		outputSchema: options.outputSchema,
 		settings: Settings.isolated({
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
-			"task.isolation.mode": options.isolationMode ?? "none",
+			"task.isolation.enabled": options.isolationEnabled ?? false,
+			"isolation.backend": "rcopy",
 			"task.enableLsp": true,
 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
@@ -167,6 +168,35 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
 	});
+	it("reloads model roles before resolving an agent added during the session", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(projectDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = {
+			...session(),
+			cwd: projectDir,
+			settings: liveSettings,
+		} as ToolSession;
+
+		try {
+			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
+			await Bun.write(
+				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
+				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+			);
+
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
+
+			expect(policy.modelRole).toBe("hot_worker");
+			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -186,6 +216,33 @@ describe("structured subagent primitive", () => {
 		expect(settled.result.modelRole).toBe("reviewer");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	it("does not treat a spawn handle as the HUD description", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const handleOnly = await runStructuredSubagent(
+			request({ identity: { id: "AuthLoader", label: "AuthLoader" }, retainArtifacts: true }),
+		);
+		expect(dispatched[0]?.description).toBeUndefined();
+		expect(dispatched[0]?.id).toBe("AuthLoader");
+		await fs.rm(handleOnly.artifactsDir, { recursive: true, force: true });
+
+		dispatched.length = 0;
+		const evalLabeled = await runStructuredSubagent(
+			request({
+				invocationKind: "eval",
+				identity: { label: "Refactor the auth flow" },
+				retainArtifacts: true,
+			}),
+		);
+		expect(dispatched[0]?.description).toBe("Refactor the auth flow");
+		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
@@ -373,9 +430,9 @@ describe("structured subagent primitive", () => {
 
 		await expect(
 			runStructuredSubagent(
-				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+				request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 			),
-		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
@@ -406,13 +463,34 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
+		const preparedExtensions = [
+			{
+				path: extensionPaths[0]!,
+				resolvedPath: extensionPaths[0]!,
+				factory: () => {},
+				error: null,
+			},
+		] as NonNullable<ToolSession["preparedExtensions"]>;
 		const customToolPaths = [{ path: "/tools/example.ts", source: "project" }] as unknown as NonNullable<
 			ToolSession["customToolPaths"]
 		>;
 		const planSession = session({ planMode: true });
 		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
 		const nonPlanSession = session();
-		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
+		let explicitRoot = "/plugins/explicit";
+		const extensionRoots = () => ({
+			explicit: [explicitRoot],
+			mode: "explicit-only" as const,
+			configured: ["/plugins/configured"],
+			configuredLevel: "project" as const,
+		});
+		Object.assign(nonPlanSession, {
+			mcpManager,
+			extensionPaths,
+			customToolPaths,
+			preparedExtensions,
+			effectiveExtensionRoots: extensionRoots,
+		});
 		const mcpDisabledSession = session();
 		mcpDisabledSession.enableMCP = false;
 		const restrictedSession = session();
@@ -448,9 +526,13 @@ describe("structured subagent primitive", () => {
 			enableMCP: true,
 			mcpManager,
 			preloadedExtensionPaths: extensionPaths,
+			preloadedPreparedExtensions: preparedExtensions,
 			preloadedCustomToolPaths: customToolPaths,
 		});
 		expect(options[1]?.restrictToolNames).toBe(false);
+		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
+		explicitRoot = "/plugins/explicit-after-spawn";
+		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
 		expect(options[2]).toMatchObject({ enableMCP: false });
 		expect(options[2]?.mcpManager).toBeUndefined();
 		expect(options[3]).toMatchObject({
@@ -524,7 +606,7 @@ describe("structured subagent primitive", () => {
 		});
 
 		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 		);
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
@@ -535,13 +617,13 @@ describe("structured subagent primitive", () => {
 	it("defaults task isolation to auto-apply and lets config retain artifacts", async () => {
 		mockDiscovery();
 		const defaultPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 		);
 		expect(defaultPolicy.applyChanges).toBe(true);
 
 		const capturePolicy = await resolveEffectiveSubagentPolicy(
 			request({
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);
@@ -550,7 +632,7 @@ describe("structured subagent primitive", () => {
 		const evalPolicy = await resolveEffectiveSubagentPolicy(
 			request({
 				invocationKind: "eval",
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);
@@ -569,7 +651,7 @@ describe("structured subagent primitive", () => {
 
 		const settled = await runStructuredSubagent(
 			request({
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);

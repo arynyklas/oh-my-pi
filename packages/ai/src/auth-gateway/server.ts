@@ -42,6 +42,7 @@ import type {
 	SimpleStreamOptions,
 	Usage,
 } from "../types";
+import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
@@ -58,6 +59,7 @@ import {
 	gatewayResponseHeaders,
 	json,
 	readBearerToken,
+	resolveClientIdentity,
 	resolvePeer,
 	timingSafeEqual,
 	withCors,
@@ -155,7 +157,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -172,7 +174,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -185,6 +187,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -195,7 +200,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -204,7 +209,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -764,6 +769,31 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
 
+/**
+ * Attribute one settled upstream request to the originating client via the
+ * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
+ * by the remote store). Error/aborted turns still record — the provider
+ * billed whatever tokens the partial turn consumed; zero-usage messages
+ * (pre-flight failures) are skipped.
+ */
+function recordGatewayUsage(
+	storage: AuthStorage,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	message: AssistantMessage,
+): void {
+	const usage = message.usage;
+	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
+	storage.recordObservedUsage({
+		provider: model.provider,
+		model: model.id,
+		at: message.timestamp || Date.now(),
+		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
+		costUsd: usage.cost.total,
+		client,
+	});
+}
+
 function mirrorRequestAbort(req: Request): AbortController {
 	const controller = new AbortController();
 	if (req.signal.aborted) {
@@ -817,6 +847,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
 	audit?.setModel(modelId, model.provider, model.id);
+	const client = resolveClientIdentity(req.headers);
 
 	let parsed: ParsedFormatRequest;
 	try {
@@ -827,11 +858,39 @@ async function handleFormatEndpoint(
 		audit?.record("invalid_request", 400, zeroUsage(), "invalid_request");
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	const captured = captureRequestHeaders(req.headers);
-	parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+	// Merge gateway-captured passthrough headers under the parser's own
+	// captures. Parsers that set `options.headers` themselves win (they may
+	// have stripped or normalized values); the gateway's allow-list fills in
+	// anything they didn't touch.
+	{
+		const captured = captureRequestHeaders(req.headers);
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
+	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	const keylessModel = bootOpts.isKeylessModel?.(model) ?? false;
+
+	const supportsOpenAIImageFileReferences =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (
+		route.label === "openai-responses" &&
+		!supportsOpenAIImageFileReferences &&
+		parsed.context.messages.some(
+			message =>
+				message.role === "toolResult" &&
+				message.content.some(
+					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+				),
+		)
+	) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+		);
+	}
 
 	let selection: AuthCredentialSelectionPolicy | undefined;
 	let credentialSessionScope = "default";
@@ -969,6 +1028,7 @@ async function handleFormatEndpoint(
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			recordGatewayUsage(bootOpts.storage, model, client, message);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const poolFailure = describePoolExhaustion(exhaustion);
 				const errorMessage = poolFailure
@@ -1013,7 +1073,7 @@ async function handleFormatEndpoint(
 						poolFailure.retryAtMs,
 					);
 				}
-				const classified = classifyGatewayError(errorMessage);
+				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				audit?.record("upstream_error", classified.status, usageOf(message), classified.type);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1109,6 +1169,10 @@ async function handleFormatEndpoint(
 		controller.signal,
 		recoverTerminalCredentialError,
 	);
+	void events
+		.result()
+		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
+		.catch(() => {});
 	const sseStream = route.module.encodeStream(auditedEvents, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
@@ -1191,6 +1255,7 @@ async function handlePiNative(
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	audit?.setModel(parsed.modelId, model.provider, model.id);
+	const client = resolveClientIdentity(req.headers);
 	const keylessModel = bootOpts.isKeylessModel?.(model) ?? false;
 	const requestSessionId = parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId ??= requestSessionId;
@@ -1300,7 +1365,16 @@ async function handlePiNative(
 		});
 	}
 
-	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey: streamApiKey, signal: controller.signal };
+	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
+	// trust the client's options (already allow-listed by `parseRequest`) and
+	// only inject server-controlled fields. The codex sampling strip mirrors
+	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
+	const streamOpts: SimpleStreamOptions = {
+		...parsed.options,
+		apiKey: streamApiKey,
+		signal: controller.signal,
+		cursorExternalToolExecutor: true,
+	};
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
@@ -1314,7 +1388,7 @@ async function handlePiNative(
 	// Merge gateway-captured passthrough headers under the client's own
 	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...(streamOpts.headers ?? {}) };
+	streamOpts.headers = { ...captured, ...streamOpts.headers };
 	streamOpts.sessionId ??= requestSessionId;
 
 	logger.info("auth-gateway request", {
@@ -1331,6 +1405,7 @@ async function handlePiNative(
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			recordGatewayUsage(bootOpts.storage, model, client, message);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const poolFailure = describePoolExhaustion(exhaustion);
 				const errorMessage = poolFailure
@@ -1375,7 +1450,7 @@ async function handlePiNative(
 						terminalPoolFailure.retryAtMs,
 					);
 				}
-				const classified = classifyGatewayError(errorMessage);
+				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				audit?.record("upstream_error", classified.status, usageOf(message), classified.type);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1454,6 +1529,10 @@ async function handlePiNative(
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return aborted();
+	void events
+		.result()
+		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
+		.catch(() => {});
 
 	const auditedEvents = wrapEventsForAudit(
 		events,
@@ -1622,6 +1701,26 @@ async function handleCredentialsCheck(
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
+/**
+ * Row shape for `GET /v1/models`. Beyond the OpenAI-standard `id`/`object`/
+ * `owned_by`, rows advertise the catalog metadata OpenAI-compatible clients
+ * (omp's own proxy discovery, Zed's openai_compatible provider, ...) read to
+ * size and capability-gate discovered models: `context_length`,
+ * `max_output_tokens`, `input_modalities`, and `supports_tools` (only emitted
+ * when the catalog explicitly reports `false`; absent means usable).
+ */
+interface ModelListRow {
+	id: string;
+	object: "model";
+	owned_by: string;
+	api: Api;
+	display_name: string;
+	context_length?: number;
+	max_output_tokens?: number;
+	input_modalities: ("text" | "image")[];
+	supports_tools?: boolean;
+}
+
 function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPrincipal): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
 	let filtered = list;
@@ -1650,17 +1749,23 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 		});
 	}
 	const seenIds = new Set<string>();
-	const data: Array<{ id: string; object: "model"; owned_by: string; api: Api }> = [];
+	const data: ModelListRow[] = [];
 	for (const model of filtered) {
 		const id = qualifiedModelId(model);
 		if (seenIds.has(id)) continue;
 		seenIds.add(id);
-		data.push({
+		const row: ModelListRow = {
 			id,
 			object: "model",
 			owned_by: model.provider,
 			api: model.api,
-		});
+			display_name: model.name,
+			input_modalities: model.input,
+		};
+		if (model.contextWindow != null) row.context_length = model.contextWindow;
+		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
+		if (model.supportsTools === false) row.supports_tools = false;
+		data.push(row);
 	}
 	return json(200, { object: "list", data });
 }

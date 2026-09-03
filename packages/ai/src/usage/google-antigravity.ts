@@ -1,3 +1,4 @@
+import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
@@ -194,7 +195,11 @@ function normalizeQuotaInfos(info: AntigravityModelInfo): AntigravityQuotaInfo[]
 		...(info.modelProvider ? { modelProvider: info.modelProvider } : {}),
 	};
 	const addInfo = (value: AntigravityQuotaInfo, tier?: string, windowDescriptor?: AntigravityWindowDescriptor) => {
-		results.push({ ...source, ...withWindowDescriptor(value, windowDescriptor), ...(tier ? { tier } : {}) });
+		results.push({
+			...source,
+			...withWindowDescriptor(value, windowDescriptor),
+			...(tier ? { tier } : {}),
+		});
 	};
 	const addValue = (
 		value: AntigravityQuotaInfo | AntigravityQuotaInfo[] | undefined,
@@ -339,7 +344,15 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			const key = `${counterKey}|${tierKey}|${windowId}`;
 			const existing = deduped.get(key);
 			if (!existing) {
-				deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey });
+				deduped.set(key, {
+					amount,
+					window,
+					tier: quotaInfo.tier,
+					tierKey,
+					windowId,
+					counterName,
+					counterKey,
+				});
 				continue;
 			}
 			// Merge: keep the entry with fraction data for the bar, but
@@ -377,8 +390,22 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 		}
 	}
 
+	// Autocomplete models (`tab_*`, internal `chat_*`) report a bare
+	// `{ remainingFraction: 1 }` with no reset time on the Google counter. When
+	// the metered Gemini window is exhausted, Google reports only the weekly
+	// reset, so that unmetered entry no longer merges into a daily sibling and
+	// would surface as a phantom "Daily 0%" beside "Weekly 100%". A counter with
+	// any windowed entry keeps only its windowed entries.
+	const meteredCounters = new Set<string>();
+	for (const entry of deduped.values()) {
+		if (entry.window?.resetsAt !== undefined) meteredCounters.add(`${entry.counterKey}|${entry.tierKey}`);
+	}
+
 	const limits: UsageLimit[] = [];
 	for (const entry of deduped.values()) {
+		if (entry.window?.resetsAt === undefined && meteredCounters.has(`${entry.counterKey}|${entry.tierKey}`)) {
+			continue;
+		}
 		const label = entry.counterName ? `Usage (${entry.counterName})` : "Usage";
 		limits.push({
 			id: `${params.provider}:${entry.counterKey}:${entry.tierKey}:${entry.windowId}`,
@@ -426,13 +453,9 @@ export const antigravityUsageProvider: UsageProvider = {
 	supports: params => params.provider === "google-antigravity",
 };
 
-function getAntigravityCounterKeyForModel(context: CredentialRankingContext | undefined): string | undefined {
-	const modelId = context?.modelId?.toLowerCase();
-	if (!modelId) return undefined;
-	if (modelId.startsWith("claude-")) return "anthropic";
-	if (modelId.startsWith("gemini-") || modelId.startsWith("gemma-")) return "google";
-	if (modelId.startsWith("gpt-") || modelId.startsWith("openai/")) return "openai";
-	return undefined;
+/** Map an Antigravity model id to its backend quota-counter key. */
+export function getAntigravityCounterKeyForModel(modelId: string | undefined): string | undefined {
+	return modelId ? quotaTierFor("google-antigravity", modelId) : undefined;
 }
 
 function getAntigravityCounterLimits(report: UsageReport, counterKey: string): UsageLimit[] {
@@ -440,14 +463,19 @@ function getAntigravityCounterLimits(report: UsageReport, counterKey: string): U
 	return report.limits.filter(limit => limit.id.toLowerCase().startsWith(prefix));
 }
 
-// Exhaustion checks are only safe with a concrete backend counter. A no-model
-// Antigravity credential lookup (for example image-provider discovery) must
-// not turn one exhausted family into a provider-wide block.
-function scopeAntigravityLimitsForModel(
+/**
+ * Scope an Antigravity report to the active model's backend counter, falling
+ * back to legacy default counters only when that backend has no limits.
+ *
+ * Exhaustion checks are only safe with a concrete backend counter. A no-model
+ * credential lookup (for example image-provider discovery) must not turn one
+ * exhausted family into a provider-wide block.
+ */
+export function scopeAntigravityLimitsForModel(
 	report: UsageReport,
 	context: CredentialRankingContext | undefined,
 ): UsageLimit[] {
-	const counterKey = getAntigravityCounterKeyForModel(context);
+	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return [];
 	const backendLimits = getAntigravityCounterLimits(report, counterKey);
 	if (backendLimits.length > 0) return backendLimits;
@@ -455,7 +483,7 @@ function scopeAntigravityLimitsForModel(
 }
 
 function rankAntigravityLimits(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
-	const counterKey = getAntigravityCounterKeyForModel(context);
+	const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 	if (!counterKey) return report.limits;
 	return scopeAntigravityLimitsForModel(report, context);
 }
@@ -480,8 +508,23 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 	// Always return a scope for Antigravity so missing/unknown model context
 	// cannot fall through to AuthStorage's provider-wide block bucket.
 	blockScope(context) {
-		const counterKey = getAntigravityCounterKeyForModel(context);
+		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
+	},
+	// One scope per backend counter the report covers, judged by that
+	// counter's own windows. A 429 can carry a retry-after at the weekly reset
+	// while Google restores the quota days earlier; the next `/usage` fetch
+	// then lifts the block instead of the account idling until the clock runs out.
+	healableBlockScopes(report) {
+		const counterKeys = new Set<string>();
+		for (const limit of report.limits) {
+			const counterKey = limit.id.split(":")[1];
+			if (counterKey) counterKeys.add(counterKey.toLowerCase());
+		}
+		return [...counterKeys].map(counterKey => ({
+			blockScope: `counter:${counterKey}`,
+			limits: getAntigravityCounterLimits(report, counterKey),
+		}));
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

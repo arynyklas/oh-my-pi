@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { $envExact } from "@oh-my-pi/pi-utils";
+import { $envExact, directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 
 // Successful command-backed secrets are cached briefly to avoid an execSync on
 // every request, but must be reread after external credential rotation.
@@ -13,6 +13,10 @@ const commandValueCache = new Map<string, { expiresAt: number; value: string }>(
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 const commandFailureRetryAt = new Map<string, number>();
 
+interface ResolveConfigValueOptions {
+	forceCommandRefresh?: boolean;
+}
+
 export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
 	return valueConfig?.startsWith("!") === true;
 }
@@ -23,7 +27,26 @@ export function clearCommandValueCaches(): void {
 	commandFailureRetryAt.clear();
 }
 
-function resolveCommandConfig(command: string): string | undefined {
+/**
+ * Drop the cached result (and any negative-cache backoff) for a command-backed
+ * config value so the next {@link resolveConfigValue} re-runs the command.
+ *
+ * Used by the 401 auth-retry path to force every command-backed credential a
+ * provider carries — API key AND header values — to re-mint, not just the
+ * apiKey (which alone was covered before). Non-command values are ignored.
+ */
+export function invalidateCommandConfig(valueConfig: string | undefined): void {
+	if (!isCommandConfigValue(valueConfig)) return;
+	const command = valueConfig.slice(1).trim();
+	commandValueCache.delete(command);
+	commandFailureRetryAt.delete(command);
+}
+
+function resolveCommandConfig(command: string, options?: ResolveConfigValueOptions): string | undefined {
+	if (options?.forceCommandRefresh === true) {
+		commandValueCache.delete(command);
+		commandFailureRetryAt.delete(command);
+	}
 	const now = Date.now();
 	const cached = commandValueCache.get(command);
 	if (cached !== undefined && now < cached.expiresAt) return cached.value;
@@ -31,7 +54,17 @@ function resolveCommandConfig(command: string): string | undefined {
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && now < retryAt) return undefined;
 	try {
-		const stdout = execSync(command, { encoding: "utf8", timeout: 10_000, windowsHide: true });
+		const cwd = getProjectDir();
+		if (!directoryIsEnterableSync(cwd)) {
+			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			return undefined;
+		}
+		const stdout = execSync(command, {
+			cwd,
+			encoding: "utf8",
+			timeout: 10_000,
+			windowsHide: true,
+		});
 		const trimmed = stdout.trim();
 		if (trimmed.length === 0) {
 			commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
@@ -40,7 +73,14 @@ function resolveCommandConfig(command: string): string | undefined {
 		commandFailureRetryAt.delete(command);
 		commandValueCache.set(command, { expiresAt: Date.now() + COMMAND_SUCCESS_CACHE_MS, value: trimmed });
 		return trimmed;
-	} catch {
+	} catch (err) {
+		// The command may embed credentials inline, and execSync's message can
+		// echo the invocation and its output. Log only non-sensitive metadata.
+		const code =
+			typeof (err as NodeJS.ErrnoException | null)?.code === "string"
+				? (err as NodeJS.ErrnoException).code
+				: "unknown";
+		logger.warn("model-config: !command value resolution failed", { code });
 		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 		return undefined;
 	}
@@ -55,8 +95,8 @@ export interface CommandApiKeyResolution {
  * `!cmd` runs a shell command and returns trimmed stdout, otherwise env vars are
  * checked first and the input falls back to a literal value.
  */
-export function resolveConfigValue(valueConfig: string): string | undefined {
-	if (valueConfig.startsWith("!")) return resolveCommandConfig(valueConfig.slice(1).trim());
+export function resolveConfigValue(valueConfig: string, options?: ResolveConfigValueOptions): string | undefined {
+	if (valueConfig.startsWith("!")) return resolveCommandConfig(valueConfig.slice(1).trim(), options);
 	const envValue = $envExact(valueConfig);
 	if (envValue) return envValue;
 	return valueConfig;

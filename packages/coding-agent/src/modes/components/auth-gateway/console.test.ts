@@ -266,8 +266,7 @@ describe("AuthGatewayConsole accounts usage", () => {
 				};
 			},
 		});
-		let console: AuthGatewayConsole | undefined;
-		console = createConsole(client, () => {
+		const console = createConsole(client, () => {
 			if (console?.controller.state.errorBanner?.includes("nothing to reset right now")) completed.resolve();
 		});
 		try {
@@ -315,8 +314,7 @@ describe("AuthGatewayConsole accounts usage", () => {
 				creditId: "credit-1",
 			}),
 		});
-		let console: AuthGatewayConsole | undefined;
-		console = createConsole(client, () => {
+		const console = createConsole(client, () => {
 			if (console?.controller.state.errorBanner?.includes("Reset applied")) completed.resolve();
 		});
 		try {

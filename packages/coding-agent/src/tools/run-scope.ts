@@ -38,7 +38,7 @@ interface ObservedPromiseState {
 const observedBrowserPromises = new WeakMap<Promise<unknown>, ObservedPromiseState>();
 const observedPromiseConstructor = { [Symbol.species]: Promise };
 
-type PromiseCombinatorName = "all" | "race";
+type PromiseCombinatorName = "all" | "race" | "allSettled" | "any";
 type PromiseCombinator = (this: PromiseConstructor, values: Iterable<unknown>) => Promise<unknown>;
 
 interface PromiseCombinatorTrackingContext {
@@ -46,11 +46,13 @@ interface PromiseCombinatorTrackingContext {
 	onFloatingRejection: FloatingRejectionHandler;
 }
 
-const PROMISE_COMBINATORS: readonly PromiseCombinatorName[] = ["all", "race"];
+const PROMISE_COMBINATORS: readonly PromiseCombinatorName[] = ["all", "race", "allSettled", "any"];
 const NativePromise = Promise;
 const nativePromiseCombinators: Record<PromiseCombinatorName, PromiseCombinator> = {
 	all: Promise.all,
 	race: Promise.race,
+	allSettled: Promise.allSettled,
+	any: Promise.any,
 };
 const promiseCombinatorTracking = new AsyncLocalStorage<PromiseCombinatorTrackingContext>();
 let previousPromiseDescriptor: PropertyDescriptor | undefined;
@@ -172,7 +174,7 @@ function observeBrowserRunPromiseWithState<T>(
 	});
 	Object.defineProperties(promise, {
 		constructor: { configurable: true, value: observedPromiseConstructor },
-		// biome-ignore lint/suspicious/noThenProperty: native Promise continuations must remain thenable.
+		// oxlint-disable-next-line unicorn/no-thenable -- native Promise continuations must remain thenable.
 		then: {
 			configurable: true,
 			value: <TResult1 = T, TResult2 = never>(
