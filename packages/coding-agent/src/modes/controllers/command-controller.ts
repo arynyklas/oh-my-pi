@@ -55,6 +55,7 @@ import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-stora
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import {
+	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
@@ -1207,6 +1208,12 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// A focused subagent view keeps its own history: return to the main session
+		// first so the transcript below cannot rebuild from the subagent's surviving
+		// conversation, then drop any turn-scoped anchors (coalescing timers,
+		// in-flight dispatches) the session boundary orphaned.
+		if (this.ctx.focusedAgentId) await this.ctx.unfocusSession();
+		this.ctx.eventController.resetTranscriptAnchors();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -1416,10 +1423,14 @@ export class CommandController {
 			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
 		}
 		if (await this.#relocateSession(worktree.path)) {
+			const cleanup = await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings);
+			if (cleanup.errorMessage !== undefined) {
+				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+			}
 			this.ctx.present([
 				new Spacer(1),
 				new Text(
-					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree)}`)}`,
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
 					1,
 					1,
 				),
@@ -1520,6 +1531,8 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					images: result.images,
+					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
 			}
 			try {
