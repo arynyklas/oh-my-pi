@@ -4548,7 +4548,7 @@ export class AuthStorage {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				if (blockedUntil !== undefined && provider !== "openai-codex") {
+				if (blockedUntil !== undefined && !this.#supportsUsageBlockHealing(provider)) {
 					return {
 						credentialId: entry.id,
 						credentialType,
@@ -4575,7 +4575,7 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
+				if (this.#supportsUsageBlockHealing(provider)) {
 					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
@@ -5415,7 +5415,7 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (blockedUntil !== undefined && this.#supportsUsageBlockHealing(args.provider)) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -6193,7 +6193,23 @@ export class AuthStorage {
 			!allowBlocked &&
 			this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
 		) {
-			return undefined;
+			// Default-account and sticky selection can bypass ranking. Give a
+			// healable block the same usage probe before skipping this credential.
+			if (!usagePrechecked && this.#supportsUsageBlockHealing(provider)) {
+				const targetId = this.#getStoredCredentials(provider)[selection.index]?.id;
+				if (targetId === undefined) return undefined;
+				await raceUsageWithSignal(
+					this.#getUsageReport(provider, selection.credential, {
+						...options,
+						timeoutMs: this.#usageRequestTimeoutMs,
+					}),
+					options?.signal,
+				);
+				if (!this.#syncOAuthSelectionFromStore(provider, selection, targetId)) return undefined;
+			}
+			if (this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)) {
+				return undefined;
+			}
 		}
 
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {

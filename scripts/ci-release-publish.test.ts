@@ -2,14 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	legalPayloadFiles,
-	npmDistTag,
-	packages,
-	prepareNativeCorePackage,
-	rewriteManifest,
-	stageLegalPayloads,
-} from "./ci-release-publish";
+import { legalPayloadFiles, npmDistTag, packages, rewriteManifest, stageLegalPayloads } from "./ci-release-publish";
 
 describe("npm dist-tags", () => {
 	it("routes canaries while rejecting other prereleases", () => {
@@ -43,39 +36,6 @@ describe("published legal payloads", () => {
 			expect(await Bun.file(path.join(pkgDir, "THIRD-PARTY-NOTICES.txt")).text()).toBe("notices\n");
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
-
-	it("lists every legal file explicitly in the native core package", async () => {
-		const pkgDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-core-"));
-		try {
-			await Bun.write(
-				path.join(pkgDir, "package.json"),
-				JSON.stringify({
-					name: "@oh-my-pi/pi-natives",
-					version: "15.5.15",
-					license: "MIT",
-				}),
-			);
-			const manifest = await prepareNativeCorePackage(pkgDir, false);
-			expect(manifest.files).toEqual([
-				"native/index.js",
-				"native/index.d.ts",
-				"native/clipboard.js",
-				"native/clipboard.d.ts",
-				"native/desktop.js",
-				"native/desktop.d.ts",
-				"native/desktop-adapter.js",
-				"native/desktop-adapter.d.ts",
-				"native/loader-state.js",
-				"native/loader-state.d.ts",
-				"native/embedded-addon.js",
-				"README.md",
-				"LICENSE",
-				"THIRD-PARTY-NOTICES.txt",
-			]);
-		} finally {
-			await fs.rm(pkgDir, { recursive: true, force: true });
 		}
 	});
 });

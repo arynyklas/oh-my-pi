@@ -827,5 +827,53 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		const kind = getClaudeModelKind(context);
 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
 	},
+	healableBlockScopes(report) {
+		// Partial response headers cannot vouch for every quota gating a scope.
+		if (report.metadata?.source === "ratelimit-headers") return [];
+		// Display normalization drops missing counters and clamps negatives.
+		// Neither is evidence of recovery: retain the block on malformed payloads.
+		if (isRecord(report.raw)) {
+			for (const key of ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]) {
+				const bucket = report.raw[key];
+				if (bucket === undefined || bucket === null) continue;
+				const used = isRecord(bucket) ? toNumber(bucket.utilization) : undefined;
+				if (used === undefined || !Number.isFinite(used) || used < 0) return [];
+			}
+			if (report.raw.limits !== undefined && report.raw.limits !== null) {
+				if (!Array.isArray(report.raw.limits)) return [];
+				for (const entry of report.raw.limits) {
+					const used = isRecord(entry) ? toNumber(entry.percent) : undefined;
+					if (used === undefined || !Number.isFinite(used) || used < 0) return [];
+				}
+			}
+		}
+		const shared = report.limits.filter(limit => limit.scope.shared === true);
+		if (!shared.some(limit => limit.id === "anthropic:5h") || !shared.some(limit => limit.id === "anthropic:7d")) {
+			return [];
+		}
+		const isHealthy = (limit: UsageLimit): boolean => {
+			const used = resolveUsedFraction(limit);
+			return (
+				(limit.status === "ok" || limit.status === "warning") &&
+				used !== undefined &&
+				Number.isFinite(used) &&
+				used >= 0 &&
+				used < 1
+			);
+		};
+		if (!shared.every(isHealthy)) return [];
+		const scopes: { blockScope: string; limits: UsageLimit[] }[] = [];
+		// A legacy/global block has no model attribution. Require all reported
+		// quota counters to recover rather than guessing which model caused it.
+		// Extra-usage spend is display-only, just as in model quota gating.
+		const quotaLimits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined);
+		if (quotaLimits.every(isHealthy)) scopes.push({ blockScope: "", limits: quotaLimits });
+		const tiers = new Set(report.limits.map(limit => limit.scope.tier).filter(tier => tier !== undefined));
+		for (const tier of tiers) {
+			const limits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier === tier);
+			if (limits.every(isHealthy)) scopes.push({ blockScope: `tier:${tier}`, limits });
+		}
+		return scopes;
+	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

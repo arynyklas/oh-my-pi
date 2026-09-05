@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.11-fork.2] - 2026-09-06
+
+### Fixed
+
+- Claude accounts now recover from stale quota cooldowns when fresh usage confirms available capacity, without clearing fresh rate limits or still-exhausted model tiers.
+
 ## [18.1.11-fork.1] - 2026-09-06
 
 ### Changed

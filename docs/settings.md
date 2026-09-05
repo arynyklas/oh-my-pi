@@ -492,6 +492,8 @@ providers:
 
 When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching roles when the session is not on those roles. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
 
+Claude account cooldowns are reconciled against fresh usage during `/usage`, account selection, and model-usage health checks. After a five-minute guard against lagging quota reports, healthy shared five-hour and weekly counters can clear a stale block; model-tier blocks also require that tier's counter to be reported and healthy. Missing, unknown, malformed, or header-only quota evidence does not clear a block. Legacy account-wide blocks require every reported shared and model-tier quota counter to be healthy; display-only Extra Usage spend is excluded. Sessions that already fell over from a configured default remain on their chosen sibling; a new session can use the recovered default.
+
 ### Tools and approvals
 
 ```yaml
