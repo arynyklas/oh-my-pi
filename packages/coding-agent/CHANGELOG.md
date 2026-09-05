@@ -6,7 +6,7 @@
 
 ### Changed
 
-- Synced the fork onto upstream v18.1.11, folding upstream's `retry.waitForUsageReset` wait-for-reset flow and provider-timed credential blocks, the JavaScript/Python eval preludes for browser and computer automation, async eval agent handles and workpools, `/switch` session-only model changes, agent reactions, video attachments, the Windows ARM64 binaries, and the live-headers proxy fold that fixes multi-minute TUI freezes into the fork's credential selection-policy, per-provider default-account, gateway console/usage renderers, and fork release-channel work.
+- Synced the fork onto upstream v18.1.11, folding upstream's `retry.waitForUsageReset` wait-for-reset flow and provider-timed credential blocks, the JavaScript/Python eval preludes for browser and computer automation, async eval agent handles and workpools, `/switch` session-only model changes, agent reactions, video attachments, upstream's Windows ARM64 build support (not published by this fork), and the live-headers proxy fold that fixes multi-minute TUI freezes into the fork's credential selection-policy, per-provider default-account, gateway console/usage renderers, and fork release-channel work.
 
 ## [18.1.5-fork.1] - 2026-08-29
 
