@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.11-fork.3] - 2026-09-07
+
+### Fixed
+
+- Resumed sessions and explicit account pins no longer report an unblocked default as unavailable; real model-tier fallovers report their retry deadline.
+
 ## [18.1.11-fork.2] - 2026-09-06
 
 ### Fixed

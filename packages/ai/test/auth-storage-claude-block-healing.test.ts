@@ -81,6 +81,56 @@ describe("Claude stale quota block recovery", () => {
 		).run(credentialId, PROVIDER_KEY, scope, deadline, Math.floor((Date.now() - ageMs) / 1000));
 	}
 
+	test("a resumed sibling pin does not report exhaustion of an unblocked default", async () => {
+		const sessionId = "resumed-sibling";
+		const siblingId = store.listAuthCredentials(PROVIDER)[1]!.id;
+		storage.pinSessionOAuthAccount(PROVIDER, sessionId, siblingId);
+		const persisted = db.serialize();
+		storage.close();
+		db = Database.deserialize(persisted);
+		store = new SqliteAuthCredentialStore(db);
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
+			defaultAccounts: { [PROVIDER]: EMAIL },
+		});
+		await storage.reload();
+
+		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
+			"access-sibling@example.com",
+		);
+		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
+		// The explicit session command can select the recovered default without
+		// changing other sessions or pretending the previous pin was exhausted.
+		storage.pinSessionOAuthAccount(PROVIDER, sessionId, credentialId);
+		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
+		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
+	});
+
+	test("returning to the recovered default clears an undelivered fallover notice", async () => {
+		const sessionId = "recovered-before-notice";
+		block("", 0);
+		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
+			"access-sibling@example.com",
+		);
+		store.deleteCredentialBlock(credentialId, PROVIDER_KEY, "");
+		storage.pinSessionOAuthAccount(PROVIDER, sessionId, credentialId);
+
+		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
+		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
+	});
+
+	test("a real tier-scoped fallover reports that model quota's retry deadline", async () => {
+		const sessionId = "tier-fallover-notice";
+		block("tier:fable", 0);
+		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
+			"access-sibling@example.com",
+		);
+		const notice = storage.consumeDefaultAccountFallover(PROVIDER, sessionId);
+		expect(notice?.retryAtMs).toBe(deadline);
+		expect(notice?.defaultCredentialId).toBe(credentialId);
+		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
+	});
+
 	test("usage refresh clears a stale persisted block and restores the default account", async () => {
 		block();
 		await storage.fetchUsageReports();

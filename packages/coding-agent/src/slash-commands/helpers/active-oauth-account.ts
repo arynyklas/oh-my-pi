@@ -100,9 +100,9 @@ export function formatDefaultAccountFalloverNotice(
 	const provider = getOAuthProviders().find(candidate => candidate.id === fallover.provider);
 	const providerName = provider?.name ?? fallover.provider;
 	const now = Date.now();
-	const untilClause =
+	const retryClause =
 		fallover.retryAtMs !== undefined && fallover.retryAtMs > now
-			? ` until in ${formatDuration(fallover.retryAtMs - now)}`
+			? ` (retry in ${formatDuration(fallover.retryAtMs - now)})`
 			: "";
-	return `${providerName}: default account ${label(fallover.defaultCredentialId)} is out of quota${untilClause} — using ${label(fallover.usedCredentialId)} for the rest of this session.`;
+	return `${providerName}: default account ${label(fallover.defaultCredentialId)} is temporarily unavailable${retryClause} — using ${label(fallover.usedCredentialId)} for the rest of this session.`;
 }

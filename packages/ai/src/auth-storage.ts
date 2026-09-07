@@ -862,7 +862,7 @@ export interface UsageLimitMarkResult {
 	reportResetAtMs?: number;
 }
 
-/** Emitted once when a session resolves to an account other than the configured default. */
+/** Emitted once when a recorded block makes a session use a sibling of its configured default. */
 export interface DefaultAccountFallover {
 	provider: string;
 	/** Durable id of the configured default account. */
@@ -5244,25 +5244,43 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Note which credential actually served a resolve. When a default is
-	 * configured for `provider` and a different credential won, queue a
+	 * Note which credential actually served a resolve. When the configured
+	 * default has a block relevant to this request and a sibling won, queue a
 	 * one-shot fallover notice for `sessionId`. Announced at most once per
 	 * (provider, session, winning credential), so a second fallover to a
 	 * *different* account is reported again.
 	 */
-	#noteDefaultAccountSelection(provider: string, sessionId: string | undefined, credentialId: number): void {
+	#noteDefaultAccountSelection(
+		provider: string,
+		sessionId: string | undefined,
+		credentialId: number,
+		blockScopeOrScopes?: string | readonly string[],
+	): void {
 		if (sessionId === undefined) return;
+		const pendingKey = `${provider}\0${sessionId}`;
 		const defaultIndex = this.#defaultCredentialIndex(provider);
-		if (defaultIndex === undefined) return;
+		if (defaultIndex === undefined) {
+			this.#pendingDefaultFallovers.delete(pendingKey);
+			return;
+		}
 		const defaultEntry = this.#getStoredCredentials(provider)[defaultIndex];
 		const defaultCredentialId = defaultEntry?.id;
-		if (defaultCredentialId === undefined || defaultCredentialId === credentialId) return;
+		if (defaultCredentialId === undefined || defaultCredentialId === credentialId) {
+			this.#pendingDefaultFallovers.delete(pendingKey);
+			return;
+		}
+		const providerKey = this.#getProviderTypeKey(provider, defaultEntry.credential.type);
+		const retryAtMs = this.#getCredentialBlockedUntil(provider, providerKey, defaultIndex, blockScopeOrScopes);
+		// Resuming or explicitly pinning a sibling is not evidence that the
+		// default is unavailable. Only a block relevant to this request is.
+		if (retryAtMs === undefined) {
+			this.#pendingDefaultFallovers.delete(pendingKey);
+			return;
+		}
 		const announceKey = `${provider}\0${sessionId}\0${credentialId}`;
 		if (this.#announcedDefaultFallovers.has(announceKey)) return;
 		this.#announcedDefaultFallovers.add(announceKey);
-		const providerKey = this.#getProviderTypeKey(provider, defaultEntry.credential.type);
-		const retryAtMs = this.#getCredentialBlockedUntil(provider, providerKey, defaultIndex);
-		this.#pendingDefaultFallovers.set(`${provider}\0${sessionId}`, {
+		this.#pendingDefaultFallovers.set(pendingKey, {
 			provider,
 			defaultCredentialId,
 			usedCredentialId: credentialId,
@@ -6341,7 +6359,7 @@ export class AuthStorage {
 			this.#recordOAuthBearerCredentialId(provider, result.apiKey, credentialId);
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index, options?.selection);
 			if (options?.selection === undefined && credentialId !== undefined) {
-				this.#noteDefaultAccountSelection(provider, sessionId, credentialId);
+				this.#noteDefaultAccountSelection(provider, sessionId, credentialId, blockScopes ?? blockScope);
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {

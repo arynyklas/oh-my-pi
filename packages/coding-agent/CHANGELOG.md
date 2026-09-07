@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.11-fork.3] - 2026-09-07
+
+### Fixed
+
+- Resuming a session on another account no longer falsely reports that the default is out of quota; blocked-account warnings describe temporary unavailability and show the relevant retry time.
+
 ## [18.1.11-fork.2] - 2026-09-06
 
 ### Fixed

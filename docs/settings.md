@@ -494,6 +494,8 @@ When the active model keeps failing (429s, quota walls, provider outages) and `r
 
 Claude account cooldowns are reconciled against fresh usage during `/usage`, account selection, and model-usage health checks. After a five-minute guard against lagging quota reports, healthy shared five-hour and weekly counters can clear a stale block; model-tier blocks also require that tier's counter to be reported and healthy. Missing, unknown, malformed, or header-only quota evidence does not clear a block. Legacy account-wide blocks require every reported shared and model-tier quota counter to be healthy; display-only Extra Usage spend is excluded. Sessions that already fell over from a configured default remain on their chosen sibling; a new session can use the recovered default.
 
+A session's saved account pin takes precedence over the default even after restart; that alone does not mean the default is out of quota. Use `/session pin <email|account id>` to switch an existing session to the recovered account. A fallback warning requires a recorded block relevant to the requested model, and its retry time includes model-tier blocks.
+
 ### Tools and approvals
 
 ```yaml
