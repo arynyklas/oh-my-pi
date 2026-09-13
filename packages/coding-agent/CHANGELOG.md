@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.16-fork.2] - 2026-09-13
+
+### Fixed
+
+- Gateway console: adding an ACL provider or model rule no longer fails with `Invalid auth-gateway response`, and exact model rules are submitted with the gateway's own model id instead of a doubled provider prefix.
+
 ## [18.1.16-fork.1] - 2026-09-10
 
 ### Changed

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.1.16-fork.2] - 2026-09-13
+
+### Fixed
+
+- Gateway inference no longer drops quiet responses after roughly 255 seconds while the upstream model is still working.
+- Gateway ACL model rules now accept provider-qualified model ids that contain slashes (e.g. `openrouter/~anthropic/claude-fable-latest`).
+- The gateway admin client no longer fails with `Invalid auth-gateway response` when reading the model list, which advertises catalog metadata alongside the OpenAI-standard fields.
+
 ## [18.1.16-fork.1] - 2026-09-10
 
 ### Changed

@@ -579,6 +579,36 @@ describe("SqliteAuthGatewayAccessStore", () => {
 			}),
 		).toEqual({ allowed: true });
 
+		// Provider-qualified ids keep the upstream model id verbatim, and openrouter-style
+		// ids contain slashes; those selectors must be expressible as exact ACL patterns.
+		store.addAclRule(alice.user.id, {
+			effect: "allow",
+			kind: "model",
+			pattern: "openrouter/~anthropic/claude-fable-latest",
+		});
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "chat",
+				provider: "openrouter",
+				qualifiedModel: "openrouter/~anthropic/claude-fable-latest",
+			}),
+		).toEqual({ allowed: true });
+		expect(
+			evaluateAuthGatewayAccess(principal, store.listAclRules(alice.user.id), {
+				route: "chat",
+				provider: "openrouter",
+				qualifiedModel: "openrouter/~anthropic/claude-other",
+			}),
+		).toEqual({ allowed: false, reason: "no_matching_allow" });
+		expect(() =>
+			store.addAclRule(alice.user.id, { effect: "allow", kind: "model", pattern: "openrouter//claude" }),
+		).toThrow(AuthGatewayAccessError);
+		// The wildcard form stays provider-scoped: a model-path prefix glob would
+		// silently widen `provider/*` grammar into arbitrary path matching.
+		expect(() =>
+			store.addAclRule(alice.user.id, { effect: "allow", kind: "model", pattern: "openrouter/~anthropic/*" }),
+		).toThrow(AuthGatewayAccessError);
+
 		const admin = store.createUser({ name: "admin", role: "admin" });
 		const adminPrincipal = store.authenticateToken(admin.token.value);
 		expect(adminPrincipal).not.toBeNull();

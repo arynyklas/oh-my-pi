@@ -49,6 +49,7 @@ import type {
 	AuthGatewayCredentialsResponse,
 	AuthGatewayCredentialUploadRequest,
 	AuthGatewayIssuedTokenValue,
+	AuthGatewayModelListRow,
 	AuthGatewayModelSummary,
 	AuthGatewayPoolBindResponse,
 	AuthGatewayPoolResponse,
@@ -82,21 +83,26 @@ interface AuthGatewayAdminRequestContext {
 	timeoutPromise: Promise<never>;
 }
 
+/**
+ * `GET /v1/models` as the admin console consumes it. Unlike the management
+ * endpoints, this is the OpenAI-compatible discovery surface: rows also carry
+ * catalog metadata (`display_name`, `input_modalities`, `context_length`, …)
+ * for third-party clients, and that set grows. Extra keys are therefore
+ * stripped rather than rejected — a strict envelope turned every real gateway
+ * response into `invalid_response`, which is what the live server-to-client
+ * model-list test pins. The `Pick` only ties the four consumed field names to
+ * the server's row declaration; it says nothing about the runtime schema.
+ */
 interface AuthGatewayModelListWireResponse {
 	object: "list";
-	data: Array<{
-		id: string;
-		object: "model";
-		owned_by: string;
-		api: Api;
-	}>;
+	data: Array<Pick<AuthGatewayModelListRow, "id" | "object" | "owned_by" | "api">>;
 }
 
 const authGatewayModelListWireResponseSchema = type({
-	"+": "reject",
+	"+": "delete",
 	object: "'list'",
 	data: type({
-		"+": "reject",
+		"+": "delete",
 		id: "string",
 		object: "'model'",
 		owned_by: "string",

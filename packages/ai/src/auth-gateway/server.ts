@@ -65,6 +65,7 @@ import {
 	withCors,
 } from "./http";
 import { handleAuthGatewayManagementRequest } from "./management";
+import type { AuthGatewayModelListRow } from "./management-types";
 import type {
 	AuthGatewayServerHandle,
 	AuthGatewayServerOptions,
@@ -1702,26 +1703,6 @@ async function handleCredentialsCheck(
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
-/**
- * Row shape for `GET /v1/models`. Beyond the OpenAI-standard `id`/`object`/
- * `owned_by`, rows advertise the catalog metadata OpenAI-compatible clients
- * (omp's own proxy discovery, Zed's openai_compatible provider, ...) read to
- * size and capability-gate discovered models: `context_length`,
- * `max_output_tokens`, `input_modalities`, and `supports_tools` (only emitted
- * when the catalog explicitly reports `false`; absent means usable).
- */
-interface ModelListRow {
-	id: string;
-	object: "model";
-	owned_by: string;
-	api: Api;
-	display_name: string;
-	context_length?: number;
-	max_output_tokens?: number;
-	input_modalities: ("text" | "image")[];
-	supports_tools?: boolean;
-}
-
 function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPrincipal): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
 	let filtered = list;
@@ -1750,12 +1731,12 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 		});
 	}
 	const seenIds = new Set<string>();
-	const data: ModelListRow[] = [];
+	const data: AuthGatewayModelListRow[] = [];
 	for (const model of filtered) {
 		const id = qualifiedModelId(model);
 		if (seenIds.has(id)) continue;
 		seenIds.add(id);
-		const row: ModelListRow = {
+		const row: AuthGatewayModelListRow = {
 			id,
 			object: "model",
 			owned_by: model.provider,
@@ -1818,7 +1799,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 	const server = Bun.serve({
 		hostname: bind.hostname,
 		port: bind.port,
-		fetch: async (req): Promise<Response> => {
+		fetch: async (req, server): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
 			const peer = resolvePeer(req);
@@ -1879,6 +1860,9 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
 					if (routeFamily === "chat" || routeFamily === "messages" || routeFamily === "responses") {
+						// Provider watchdogs and client cancellation own inference lifetime,
+						// not Bun's socket idle timer (which also runs between SSE events).
+						server.timeout(req, 0);
 						return withCors(
 							await handleFormatEndpoint(formatRoute, opts, req, peer, principal, audit, routeFamily),
 							req,
@@ -1887,6 +1871,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				}
 
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
+					server.timeout(req, 0);
 					return withCors(await handlePiNative(opts, req, peer, principal, audit), req);
 				}
 
@@ -1911,8 +1896,8 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				return withCors(json(500, { error: "internal error" }), req);
 			}
 		},
-		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
-		// for minutes before the first token arrives; the default kills them.
+		// Bound ordinary idle connections; authenticated inference opts out above
+		// so long silent reasoning is not cut off before the provider watchdog.
 		idleTimeout: 255,
 	});
 

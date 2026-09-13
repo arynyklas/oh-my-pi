@@ -100,7 +100,39 @@ export interface SetUserPoolOrderInput {
 	poolIds: number[];
 }
 
+/**
+ * Row shape emitted by `GET /v1/models`. Beyond the OpenAI-standard
+ * `id`/`object`/`owned_by`, rows advertise the catalog metadata
+ * OpenAI-compatible clients read to size and capability-gate discovered models
+ * (`supports_tools` is only emitted when the catalog reports `false`; absent
+ * means usable).
+ *
+ * One declaration for what used to be a verbatim copy in `server.ts` and
+ * `client.ts`. It types the rows the server builds and names the subset the
+ * admin client consumes, so renaming or dropping a consumed field is a compile
+ * error there. It does NOT constrain the client's runtime validation: added
+ * metadata is a wire-compatibility question, and the guard for that is the
+ * live server-to-client model-list test plus the client's stripping schema.
+ */
+export interface AuthGatewayModelListRow {
+	id: string;
+	object: "model";
+	owned_by: string;
+	api: Api;
+	display_name: string;
+	context_length?: number;
+	max_output_tokens?: number;
+	input_modalities: ("text" | "image")[];
+	supports_tools?: boolean;
+}
+
 export interface AuthGatewayModelSummary {
+	/**
+	 * Gateway-qualified selector as advertised by `GET /v1/models` —
+	 * `<provider>/<modelId>`, where `<modelId>` may itself contain slashes
+	 * (openrouter ids such as `openrouter/~anthropic/claude-fable-latest`).
+	 * Usable verbatim as a request `model` and as an exact model ACL pattern.
+	 */
 	id: string;
 	provider: string;
 	api: Api;

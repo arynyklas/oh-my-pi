@@ -370,23 +370,28 @@ function normalizeProviderPattern(pattern: string): string {
 	return pattern;
 }
 
+function invalidModelPattern(): AuthGatewayAccessError {
+	return new AuthGatewayAccessError(
+		"invalid_request",
+		"model ACL pattern must be an exact provider/model, provider/*, or *",
+	);
+}
+
 function normalizeModelPattern(pattern: string): string {
 	if (pattern === "*") return pattern;
-	if (pattern.endsWith("/*") && !pattern.slice(0, -2).includes("*") && pattern.slice(0, -2).length > 0) {
+	// The wildcard form is provider-scoped: the prefix before `/*` is one provider
+	// id, so `openrouter/~anthropic/*` is not a legal model-path glob.
+	if (pattern.endsWith("/*")) {
+		const provider = pattern.slice(0, -2);
+		if (provider.length === 0 || provider.includes("*") || provider.includes("/")) throw invalidModelPattern();
 		return pattern;
 	}
-	if (pattern.includes("*") || !pattern.includes("/")) {
-		throw new AuthGatewayAccessError(
-			"invalid_request",
-			"model ACL pattern must be an exact provider/model, provider/*, or *",
-		);
-	}
-	const [provider, model, extra] = pattern.split("/");
-	if (!provider || !model || extra !== undefined) {
-		throw new AuthGatewayAccessError(
-			"invalid_request",
-			"model ACL pattern must be an exact provider/model, provider/*, or *",
-		);
+	// The exact form is `<provider>/<modelId>`, and the model id may itself contain
+	// slashes (openrouter: `openrouter/~anthropic/claude-fable-latest`), so require
+	// a nonempty provider plus a nonempty remainder rather than exactly two segments.
+	const segments = pattern.split("/");
+	if (pattern.includes("*") || segments.length < 2 || segments.some(segment => segment.length === 0)) {
+		throw invalidModelPattern();
 	}
 	return pattern;
 }

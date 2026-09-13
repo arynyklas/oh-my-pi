@@ -161,8 +161,9 @@ function credential(
 	};
 }
 
-function modelSummary(id: string, provider = "openai"): AuthGatewayModelSummary {
-	return { id, provider, api: "openai" };
+/** `id` mirrors the wire contract: the gateway-qualified `<provider>/<modelId>` selector. */
+function modelSummary(qualifiedId: string): AuthGatewayModelSummary {
+	return { id: qualifiedId, provider: qualifiedId.slice(0, qualifiedId.indexOf("/")), api: "openai" };
 }
 
 function auditEvent(id: number, beforeOffset = 0): AuthGatewayAuditEvent {
@@ -277,7 +278,7 @@ class FakeGatewayClient {
 	addAclRulesQueue: Deferred<Array<{ rule: AuthGatewayAclRule; created: boolean }>>[] = [];
 	addUserTokenQueue: Deferred<AuthGatewayIssuedTokenValue>[] = [];
 	rotateUserTokenQueue: Deferred<AuthGatewayIssuedTokenValue>[] = [];
-	models: AuthGatewayModelSummary[] = [modelSummary("gpt-test")];
+	models: AuthGatewayModelSummary[] = [modelSummary("openai/gpt-test")];
 	modelListQueue: Deferred<AuthGatewayModelSummary[]>[] = [];
 	deleteAclRuleQueue: Deferred<void>[] = [];
 	auditQueue = new Map<number | undefined, Deferred<{ events: AuthGatewayAuditEvent[]; nextBefore: number | null }>>();
@@ -2399,9 +2400,10 @@ describe("AuthGatewayConsole", () => {
 	it("renders catalog-backed ACL provider, model, and route suggestions", async () => {
 		fake.credentials = [credential(21, "zed"), credential(22, "anthropic"), credential(23, "openai", "api_key")];
 		fake.models = [
-			modelSummary("claude-3-5-sonnet", "anthropic"),
-			modelSummary("gemini-2.0-flash", "google"),
-			modelSummary("gpt-4o", "openai"),
+			modelSummary("anthropic/claude-3-5-sonnet"),
+			modelSummary("google/gemini-2.0-flash"),
+			modelSummary("openai/gpt-4o"),
+			modelSummary("openrouter/~anthropic/claude-fable-latest"),
 		];
 		const component = makeConsole();
 		await component.ready;
@@ -2431,6 +2433,7 @@ describe("AuthGatewayConsole", () => {
 			"anthropic/*",
 			"google/*",
 			"openai/*",
+			"openrouter/*",
 			"anthropic/claude-3-5-sonnet",
 			"google/gemini-2.0-flash",
 			"openai/gpt-4o",
@@ -2449,6 +2452,33 @@ describe("AuthGatewayConsole", () => {
 		expect(rendered).toContain(AUTH_GATEWAY_BASIC_ROUTES.join(", "));
 		expect(rendered).toContain("All routes (*)");
 		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(rendered).toContain(route);
+		component.dispose?.();
+	});
+
+	it("submits the gateway-qualified model id verbatim as an exact model ACL pattern", async () => {
+		// Regression: the console re-prefixed the provider onto an already-qualified
+		// id, so exact-model rules went out as `anthropic/anthropic/claude-3-5-sonnet`
+		// and the gateway rejected them as invalid_request.
+		fake.models = [modelSummary("anthropic/claude-3-5-sonnet"), modelSummary("openrouter/~anthropic/claude-fable")];
+		const component = makeConsole();
+		await component.ready;
+		component.handleInput("2");
+		await flushAsync();
+		component.handleInput("a");
+		component.handleInput("\n");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await flushAsync();
+		expect(plain(component, 120)).toContain("Add ACL model pattern");
+
+		// *, anthropic/*, openrouter/*, anthropic/claude-3-5-sonnet, openrouter/~anthropic/claude-fable
+		for (let step = 0; step < 4; step++) component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		await flushAsync();
+
+		expect(fake.addAclRulesCalls).toEqual([
+			{ userId: 1, rules: [{ effect: "allow", kind: "model", pattern: "openrouter/~anthropic/claude-fable" }] },
+		]);
 		component.dispose?.();
 	});
 

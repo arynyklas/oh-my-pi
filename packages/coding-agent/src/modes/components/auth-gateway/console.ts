@@ -1324,9 +1324,9 @@ export class AuthGatewayConsole implements Component, Focusable {
 
 	#modelAclItems(suggestions: { models: { id: string; provider: string }[] }): SelectItem[] {
 		const providers = [...new Set(suggestions.models.map(model => model.provider))].sort();
-		const exact = suggestions.models
-			.map(model => `${model.provider}/${model.id}`)
-			.sort((left, right) => left.localeCompare(right));
+		// `model.id` is already the gateway-qualified `<provider>/<modelId>`
+		// selector; prefixing the provider again produced unusable patterns.
+		const exact = suggestions.models.map(model => model.id).sort((left, right) => left.localeCompare(right));
 		return [
 			{ value: "*", label: "*", description: "Match every model" },
 			...providers.map(provider => ({

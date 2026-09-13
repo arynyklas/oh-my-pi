@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthGatewayAdminClient, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -80,6 +80,29 @@ test("model listing preserves bundled multimodal context limits", async () => {
 			context_length: 1_000_000,
 			input_modalities: ["text", "image"],
 		});
+	} finally {
+		await handle.close();
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("admin client reads the live model list instead of rejecting catalog metadata", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-model-admin-client-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	const model = createMockModel({ provider: "openai", id: "gpt-test" });
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: [],
+		storage,
+		resolveModel: () => model,
+		listModels: () => [model],
+		version: "test",
+	});
+
+	try {
+		const client = new AuthGatewayAdminClient({ url: handle.url, token: "admin-token" });
+		expect(await client.listModels()).toEqual([{ id: "openai/gpt-test", provider: "openai", api: "mock" }]);
 	} finally {
 		await handle.close();
 		storage.close();
