@@ -107,12 +107,12 @@ export interface SetUserPoolOrderInput {
  * (`supports_tools` is only emitted when the catalog reports `false`; absent
  * means usable).
  *
- * One declaration for what used to be a verbatim copy in `server.ts` and
- * `client.ts`. It types the rows the server builds and names the subset the
- * admin client consumes, so renaming or dropping a consumed field is a compile
- * error there. It does NOT constrain the client's runtime validation: added
- * metadata is a wire-compatibility question, and the guard for that is the
- * live server-to-client model-list test plus the client's stripping schema.
+ * Single source for the field names: the server builds rows against this type
+ * and the admin client declares the subset it consumes as a `Pick` of it, so
+ * renaming or dropping a consumed field is a compile error on the client. It
+ * does NOT constrain the client's runtime validation — whether added metadata
+ * is tolerated is a wire-compatibility question, guarded by the client's
+ * stripping schema and the live server-to-client model-list test.
  */
 export interface AuthGatewayModelListRow {
 	id: string;
