@@ -86,6 +86,8 @@ const USAGE_RANKING_METRIC_EPSILON = 1e-9;
  */
 const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
 const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
+/** Bounded history kept for `/account`'s session account-change log. */
+const ACCOUNT_SELECTION_JOURNAL_LIMIT = 256;
 
 /** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
 function fingerprintOAuthBearer(bearer: string): string {
@@ -667,6 +669,14 @@ export type AuthStorageOptions = {
 	 */
 	defaultAccounts?: Readonly<Record<string, string>>;
 	/**
+	 * Per-provider ordered account preference, from `providers.accountPriority`
+	 * in config.yml. Each entry is matched like {@link AuthStorageOptions.defaultAccounts},
+	 * and the resolved order wins over session-hash ordering and live-usage
+	 * ranking; the head doubles as the provider's pinned default, so a
+	 * one-entry list is exactly `providers.defaultAccount`.
+	 */
+	accountPriorities?: Readonly<Record<string, readonly string[]>>;
+	/**
 	 * Optional callback fired when AuthStorage automatically disables a
 	 * credential because something detected it as no longer usable — today
 	 * that's the OAuth refresh-failure path in `getApiKey`. NOT fired for
@@ -873,6 +883,37 @@ export interface DefaultAccountFallover {
 	usedCredentialId: number;
 	/** Earliest ms the default's block expires, when a block is recorded. */
 	retryAtMs?: number;
+}
+
+/** Why a session's serving credential became the one it is. */
+export type AccountSelectionReason =
+	| "initial"
+	| "pinned-default"
+	| "priority"
+	| "session-sticky"
+	| "usage-ranking"
+	| "fallover-blocked"
+	| "manual-pin"
+	| "policy";
+
+/**
+ * One entry of the in-process account-selection journal: the account a session
+ * started using, and why. Recorded only when the serving credential actually
+ * changes, so the journal reads as the session's account history rather than a
+ * per-request trace.
+ */
+export interface AccountSelectionEvent {
+	atMs: number;
+	provider: string;
+	sessionId?: string;
+	credentialId: number;
+	/** Credential this session was using before, when it had one. */
+	previousCredentialId?: number;
+	reason: AccountSelectionReason;
+	email?: string;
+	accountId?: string;
+	/** Human-readable cause detail, e.g. "default blocked, retry in 42m". */
+	detail?: string;
 }
 
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
@@ -1445,6 +1486,12 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blockedUntil?: number;
 	hasPriorityBoost: boolean;
 	usageMeasured: boolean;
+	/**
+	 * Position in the configured `providers.accountPriority` order (0 = pinned
+	 * default), `Number.POSITIVE_INFINITY` when the account is unranked. Wins
+	 * every comparison the plan filter allows: the order is a user decision.
+	 */
+	priorityRank: number;
 	planPriority: number;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
@@ -1475,6 +1522,12 @@ export class AuthStorage {
 	#defaultAccountSelectors: Map<string, string> = new Map();
 	/** `provider\0selector` tuples whose miss/ambiguity was already logged, to avoid per-request log spam. */
 	#defaultAccountLogged: Set<string> = new Set();
+	/** Provider id (lowercased) -> ordered account selectors (lowercased, trimmed); head is the pinned default. */
+	#accountPrioritySelectors: Map<string, string[]> = new Map();
+	/** `storageKey\0sessionId` -> credential a pin/priority edit released, pending the next selection's journal entry. */
+	#releasedSessionCredentials: Map<string, number> = new Map();
+	/** Account-selection journal, oldest first, capped at {@link AuthStorage.#accountSelectionJournalLimit}. */
+	#accountSelectionEvents: AccountSelectionEvent[] = [];
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -1576,6 +1629,14 @@ export class AuthStorage {
 				const selector = rawSelector.trim().toLowerCase();
 				if (provider.length === 0 || selector.length === 0) continue;
 				this.#defaultAccountSelectors.set(provider, selector);
+			}
+		}
+		if (options.accountPriorities) {
+			for (const [rawProvider, rawSelectors] of Object.entries(options.accountPriorities)) {
+				const provider = rawProvider.trim().toLowerCase();
+				if (provider.length === 0) continue;
+				const selectors = AuthStorage.#normalizeAccountPrioritySelectors(rawSelectors);
+				if (selectors.length > 0) this.#accountPrioritySelectors.set(provider, selectors);
 			}
 		}
 		if (options.onCredentialDisabled) {
@@ -1924,6 +1985,24 @@ export class AuthStorage {
 		return kept.reverse();
 	}
 
+	/** Trim/lowercase/dedupe a configured priority list, dropping empty entries. */
+	static #normalizeAccountPrioritySelectors(selectors: readonly string[]): string[] {
+		const normalized: string[] = [];
+		for (const raw of selectors) {
+			if (typeof raw !== "string") continue;
+			const selector = raw.trim().toLowerCase();
+			if (selector.length === 0 || normalized.includes(selector)) continue;
+			normalized.push(selector);
+		}
+		return normalized;
+	}
+
+	/** Position of `index` in the configured priority order; unranked rows sort last. */
+	static #priorityRankOf(priorityIndices: readonly number[] | undefined, index: number): number {
+		const rank = priorityIndices?.indexOf(index) ?? -1;
+		return rank === -1 ? Number.POSITIVE_INFINITY : rank;
+	}
+
 	/** Returns all credentials for a provider as an array */
 	#getCredentialsForProvider(provider: string): AuthCredential[] {
 		return this.#getStoredCredentials(provider).map(entry => entry.credential);
@@ -1939,13 +2018,11 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Index (into `#getStoredCredentials(provider)`) of the configured default
-	 * account, or `undefined` when no default is configured, the selector
-	 * matches nothing, or it matches more than one row.
+	 * Index (into `#getStoredCredentials(provider)`) the selector resolves to,
+	 * or `undefined` when it matches nothing or more than one row. Misses and
+	 * ambiguity are logged once per `(provider, selector)` pair.
 	 */
-	#defaultCredentialIndex(provider: string): number | undefined {
-		const selector = this.#defaultAccountSelectors.get(provider.toLowerCase());
-		if (!selector) return undefined;
+	#selectorCredentialIndex(provider: string, selector: string, configKey: string): number | undefined {
 		const stored = this.#getStoredCredentials(provider);
 		const matches: number[] = [];
 		for (let index = 0; index < stored.length; index += 1) {
@@ -1956,15 +2033,46 @@ export class AuthStorage {
 		if (matches.length === 0) {
 			if (!this.#defaultAccountLogged.has(logKey)) {
 				this.#defaultAccountLogged.add(logKey);
-				logger.debug("providers.defaultAccount selector matched no stored account", { provider, selector });
+				logger.debug(`${configKey} selector matched no stored account`, { provider, selector });
 			}
 			return undefined;
 		}
 		if (!this.#defaultAccountLogged.has(logKey)) {
 			this.#defaultAccountLogged.add(logKey);
-			logger.warn("Ambiguous providers.defaultAccount selector", { provider, selector });
+			logger.warn(`Ambiguous ${configKey} selector`, { provider, selector });
 		}
 		return undefined;
+	}
+
+	/**
+	 * Credential indices the configured `providers.accountPriority` list
+	 * resolves to, in priority order. Unresolvable and duplicate entries are
+	 * dropped, so the result is the live preference order among stored rows.
+	 */
+	#priorityCredentialIndices(provider: string): number[] {
+		const selectors = this.#accountPrioritySelectors.get(provider.toLowerCase());
+		if (!selectors || selectors.length === 0) return [];
+		const indices: number[] = [];
+		for (const selector of selectors) {
+			const index = this.#selectorCredentialIndex(provider, selector, "providers.accountPriority");
+			if (index !== undefined && !indices.includes(index)) indices.push(index);
+		}
+		return indices;
+	}
+
+	/**
+	 * Index (into `#getStoredCredentials(provider)`) of the pinned default
+	 * account: the head of `providers.accountPriority` when a priority list is
+	 * configured, else the `providers.defaultAccount` selector. `undefined`
+	 * when nothing is configured or the selector does not resolve to exactly
+	 * one stored row.
+	 */
+	#defaultCredentialIndex(provider: string): number | undefined {
+		const priorityHead = this.#priorityCredentialIndices(provider)[0];
+		if (priorityHead !== undefined) return priorityHead;
+		const selector = this.#defaultAccountSelectors.get(provider.toLowerCase());
+		if (!selector) return undefined;
+		return this.#selectorCredentialIndex(provider, selector, "providers.defaultAccount");
 	}
 
 	/** Composite key for round-robin tracking: "anthropic:oauth" or "openai:api_key" */
@@ -2390,26 +2498,53 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Records which credential was used for a session (for rate-limit switching).
-	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
-	 * it defaults to now for live selections.
+	 * Records which credential was used for a session (for rate-limit switching)
+	 * and journals the change when the serving credential actually moved.
+	 * `options.lastUsedAtMs` backdates the sticky (session-file pin restores on
+	 * resume); it defaults to now for live selections. `options.reason` is the
+	 * cause shown by `/account`'s session log.
 	 */
 	#recordSessionCredential(
 		provider: string,
 		sessionId: string | undefined,
 		type: AuthCredential["type"],
 		index: number,
-		selection?: AuthCredentialSelectionPolicy,
-		lastUsedAtMs?: number,
+		options?: {
+			selection?: AuthCredentialSelectionPolicy;
+			lastUsedAtMs?: number;
+			reason?: AccountSelectionReason;
+			detail?: string;
+		},
 	): void {
 		if (!sessionId) return;
-		const credentialId = this.#getStoredCredentials(provider)[index]?.id;
+		const stored = this.#getStoredCredentials(provider)[index];
+		const credentialId = stored?.id;
 		if (credentialId === undefined) return;
-		const nowMs = lastUsedAtMs ?? Date.now();
+		const selection = options?.selection;
+		const nowMs = options?.lastUsedAtMs ?? Date.now();
 		const storageKey = this.#sessionStorageKey(provider, selection);
 		const sessionMap = this.#sessionLastCredential.get(storageKey) ?? new Map();
+		const releaseKey = `${storageKey}\0${sessionId}`;
+		// A pin/priority edit releases the sticky before this re-selection, so the
+		// prior binding lives in the release map rather than the sticky map.
+		const releasedCredentialId = this.#releasedSessionCredentials.get(releaseKey);
+		this.#releasedSessionCredentials.delete(releaseKey);
+		const previousCredentialId = sessionMap.get(sessionId)?.credentialId ?? releasedCredentialId;
 		sessionMap.set(sessionId, { type, index, credentialId, lastUsedAtMs: nowMs });
 		this.#sessionLastCredential.set(storageKey, sessionMap);
+		if (previousCredentialId !== credentialId) {
+			this.#journalAccountSelection({
+				atMs: Date.now(),
+				provider,
+				sessionId,
+				credentialId,
+				previousCredentialId,
+				reason: options?.reason ?? (previousCredentialId === undefined ? "initial" : "policy"),
+				email: stored.credential.type === "oauth" ? stored.credential.email : undefined,
+				accountId: stored.credential.type === "oauth" ? stored.credential.accountId : undefined,
+				detail: options?.detail,
+			});
+		}
 
 		try {
 			const cacheKey = this.#sessionCacheKey(provider, sessionId, selection);
@@ -2420,6 +2555,75 @@ export class AuthStorage {
 		} catch (err) {
 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
 		}
+	}
+
+	/**
+	 * Why `index` ended up serving: the configured priority order it satisfies,
+	 * a fallover because a higher-ranked account is blocked, live-usage ranking
+	 * when nothing is pinned, or an explicit selection policy. Derived from
+	 * current state so every recording site gets the same vocabulary without
+	 * threading selection internals through the call stack.
+	 */
+	#classifyAccountSelection(
+		provider: string,
+		index: number,
+		context: {
+			providerKey: string;
+			selectionPolicy?: AuthCredentialSelectionPolicy;
+			blockScopes?: string | readonly string[];
+		},
+	): { reason: AccountSelectionReason; detail?: string } {
+		if (context.selectionPolicy !== undefined) {
+			return { reason: "policy", detail: `${context.selectionPolicy.strategy} selection policy` };
+		}
+		const priority = this.#priorityCredentialIndices(provider);
+		const defaultIndex = this.#defaultCredentialIndex(provider);
+		const order = priority.length > 0 ? priority : defaultIndex !== undefined ? [defaultIndex] : [];
+		if (order.length === 0) return { reason: "usage-ranking" };
+		const rank = order.indexOf(index);
+		if (rank === 0) return { reason: "pinned-default" };
+		const skipped = rank === -1 ? order : order.slice(0, rank);
+		const blockedSkipped = skipped.filter(candidate =>
+			this.#isCredentialBlocked(provider, context.providerKey, candidate, context.blockScopes),
+		);
+		if (blockedSkipped.length > 0) {
+			return {
+				reason: "fallover-blocked",
+				detail:
+					blockedSkipped.length === skipped.length
+						? "every higher-priority account is rate-limited"
+						: "a higher-priority account is rate-limited",
+			};
+		}
+		if (rank > 0) return { reason: "priority", detail: `priority #${rank + 1}` };
+		return { reason: "usage-ranking", detail: "outranked the pinned accounts on plan or quota" };
+	}
+
+	/** Append to the bounded in-process account-selection journal. */
+	#journalAccountSelection(event: AccountSelectionEvent): void {
+		this.#accountSelectionEvents.push(event);
+		if (this.#accountSelectionEvents.length > ACCOUNT_SELECTION_JOURNAL_LIMIT) {
+			this.#accountSelectionEvents.splice(0, this.#accountSelectionEvents.length - ACCOUNT_SELECTION_JOURNAL_LIMIT);
+		}
+	}
+
+	/**
+	 * Account-selection journal for this process, oldest first: which account
+	 * started serving a session, and why. Powers `/account`'s session log.
+	 */
+	listAccountSelectionEvents(options?: {
+		provider?: string;
+		sessionId?: string;
+		limit?: number;
+	}): readonly AccountSelectionEvent[] {
+		const provider = options?.provider?.toLowerCase();
+		const filtered = this.#accountSelectionEvents.filter(
+			event =>
+				(provider === undefined || event.provider.toLowerCase() === provider) &&
+				(options?.sessionId === undefined || event.sessionId === options.sessionId),
+		);
+		const limit = options?.limit;
+		return limit !== undefined && limit >= 0 && filtered.length > limit ? filtered.slice(-limit) : filtered;
 	}
 
 	/** Retrieves the last credential used by a session. */
@@ -2674,6 +2878,7 @@ export class AuthStorage {
 				blocked,
 				blockedUntil,
 				usageMeasured,
+				priorityRank: Number.POSITIVE_INFINITY,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
@@ -2752,6 +2957,30 @@ export class AuthStorage {
 		} catch (err) {
 			logger.debug("Failed to clear provider session sticky credentials from persistent store cache", { err });
 		}
+	}
+
+	/**
+	 * Drop every session's sticky credential for `provider` (memory + persistent
+	 * cache) while keeping rate-limit blocks, round-robin cursors, and the
+	 * journal intact. Used when the user changes the pinned default or priority
+	 * order: sessions already bound to a sibling (the primary AND every advisor
+	 * provider-session) must re-resolve against the new order instead of riding
+	 * their old pin for the rest of the session.
+	 *
+	 * The released credential is remembered per `(storage key, session)` so the
+	 * next selection journals a real `old → new` transition instead of reading
+	 * as a first-ever binding — the change log's whole purpose is naming what
+	 * the session moved away from.
+	 */
+	#releaseProviderSessionCredentials(provider: string): void {
+		for (const [storageKey, sessionMap] of [...this.#sessionLastCredential.entries()]) {
+			if (storageKey !== provider && !storageKey.startsWith(`${provider}\0`)) continue;
+			for (const [sessionId, entry] of sessionMap) {
+				this.#releasedSessionCredentials.set(`${storageKey}\0${sessionId}`, entry.credentialId);
+			}
+			this.#sessionLastCredential.delete(storageKey);
+		}
+		this.#clearProviderSessionCredentialCache(provider);
 	}
 
 	/**
@@ -5353,6 +5582,13 @@ export class AuthStorage {
 		if (planRequirement !== "none" && left.planPriority !== right.planPriority) {
 			return left.planPriority - right.planPriority;
 		}
+		// The configured account order (`providers.accountPriority`, whose head is
+		// `providers.defaultAccount`) outranks usage ranking once the plan filter
+		// has had its say: the order is a user decision, and ranking only runs
+		// here at all because the request is plan-gated (see `shouldRank`).
+		// Blocked/exhausted and plan-ineligible rows already lost above, which is
+		// exactly the documented fallover behavior.
+		if (left.priorityRank !== right.priorityRank) return left.priorityRank < right.priorityRank ? -1 : 1;
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 		// Short-window guard: candidates whose primary (e.g. 5h) window is
 		// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -5407,6 +5643,8 @@ export class AuthStorage {
 		providerKey: string;
 		provider: string;
 		order: number[];
+		/** Credential indices in configured priority order; position 0 is the pinned default. */
+		priorityIndices?: readonly number[];
 		planRequirement: OpenAICodexPlanRequirement;
 		credentials: OAuthSelection[];
 		options?: AuthApiKeyOptions;
@@ -5522,6 +5760,7 @@ export class AuthStorage {
 				blocked,
 				blockedUntil,
 				usageMeasured,
+				priorityRank: AuthStorage.#priorityRankOf(args.priorityIndices, selection.index),
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: getOpenAICodexPlanPriority(usage, args.planRequirement),
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
@@ -5578,6 +5817,17 @@ export class AuthStorage {
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const defaultIndex = options?.selection === undefined ? this.#defaultCredentialIndex(provider) : undefined;
 		const hasDefault = defaultIndex !== undefined && credentials.some(entry => entry.index === defaultIndex);
+		// Explicit selection policies (round-robin, least-used, …) own their own
+		// ordering; the user's configured priority applies to normal traffic.
+		// A bare `providers.defaultAccount` is the one-entry list, so both config
+		// shapes reach ranking and ordering through the same vector.
+		const configuredPriority =
+			options?.selection === undefined
+				? this.#priorityCredentialIndices(provider).filter(index =>
+						credentials.some(entry => entry.index === index),
+					)
+				: [];
+		const priorityIndices = configuredPriority.length > 0 ? configuredPriority : hasDefault ? [defaultIndex!] : [];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = {
 			modelId: options?.modelId,
@@ -5644,11 +5894,15 @@ export class AuthStorage {
 				sessionId,
 				credentials.length,
 			);
-			const defaultPos = credentials.findIndex(entry => entry.index === defaultIndex);
+			// Configured order first (head = pinned default), then the rest of the
+			// list, then the session-hash order for unranked accounts. The session's
+			// current sticky still leads so an announced fallover stays put instead
+			// of flapping back to a default that is blocked for this session.
+			const priorityPositions = priorityIndices.map(index => credentials.findIndex(entry => entry.index === index));
 			const sessionPreferredPos = sessionPreferredIsAvailable
 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
 				: -1;
-			const prefix = [sessionPreferredPos, defaultPos].filter(pos => pos >= 0);
+			const prefix = [sessionPreferredPos, ...priorityPositions].filter(pos => pos >= 0);
 			order = [...new Set([...prefix, ...baseOrder])];
 		} else {
 			order = this.#getCredentialOrder(
@@ -5691,6 +5945,7 @@ export class AuthStorage {
 					providerKey,
 					provider,
 					planRequirement,
+					priorityIndices,
 					order: rankingOrder,
 					credentials,
 					options,
@@ -6361,7 +6616,14 @@ export class AuthStorage {
 				}
 			}
 			this.#recordOAuthBearerCredentialId(provider, result.apiKey, credentialId);
-			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index, options?.selection);
+			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index, {
+				selection: options?.selection,
+				...this.#classifyAccountSelection(provider, selection.index, {
+					providerKey,
+					selectionPolicy: options?.selection,
+					blockScopes: blockScopes ?? blockScope,
+				}),
+			});
 			if (options?.selection === undefined && credentialId !== undefined) {
 				this.#noteDefaultAccountSelection(provider, sessionId, credentialId, blockScopes ?? blockScope);
 			}
@@ -6486,7 +6748,10 @@ export class AuthStorage {
 		if (row.credential.type === "api_key") {
 			const apiKey = await this.#configValueResolver(row.credential.key);
 			if (!apiKey) return undefined;
-			this.#recordSessionCredential(provider, sessionId, "api_key", row.index, options.selection);
+			this.#recordSessionCredential(provider, sessionId, "api_key", row.index, {
+				selection: options.selection,
+				reason: options.selection === undefined ? undefined : "policy",
+			});
 			return { apiKey, credentialId: row.id, credentialType: "api_key", source: "api_key" };
 		}
 		const resolved = await this.#resolveOAuthSelectionMode(provider, sessionId, options, {
@@ -6861,17 +7126,14 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Replace the in-memory default selector so a `/account default` change
-	 * takes effect without restarting. Passing `undefined` clears it.
+	 * Forget the per-provider pin bookkeeping (selector miss/ambiguity logs and
+	 * fallover announcements) plus every session's sticky credential, so the
+	 * next request for that provider re-resolves against the new configuration.
+	 * Rate-limit blocks and round-robin cursors survive: a pin change is not a
+	 * reason to forget that an account is currently exhausted.
 	 */
-	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
+	#applyProviderPinChange(provider: string): void {
 		const key = provider.toLowerCase();
-		const normalized = selector?.trim().toLowerCase();
-		if (!normalized) {
-			this.#defaultAccountSelectors.delete(key);
-		} else {
-			this.#defaultAccountSelectors.set(key, normalized);
-		}
 		for (const logKey of [...this.#defaultAccountLogged]) {
 			if (logKey.startsWith(`${key}\0`)) this.#defaultAccountLogged.delete(logKey);
 		}
@@ -6881,6 +7143,90 @@ export class AuthStorage {
 		for (const pendingKey of [...this.#pendingDefaultFallovers.keys()]) {
 			if (pendingKey.startsWith(`${provider}\0`)) this.#pendingDefaultFallovers.delete(pendingKey);
 		}
+		this.#releaseProviderSessionCredentials(provider);
+	}
+
+	/**
+	 * Replace the in-memory default selector so a `/account default` change
+	 * takes effect without restarting. Passing `undefined` clears it. Sessions
+	 * already bound to another account — the primary and every advisor
+	 * provider-session — release their sticky so the new pin serves the next
+	 * request instead of taking effect only on restart.
+	 */
+	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
+		const key = provider.toLowerCase();
+		const normalized = selector?.trim().toLowerCase();
+		if (this.#defaultAccountSelectors.get(key) === normalized) return;
+		if (!normalized) {
+			this.#defaultAccountSelectors.delete(key);
+		} else {
+			this.#defaultAccountSelectors.set(key, normalized);
+		}
+		this.#applyProviderPinChange(provider);
+	}
+
+	/** Configured `providers.accountPriority` selectors for `provider`, in order. */
+	getAccountPrioritySelectors(provider: string): readonly string[] {
+		return this.#accountPrioritySelectors.get(provider.toLowerCase()) ?? [];
+	}
+
+	/**
+	 * Selector string that resolves to exactly `credentialId` for `provider`:
+	 * the most portable identity (email → accountId → projectId →
+	 * enterpriseUrl) that is unique among stored rows, else the durable
+	 * `#<credentialId>` form. Same-email multi-org accounts therefore get an
+	 * unambiguous pin instead of a selector `#defaultCredentialIndex` would
+	 * reject, while single-account setups keep a config value that survives a
+	 * re-login into a new row id.
+	 */
+	describeAccountSelector(provider: string, credentialId: number): string | undefined {
+		const stored = this.#getStoredCredentials(provider);
+		const entry = stored.find(row => row.id === credentialId);
+		if (!entry) return undefined;
+		if (entry.credential.type === "oauth") {
+			const candidates = [
+				entry.credential.email,
+				entry.credential.accountId,
+				entry.credential.projectId,
+				entry.credential.enterpriseUrl,
+			];
+			for (const candidate of candidates) {
+				const trimmed = candidate?.trim();
+				if (!trimmed) continue;
+				const selector = trimmed.toLowerCase();
+				const matches = stored.filter(row => this.#credentialMatchesSelector(row, selector));
+				if (matches.length === 1) return trimmed;
+			}
+		}
+		return `#${credentialId}`;
+	}
+
+	/** Durable credential ids the configured priority list resolves to, in order. */
+	getAccountPriorityCredentialIds(provider: string): readonly number[] {
+		const stored = this.#getStoredCredentials(provider);
+		return this.#priorityCredentialIndices(provider)
+			.map(index => stored[index]?.id)
+			.filter((id): id is number => id !== undefined);
+	}
+
+	/**
+	 * Replace the in-memory account priority order so an `/account priority`
+	 * change takes effect without restarting. Passing `undefined` (or an empty
+	 * list) clears it, which also unpins the head-derived default. Like
+	 * {@link AuthStorage.setDefaultAccountSelector}, bound sessions release
+	 * their sticky so the new order applies to the next request.
+	 */
+	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): void {
+		const key = provider.toLowerCase();
+		const normalized = selectors === undefined ? [] : AuthStorage.#normalizeAccountPrioritySelectors(selectors);
+		const previous = this.#accountPrioritySelectors.get(key) ?? [];
+		if (previous.length === normalized.length && previous.every((entry, at) => entry === normalized[at])) return;
+		if (normalized.length === 0) {
+			this.#accountPrioritySelectors.delete(key);
+		} else {
+			this.#accountPrioritySelectors.set(key, normalized);
+		}
+		this.#applyProviderPinChange(provider);
 	}
 
 	/**
@@ -6908,7 +7254,10 @@ export class AuthStorage {
 		const index = stored.findIndex(entry => entry.id === credentialId);
 		const target = stored[index];
 		if (target?.credential.type !== "oauth") return false;
-		this.#recordSessionCredential(provider, sessionId, "oauth", index, undefined, options?.lastUsedAtMs);
+		this.#recordSessionCredential(provider, sessionId, "oauth", index, {
+			lastUsedAtMs: options?.lastUsedAtMs,
+			reason: "manual-pin",
+		});
 		return true;
 	}
 

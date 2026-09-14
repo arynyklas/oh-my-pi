@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createGallerySegmentContext } from "../../../../src/cli/gallery-fixtures/segments";
-import { Settings } from "../../../../src/config/settings";
+import { Settings, settings } from "../../../../src/config/settings";
 import { StatusLineComponent } from "../../../../src/modes/components/status-line/component";
 import { renderSegment } from "../../../../src/modes/components/status-line/segments";
 import { loadTheme } from "../../../../src/modes/theme/loader";
@@ -266,6 +266,64 @@ describe("StatusLineComponent", () => {
 			expect(stripped).toContain("\u{f067a} 2.67 + \uea70 \u{f067a} 0.41");
 		} finally {
 			setThemeInstance(baseTheme);
+		}
+	});
+
+	// The chip is the only place the user can see WHICH account serves the
+	// primary model and each advisor, so the component's resolution (session
+	// sticky per provider-session, default comparison, custom-preset gate) is
+	// the contract under test here — the segment renderer is covered separately.
+	it("attributes the serving account for the primary model and every advisor", () => {
+		const accounts = [
+			{ position: 0, credentialId: 11, email: "primary@example.com", active: true },
+			{ position: 1, credentialId: 12, email: "sibling@example.com", active: false },
+		];
+		const advisorAccounts = [
+			{ position: 0, credentialId: 21, email: "codex-default@example.com", active: false },
+			{ position: 1, credentialId: 22, email: "codex-sibling@example.com", active: true },
+		];
+		const session = {
+			...makeSessionWithLastMessage(null),
+			sessionId: "primary-session",
+			modelRegistry: {
+				isUsingOAuth: () => true,
+				authStorage: {
+					listOAuthAccounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),
+					// anthropic serves its pinned default; openai-codex fell over to a sibling.
+					getDefaultAccountCredentialId: (provider: string) => (provider === "anthropic" ? 11 : 21),
+					// Read by the usage-refresh cache key, unrelated to the chip.
+					getOAuthAccountIdentity: () => undefined,
+				},
+			},
+			getAdvisorAccountBindings: () => [
+				{ slug: "architect", provider: "openai-codex", providerSessionId: "primary-session-advisor-architect" },
+			],
+		};
+		session.state.model = { name: "Opus", contextWindow: 128000, provider: "anthropic" } as never;
+
+		settings.set("statusLine.preset", "custom");
+		settings.set("statusLine.leftSegments", ["model"]);
+		settings.set("statusLine.segmentOptions", { model: { showAccount: true } });
+		try {
+			const custom = statusLines.track(new StatusLineComponent(session as unknown as AgentSession));
+			const stripped = Bun.stripANSI(custom.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+			expect(stripped).toContain(`${theme.icon.account} primary@example.com`);
+			// Advisor chip carries the advisor icon and the fallover glyph, since
+			// the advisor is not on its provider's default account.
+			expect(stripped).toContain(`${theme.icon.advisor}${theme.icon.accountFallover} codex-sibling@example.com`);
+			expect(stripped).not.toContain("sibling@example.com codex-default");
+
+			// The chip is a custom-preset knob: the same option under a built-in
+			// preset renders nothing.
+			settings.set("statusLine.preset", "default");
+			const builtin = statusLines.track(new StatusLineComponent(session as unknown as AgentSession));
+			const builtinStripped = Bun.stripANSI(builtin.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+			expect(builtinStripped).not.toContain("primary@example.com");
+			expect(builtinStripped).not.toContain("codex-sibling@example.com");
+		} finally {
+			settings.set("statusLine.preset", "default");
+			settings.set("statusLine.leftSegments", []);
+			settings.set("statusLine.segmentOptions", {});
 		}
 	});
 });

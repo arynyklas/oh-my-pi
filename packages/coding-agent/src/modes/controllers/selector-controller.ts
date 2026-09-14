@@ -60,6 +60,11 @@ import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
+import {
+	clearDefaultAccount,
+	moveAccountPriority,
+	setDefaultAccount,
+} from "../../slash-commands/helpers/account-priority";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
 	describeRedeemOutcome,
@@ -89,6 +94,11 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "../utils/interactive-context-helpers";
+import {
+	type AccountManagerActionResult,
+	type AccountManagerEventRow,
+	AccountManagerSelectorComponent,
+} from "../components/account-manager-selector";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
@@ -114,7 +124,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
-import { renderUsageReports } from "./command-controller";
+import { formatCompactQuota, renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -2297,7 +2307,14 @@ export class SelectorController {
 		});
 	}
 
-	async showDefaultAccountSelector(): Promise<void> {
+	/**
+	 * Interactive `/account`: the provider's stored OAuth accounts with their
+	 * active/default/priority markers, per-account quota, and this session's
+	 * account-change log. Enter pins the default, `d` unpins it and Shift+↑/↓
+	 * rewrites the priority order; every edit lands in both `settings` and the
+	 * live AuthStorage, so it applies without a restart.
+	 */
+	async showAccountManager(): Promise<void> {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
 			this.ctx.showStatus("Cannot change the default account while the session is streaming.");
@@ -2322,45 +2339,104 @@ export class SelectorController {
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
 		const providerName = provider?.name ?? providerId;
 		const accounts = toSessionPinAccounts(accountList.accounts);
+		const credentialSource = authStorage.describeCredentialSource(providerId, session.sessionId);
 		if (accounts.length === 0) {
-			const source = authStorage.describeCredentialSource(providerId, session.sessionId);
 			this.ctx.showStatus(
-				source
-					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
+				credentialSource
+					? `No stored OAuth accounts for ${providerName}. Current auth comes from ${credentialSource}.`
 					: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
 			);
 			return;
 		}
+		// Reuse the session's usage path (same fetch `/usage` drives, cached
+		// provider-side) purely to annotate rows; missing usage is not fatal.
+		let usageReports: UsageReport[] = [];
+		if (typeof session.fetchUsageReports === "function") {
+			try {
+				usageReports = (await session.fetchUsageReports()) ?? [];
+			} catch {
+				// Network/auth failure just means no quota text on the rows.
+			}
+		}
+		const priorityContext = { settings: this.ctx.settings, authStorage, providerId };
+		// Advisors route through their own provider-session ids, so the primary
+		// session's log alone would hide exactly the advisor switches this pane
+		// exists to explain. Merge every provider-session and label its origin.
+		const collectEventRows = (): AccountManagerEventRow[] => {
+			const rows: AccountManagerEventRow[] = authStorage
+				.listAccountSelectionEvents({ sessionId: session.sessionId })
+				.map(event => ({ origin: "main", event }));
+			const seen = new Set<string>([session.sessionId]);
+			for (const binding of session.getAdvisorAccountBindings()) {
+				if (seen.has(binding.providerSessionId)) continue;
+				seen.add(binding.providerSessionId);
+				for (const event of authStorage.listAccountSelectionEvents({ sessionId: binding.providerSessionId })) {
+					// A single unnamed advisor has an empty slug; the row still has
+					// to say it is not the primary session.
+					rows.push({ origin: binding.slug || "advisor", event });
+				}
+			}
+			return rows.sort((left, right) => left.event.atMs - right.event.atMs);
+		};
 
 		this.showSelector(done => {
-			const selector = new SessionAccountSelectorComponent(
+			const selector = new AccountManagerSelectorComponent({
 				providerName,
-				accounts,
-				account => {
-					done();
-					const chosen =
-						account.email ??
-						account.accountId ??
-						account.projectId ??
-						account.enterpriseUrl ??
-						`#${account.credentialId}`;
-					const current = { ...this.ctx.settings.get("providers.defaultAccount") };
-					current[providerId] = chosen;
-					this.ctx.settings.set("providers.defaultAccount", current);
-					authStorage.setDefaultAccountSelector(providerId, chosen);
-					if (authStorage.getDefaultAccountCredentialId(providerId) !== account.credentialId) {
-						this.ctx.showWarning(`${account.label} is no longer available.`);
-						return;
-					}
-					this.ctx.showStatus(`Default account for ${providerName} is now ${account.label}.`);
+				credentialSource,
+				// Re-read after every edit: releasing session stickies can change
+				// which row is active, so a cached list would lie.
+				accounts: () => toSessionPinAccounts(authStorage.listOAuthAccounts(providerId, session.sessionId)),
+				events: collectEventRows,
+				quotaFor: account =>
+					usageReports.length === 0
+						? undefined
+						: (formatCompactQuota(providerId, usageReports, Date.now(), account) ?? undefined),
+				isDefault: account => authStorage.getDefaultAccountCredentialId(providerId) === account.credentialId,
+				priorityRank: account => {
+					const index = authStorage.getAccountPriorityCredentialIds(providerId).indexOf(account.credentialId);
+					return index >= 0 ? index + 1 : undefined;
+				},
+				onSetDefault: (account): AccountManagerActionResult => {
+					const chosen = setDefaultAccount(priorityContext, account);
 					this.ctx.statusLine.invalidate();
-					this.ctx.ui.requestRender();
+					if (authStorage.getDefaultAccountCredentialId(providerId) !== account.credentialId) {
+						return {
+							message: `${account.label} is no longer available (selector ${chosen}).`,
+							tone: "warning",
+						};
+					}
+					return { message: `Default account for ${providerName} is now ${account.label}.`, tone: "info" };
 				},
-				() => {
+				onClearDefault: (): AccountManagerActionResult => {
+					const hadPriority = clearDefaultAccount(priorityContext);
+					this.ctx.statusLine.invalidate();
+					return {
+						message: hadPriority
+							? `Cleared the default account and priority order for ${providerName}.`
+							: `Cleared the default account for ${providerName}.`,
+						tone: "info",
+					};
+				},
+				onMove: (account, delta): AccountManagerActionResult => {
+					const move = moveAccountPriority(priorityContext, account, delta);
+					if (!move.moved) {
+						return {
+							message: `${account.label} is already ${delta < 0 ? "first" : "last"} in the priority order.`,
+							tone: "warning",
+						};
+					}
+					this.ctx.statusLine.invalidate();
+					return {
+						message: `${account.label} is now priority ${move.rank} of ${move.total} for ${providerName}.`,
+						tone: "info",
+					};
+				},
+				onCancel: () => {
 					done();
 					this.ctx.ui.requestRender();
 				},
-			);
+				requestRender: () => this.ctx.ui.requestRender(),
+			});
 			return { component: selector, focus: selector };
 		});
 	}

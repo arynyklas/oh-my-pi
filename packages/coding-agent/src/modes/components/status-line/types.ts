@@ -21,7 +21,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
-	model?: { showThinkingLevel?: boolean };
+	model?: { showThinkingLevel?: boolean; showAccount?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
@@ -55,6 +55,24 @@ export type EffectiveStatusLineSettings = Required<
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Rendering
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Account chip payload for the model segment (`segmentOptions.model.showAccount`). */
+export interface ActiveAccountStatus {
+	/** Display label of the serving credential: email, else account/project id, org-suffixed when distinct. */
+	label: string;
+	/**
+	 * True when `providers.defaultAccount` pins a different credential than the
+	 * one serving this session — a usage-limit fallover off the default, or a
+	 * default changed after the session pinned its sibling.
+	 */
+	fellBack: boolean;
+	/**
+	 * Advisor bindings whose serving account differs from the primary's;
+	 * empty/absent when every advisor is served by the same credential as the
+	 * primary model (the common case, which must not add chip noise).
+	 */
+	advisors?: readonly { slug: string; label: string; fellBack: boolean }[];
+}
 
 export type RGB = readonly [number, number, number];
 
@@ -163,6 +181,13 @@ export interface SegmentContext {
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;
+	/**
+	 * Credential actually serving this session for the active model's provider,
+	 * resolved only when the model segment's `showAccount` option is on.
+	 * Absent/null when the provider authenticates with an API key (no OAuth
+	 * identity to attribute) or the option is off.
+	 */
+	account?: ActiveAccountStatus | null;
 }
 
 export interface RenderedSegment {

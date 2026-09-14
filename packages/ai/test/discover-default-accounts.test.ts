@@ -49,4 +49,36 @@ describe("discoverAuthStorage providers.defaultAccount", () => {
 		});
 		expect(storage.getDefaultAccountSelector("anthropic")).toBe("injected@example.com");
 	});
+
+	test("reads nested, flat, and scalar providers.accountPriority forms from config.yml", async () => {
+		const nested = await withConfig(
+			"providers:\n  accountPriority:\n    anthropic:\n      - first@example.com\n      - second@example.com\n",
+		);
+		expect(nested.getAccountPrioritySelectors("anthropic")).toEqual(["first@example.com", "second@example.com"]);
+
+		const flat = await withConfig('"providers.accountPriority":\n  anthropic:\n    - flat@example.com\n');
+		expect(flat.getAccountPrioritySelectors("anthropic")).toEqual(["flat@example.com"]);
+
+		// A bare string is the one-entry list, so hand-written configs that mirror
+		// `providers.defaultAccount` still pin instead of being dropped.
+		const scalar = await withConfig("providers:\n  accountPriority:\n    anthropic: only@example.com\n");
+		expect(scalar.getAccountPrioritySelectors("anthropic")).toEqual(["only@example.com"]);
+	});
+
+	test("injected accountPriorities override config discovery", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-default-account-"));
+		await Bun.write(
+			path.join(dir, "config.yml"),
+			"providers:\n  accountPriority:\n    anthropic:\n      - from-file@example.com\n",
+		);
+		const storage = await discoverAuthStorage({
+			agentDir: dir,
+			accountPriorities: { anthropic: ["injected@example.com"] },
+		});
+		cleanups.push(async () => {
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		});
+		expect(storage.getAccountPrioritySelectors("anthropic")).toEqual(["injected@example.com"]);
+	});
 });

@@ -650,6 +650,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.accountPriority": {
+		type: "record",
+		default: {} as Record<string, string[]>,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Account Priority",
+			description:
+				'Ordered stored accounts per provider id (for example "anthropic": ["me@example.com", "backup@example.com"]). Entries are matched like Default Account; the first entry is the pinned default and the rest are the fallover order, so requests only move down the list when an account is rate-limited or cannot serve the model. Set it from the `/account` manager. Providers omitted here fall back to Default Account, then to automatic balancing.',
+		},
+	},
+
 	"providers.openai-codex.codeMode": {
 		type: "enum",
 		values: ["off", "on", "auto"] as const,

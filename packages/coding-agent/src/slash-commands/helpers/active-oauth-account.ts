@@ -24,6 +24,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
 }
 
 /**
+ * Compact label for one stored account among its siblings: the base identifier
+ * alone when no sibling shares it, else the org-suffixed
+ * {@link formatActiveAccountLabel} form. For width-constrained surfaces (the
+ * status-line account chip) where `me@x (me@x's Organization)` doubles the cell
+ * to say nothing — the org only carries information when two stored rows share
+ * an identifier. `enterpriseUrl` is the last-resort base, matching the account
+ * rows in `/account`.
+ */
+export function formatAccountLabelAmong(
+	account: OAuthAccountSummary,
+	siblings: readonly OAuthAccountSummary[],
+): string | undefined {
+	const base = accountLabelBase(account);
+	if (!base) return formatActiveAccountLabel(account);
+	const shared = siblings.some(
+		candidate =>
+			candidate.credentialId !== account.credentialId &&
+			normalizeIdentityValue(accountLabelBase(candidate)) === normalizeIdentityValue(base),
+	);
+	return shared ? (formatActiveAccountLabel(account) ?? base) : base;
+}
+
+function accountLabelBase(account: OAuthAccountSummary): string | undefined {
+	return account.email || account.accountId || account.projectId || account.enterpriseUrl?.trim() || undefined;
+}
+
+/**
  * True when a single usage-limit column belongs to the given OAuth identity.
  *
  * Single definition of the matching rules for both `/usage` renderers:

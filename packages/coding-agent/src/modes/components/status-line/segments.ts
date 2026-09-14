@@ -20,6 +20,13 @@ export type { SegmentContext } from "./types";
 
 const STARTUP_PLACEHOLDER = "…";
 
+/**
+ * Max advisor account chips rendered in the model cell before the remainder
+ * collapses into a `+N` counter. Each chip costs two icons plus a truncated
+ * label, so an unbounded roster would eat the whole bar.
+ */
+const ADVISOR_ACCOUNT_CHIP_CAP = 2;
+
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
@@ -254,6 +261,39 @@ const modelSegment: StatusLineSegment = {
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
 		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
+		// Account chip (`segmentOptions.model.showAccount`, custom preset only):
+		// which credential is serving this session, and — via a distinct glyph
+		// plus warning color — whether it is NOT the configured
+		// `providers.defaultAccount` (usage-limit fallover, changed default).
+		// Sits between the model name and the advisor badge so the model cell
+		// reads model → account → advisor.
+		const account = opts.showAccount ? ctx.account : null;
+		if (account) {
+			const icon = account.fellBack ? theme.icon.accountFallover : theme.icon.account;
+			const label = statusValue(ctx, truncateToWidth(sanitizeStatusText(account.label), TRUNCATE_LENGTHS.SHORT));
+			content += theme.fg(account.fellBack ? "warning" : "muted", ` ${withIcon(icon, label)}`);
+			// One advisor-marked chip per distinct advisor account (the resolver
+			// collapses advisors that share one account, and keeps chips even when
+			// they match the primary — that match is the confirmation the chip
+			// exists for). Two is the cap: a wide advisor roster would otherwise
+			// push every right-hand segment off the bar, so the rest collapse into
+			// a `+N` counter.
+			const advisors = account.advisors ?? [];
+			for (const advisor of advisors.slice(0, ADVISOR_ACCOUNT_CHIP_CAP)) {
+				const advisorIcon = advisor.fellBack ? theme.icon.accountFallover : theme.icon.account;
+				const advisorLabel = statusValue(
+					ctx,
+					truncateToWidth(sanitizeStatusText(advisor.label), TRUNCATE_LENGTHS.SHORT),
+				);
+				content += theme.fg(
+					advisor.fellBack ? "warning" : "muted",
+					` ${theme.icon.advisor}${withIcon(advisorIcon, advisorLabel)}`,
+				);
+			}
+			if (advisors.length > ADVISOR_ACCOUNT_CHIP_CAP) {
+				content += theme.fg("muted", ` +${advisors.length - ADVISOR_ACCOUNT_CHIP_CAP}`);
+			}
+		}
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in

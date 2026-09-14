@@ -303,6 +303,18 @@ export interface AdvisorStatusOverviewEntry {
 	yielded: boolean;
 }
 
+/**
+ * One live advisor's provider-identity binding: the provider its model talks
+ * to, plus the provider session id its requests carry. The status line
+ * resolves which stored OAuth credential is serving that advisor from these
+ * two fields exactly as it does for the primary model.
+ */
+export interface AdvisorAccountBinding {
+	slug: string;
+	provider: string;
+	providerSessionId: string;
+}
+
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
@@ -1973,6 +1985,27 @@ export class SessionAdvisors {
 			};
 		});
 		return { configured: this.#advisorEnabled, advisors };
+	}
+
+	/**
+	 * Provider-identity binding of every live advisor, for the status line's
+	 * account chips. Mirrors {@link getAdvisorStatusOverview} in weight: it
+	 * only reads fields already maintained by
+	 * {@link SessionAdvisors.refreshProviderIdentity}, so it is safe to call
+	 * per render frame. Advisors with no resolved model provider or no
+	 * provider session id yet are skipped — there is no credential to
+	 * attribute to them.
+	 */
+	getAdvisorAccountBindings(): readonly AdvisorAccountBinding[] {
+		if (!this.#advisorEnabled) return [];
+		const bindings: AdvisorAccountBinding[] = [];
+		for (const advisor of this.#advisors) {
+			const provider = advisor.model?.provider;
+			const providerSessionId = advisor.providerSessionId;
+			if (!provider || !providerSessionId) continue;
+			bindings.push({ slug: advisor.slug, provider, providerSessionId });
+		}
+		return bindings;
 	}
 
 	/** Return cumulative advisor cost recorded for the current session. */

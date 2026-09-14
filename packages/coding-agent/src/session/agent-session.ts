@@ -345,6 +345,7 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
+	type AdvisorAccountBinding,
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
 	SessionAdvisors,
@@ -376,7 +377,12 @@ import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
 export * from "./agent-session-types";
-export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
+export type {
+	AdvisorAccountBinding,
+	AdvisorStats,
+	AdvisorStatusOverviewEntry,
+	PerAdvisorStat,
+} from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
@@ -10791,6 +10797,15 @@ export class AgentSession {
 	 */
 	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
 		return this.#advisors.getAdvisorStatusOverview();
+	}
+
+	/**
+	 * Provider + provider-session-id binding of every live advisor, so the
+	 * status line can resolve which OAuth credential is serving each advisor
+	 * the same way it does for the primary model.
+	 */
+	getAdvisorAccountBindings(): readonly AdvisorAccountBinding[] {
+		return this.#advisors.getAdvisorAccountBindings();
 	}
 
 	/** Return cumulative cost recorded for the current session's advisor activity. */

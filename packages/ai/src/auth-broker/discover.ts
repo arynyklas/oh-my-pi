@@ -42,6 +42,8 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 	/** Per-provider default account, overriding `providers.defaultAccount` from config.yml. */
 	defaultAccounts?: Readonly<Record<string, string>>;
+	/** Per-provider ordered account preference, overriding `providers.accountPriority` from config.yml. */
+	accountPriorities?: Readonly<Record<string, readonly string[]>>;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -76,6 +78,7 @@ interface ConfigSnapshot {
 	url?: string;
 	token?: string;
 	defaultAccounts?: Record<string, string>;
+	accountPriorities?: Record<string, string[]>;
 }
 
 /**
@@ -125,6 +128,39 @@ function readDottedRecord(record: Record<string, unknown>, dottedKey: string): R
 	return Object.keys(result).length > 0 ? result : undefined;
 }
 
+/**
+ * Resolve a dotted config key to a record of string ARRAYS, accepting the same
+ * nested/flat shapes as {@link readDottedRecord}. A bare string value is read
+ * as a one-entry list so `providers.accountPriority: { anthropic: me@x }` still
+ * means "pin this account".
+ */
+function readDottedListRecord(
+	record: Record<string, unknown>,
+	dottedKey: string,
+): Record<string, string[]> | undefined {
+	let current: unknown = record;
+	for (const segment of dottedKey.split(".")) {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) {
+			current = undefined;
+			break;
+		}
+		current = (current as Record<string, unknown>)[segment];
+	}
+	let source = current;
+	if (source === null || typeof source !== "object" || Array.isArray(source)) {
+		source = record[dottedKey];
+	}
+	if (source === null || typeof source !== "object" || Array.isArray(source)) return undefined;
+	const result: Record<string, string[]> = {};
+	for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+		const entries = (Array.isArray(value) ? value : [value]).filter(
+			(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+		);
+		if (entries.length > 0) result[key] = entries;
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
+
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 	for (const filename of MAIN_CONFIG_FILENAMES) {
 		const configPath = path.join(agentDir, filename);
@@ -136,7 +172,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			const url = readDottedString(record, "auth.broker.url");
 			const token = readDottedString(record, "auth.broker.token");
 			const defaultAccounts = readDottedRecord(record, "providers.defaultAccount");
-			return { url, token, defaultAccounts };
+			const accountPriorities = readDottedListRecord(record, "providers.accountPriority");
+			return { url, token, defaultAccounts, accountPriorities };
 		} catch (err) {
 			if (isEnoent(err)) continue;
 			logger.warn("auth-broker config unreadable", { path: configPath, error: String(err) });
@@ -266,7 +303,10 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
-	const defaultAccounts = options.defaultAccounts ?? (await readConfigYaml(agentDir)).defaultAccounts;
+	const configSnapshot =
+		options.defaultAccounts && options.accountPriorities ? undefined : await readConfigYaml(agentDir);
+	const defaultAccounts = options.defaultAccounts ?? configSnapshot?.defaultAccounts;
+	const accountPriorities = options.accountPriorities ?? configSnapshot?.accountPriorities;
 
 	if (brokerConfig) {
 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
@@ -329,6 +369,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 			configValueResolver: options.configValueResolver,
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
 			defaultAccounts,
+			accountPriorities,
 		});
 		await storage.reload();
 		return storage;
@@ -339,6 +380,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		configValueResolver: options.configValueResolver,
 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
 		defaultAccounts,
+		accountPriorities,
 	});
 	await storage.reload();
 	return storage;

@@ -6035,8 +6035,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showSessionPinSelector();
 	}
 
-	showDefaultAccountSelector(): Promise<void> {
-		return this.#selectorController.showDefaultAccountSelector();
+	showAccountManager(): Promise<void> {
+		return this.#selectorController.showAccountManager();
 	}
 
 	showResetUsageSelector(): Promise<void> {

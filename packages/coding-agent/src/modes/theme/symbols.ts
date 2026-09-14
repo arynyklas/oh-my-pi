@@ -97,6 +97,8 @@ export type SymbolKey =
 	| "icon.subscription"
 	| "icon.advisor"
 	| "icon.advisorClosed"
+	| "icon.account"
+	| "icon.accountFallover"
 	| "icon.time"
 	| "icon.omp"
 	| "icon.esc"
@@ -450,6 +452,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.subscription": "(sub)",
 	"icon.advisor": "👁",
 	"icon.advisorClosed": "🙈",
+	"icon.account": "📧",
+	"icon.accountFallover": "🔀",
 	"icon.time": "⏱",
 	"icon.omp": "π",
 	"icon.esc": "⎋",
@@ -800,6 +804,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.advisor": "\uea70",
 	// pick:  (nf-oct-eye_closed)
 	"icon.advisorClosed": "\ueae7",
+	// pick: U+F0E0 (nf-fa-envelope) | alt: U+F007 (nf-fa-user)
+	"icon.account": "\uf0e0",
+	// pick: U+F0EC (nf-fa-exchange) | alt: U+F074 (nf-fa-random)
+	"icon.accountFallover": "\uf0ec",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
 	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
@@ -1158,6 +1166,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.subscription": "(sub)",
 	"icon.advisor": "(adv)",
 	"icon.advisorClosed": "(adv)",
+	"icon.account": "(acct)",
+	"icon.accountFallover": "(alt)",
 	"icon.time": "t:",
 	"icon.omp": "pi",
 	"icon.esc": "esc",

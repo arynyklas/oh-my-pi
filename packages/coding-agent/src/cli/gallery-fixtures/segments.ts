@@ -103,6 +103,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "advisor error", session: { advisorStatus: "error" } },
 				{ label: "advisor paused", session: { advisorStatus: "paused" } },
 				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
+				{
+					label: "account chip",
+					context: {
+						options: { model: { showThinkingLevel: true, showAccount: true } },
+						account: { label: "dev@example.com", fellBack: false },
+					},
+				},
+				{
+					label: "account fell over off the default",
+					context: {
+						options: { model: { showThinkingLevel: true, showAccount: true } },
+						account: { label: "backup@example.com (Acme)", fellBack: true },
+					},
+				},
+				{
+					label: "advisor account off the default",
+					session: { advisorStatus: "running" },
+					context: {
+						options: { model: { showThinkingLevel: true, showAccount: true } },
+						account: {
+							label: "dev@example.com",
+							fellBack: false,
+							advisors: [{ slug: "default", label: "backup@example.com (Acme)", fellBack: true }],
+						},
+					},
+				},
 			];
 		case "mode":
 			return [

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.accountPriority`: an ordered per-provider account list whose head is the pinned default and whose tail is the fallover order, honored by both plain and live-usage-ranked selection.
+- Added an in-process account-selection journal (`listAccountSelectionEvents`) recording which account started serving a session and why (pinned default, priority, rate-limit fallover, usage ranking, manual pin).
+
+### Fixed
+
+- Fixed plan-gated models (e.g. Codex GPT-5.6 Sol, typically used for advisors) ignoring the configured default account and picking whichever account had cooler quota.
+- Changing the default account or account priority now moves sessions already bound to another account — including advisor provider-sessions — to the new choice on their next request instead of only after a restart.
+
 ## [18.1.16-fork.2] - 2026-09-13
 
 ### Fixed

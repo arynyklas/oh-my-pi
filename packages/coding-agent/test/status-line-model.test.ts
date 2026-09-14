@@ -157,3 +157,86 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
 });
+
+describe("status line model segment account chip", () => {
+	function createAccountContext(
+		account: NonNullable<SegmentContext["account"]>,
+		showAccount: boolean,
+	): SegmentContext {
+		const ctx = createModelContext(false);
+		ctx.options = { model: { showAccount } };
+		ctx.account = account;
+		return ctx;
+	}
+
+	it("renders no account text when showAccount is absent", () => {
+		const ctx = createModelContext(false);
+		ctx.account = { label: "dev@example.com", fellBack: false };
+		const rendered = renderSegment("model", ctx).content;
+		expect(rendered).toContain("Test Model");
+		expect(rendered).not.toContain("dev@example.com");
+	});
+
+	it("renders the serving account muted, and warning-colored when off the default", () => {
+		const matching = renderSegment(
+			"model",
+			createAccountContext({ label: "dev@example.com", fellBack: false }, true),
+		).content;
+		expect(matching).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
+
+		const fellBack = renderSegment(
+			"model",
+			createAccountContext({ label: "backup@example.com (Acme)", fellBack: true }, true),
+		).content;
+		expect(fellBack).toContain(theme.fg("warning", ` ${theme.icon.accountFallover} backup@example.com (Acme)`));
+	});
+
+	it("adds an advisor-marked chip for an advisor served by another account", () => {
+		const rendered = renderSegment(
+			"model",
+			createAccountContext(
+				{
+					label: "dev@example.com",
+					fellBack: false,
+					advisors: [{ slug: "default", label: "advisor@example.com", fellBack: true }],
+				},
+				true,
+			),
+		).content;
+		expect(rendered).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
+		expect(rendered).toContain(
+			theme.fg("warning", ` ${theme.icon.advisor}${theme.icon.accountFallover} advisor@example.com`),
+		);
+	});
+
+	it("renders only the primary chip when no advisor account differs", () => {
+		const rendered = renderSegment(
+			"model",
+			createAccountContext({ label: "dev@example.com", fellBack: false, advisors: [] }, true),
+		).content;
+		expect(rendered).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
+		expect(rendered).not.toContain(theme.icon.advisor);
+	});
+
+	it("caps advisor chips at two and counts the remainder", () => {
+		const rendered = renderSegment(
+			"model",
+			createAccountContext(
+				{
+					label: "dev@example.com",
+					fellBack: false,
+					advisors: [
+						{ slug: "a", label: "one@example.com", fellBack: false },
+						{ slug: "b", label: "two@example.com", fellBack: false },
+						{ slug: "c", label: "three@example.com", fellBack: false },
+					],
+				},
+				true,
+			),
+		).content;
+		expect(rendered).toContain("one@example.com");
+		expect(rendered).toContain("two@example.com");
+		expect(rendered).not.toContain("three@example.com");
+		expect(rendered).toContain(theme.fg("muted", " +1"));
+	});
+});

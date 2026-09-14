@@ -591,6 +591,8 @@ export class Theme {
 			subscription: this.#symbols["icon.subscription"],
 			advisor: this.#symbols["icon.advisor"],
 			advisorClosed: this.#symbols["icon.advisorClosed"],
+			account: this.#symbols["icon.account"],
+			accountFallover: this.#symbols["icon.accountFallover"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
 			esc: this.#symbols["icon.esc"],
