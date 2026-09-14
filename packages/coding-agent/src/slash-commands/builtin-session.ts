@@ -1,5 +1,4 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { Settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -9,19 +8,12 @@ import {
 	renderChangelogEntries,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
-import {
-	type AccountPriorityContext,
-	applyAccountPriority,
-	clearDefaultAccount,
-	resolveAccountSelector,
-	setDefaultAccount,
-} from "./helpers/account-priority";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
-import { matchSessionPinAccounts, type SessionPinAccount, toSessionPinAccounts } from "./helpers/session-pin";
+import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
@@ -144,33 +136,22 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
-/** Shared prologue for `/account`: the current provider's accounts, or an error line. */
-async function resolveAccountContext(
-	session: AgentSession,
-	settings: Settings,
-	output: SlashCommandRuntime["output"],
-): Promise<
-	| {
-			context: AccountPriorityContext;
-			providerName: string;
-			accounts: SessionPinAccount[];
-	  }
-	| undefined
-> {
-	if (session.isStreaming) {
-		await output("Cannot change the default account while the session is streaming.");
-		return undefined;
-	}
+/**
+ * `/account` — read-only listing for surfaces with no TUI (ACP, headless).
+ * Interactive hosts open the account pane instead, which is the only place
+ * accounts are mutated; the markers here mirror it.
+ */
+async function handleAccountCommand(session: AgentSession, output: SlashCommandRuntime["output"]): Promise<void> {
 	let accountList: SessionOAuthAccountList | undefined;
 	try {
 		accountList = await session.listCurrentProviderOAuthAccounts();
 	} catch (error) {
 		await output(`Could not load provider accounts: ${errorMessage(error)}`);
-		return undefined;
+		return;
 	}
 	if (!accountList) {
-		await output("Select a model before setting a default account.");
-		return undefined;
+		await output("Select a model before inspecting provider accounts.");
+		return;
 	}
 	const authStorage = session.modelRegistry.authStorage;
 	const providerId = accountList.provider;
@@ -184,145 +165,21 @@ async function resolveAccountContext(
 				? `No stored OAuth accounts for ${providerName}. Current auth comes from ${source}.`
 				: `No stored OAuth accounts for ${providerName}. Use /login to add one.`,
 		);
-		return undefined;
-	}
-	return { context: { settings, authStorage, providerId }, providerName, accounts };
-}
-
-/** Resolve one `/account` selector token, reporting ambiguity/misses itself. */
-async function resolveOneAccount(
-	accounts: readonly SessionPinAccount[],
-	selector: string,
-	providerName: string,
-	output: SlashCommandRuntime["output"],
-): Promise<SessionPinAccount | undefined> {
-	const matches = matchSessionPinAccounts(accounts, selector);
-	if (matches.length === 0) {
-		await output(`No ${providerName} account matches "${selector}".`);
-		return undefined;
-	}
-	if (matches.length > 1) {
-		await output(
-			`"${selector}" matches multiple ${providerName} accounts: ${matches
-				.map(account => `${account.position + 1}. ${account.label}`)
-				.join(", ")}. Use the account number.`,
-		);
-		return undefined;
-	}
-	return matches[0];
-}
-
-/**
- * `/account` — non-interactive account listing and mutation. The listing shows
- * the same markers as the `/account` TUI (active, default, priority rank), and
- * both verbs write through the shared helpers so settings and the live
- * AuthStorage never disagree.
- */
-async function handleAccountCommand(
-	arg: string,
-	session: AgentSession,
-	settings: Settings,
-	output: SlashCommandRuntime["output"],
-): Promise<void> {
-	const resolved = await resolveAccountContext(session, settings, output);
-	if (!resolved) return;
-	const { context, providerName, accounts } = resolved;
-	const authStorage = context.authStorage;
-	const providerId = context.providerId;
-
-	const { verb, rest } = parseSubcommand(arg);
-	if (verb && verb !== "default" && verb !== "priority") {
-		await output("Usage: /account [default <number|email|none>] [priority <number...|none>]");
 		return;
 	}
-	const selectorArg = rest.trim();
-
-	if (verb === "priority") {
-		if (!selectorArg) {
-			const ranked = authStorage.getAccountPriorityCredentialIds(providerId);
-			if (ranked.length === 0) {
-				await output(
-					`No account priority order set for ${providerName}. Set one with \`/account priority <number> <number> …\`.`,
-				);
-				return;
-			}
-			const lines = [`Account priority for ${providerName} (first entry is the default):`];
-			for (const [index, credentialId] of ranked.entries()) {
-				const account = accounts.find(candidate => candidate.credentialId === credentialId);
-				lines.push(`${index + 1}. ${account?.label ?? `OAuth credential #${credentialId}`}`);
-			}
-			lines.push("", "Replace it with `/account priority <number> <number> …`, clear it with `none`.");
-			await output(lines.join("\n"));
-			return;
-		}
-		if (selectorArg.toLowerCase() === "none") {
-			clearDefaultAccount(context);
-			await output(`Cleared the account priority order and default account for ${providerName}.`);
-			return;
-		}
-		const tokens = selectorArg.split(/\s+/).filter(token => token.length > 0);
-		const ordered: SessionPinAccount[] = [];
-		for (const token of tokens) {
-			const account = await resolveOneAccount(accounts, token, providerName, output);
-			if (!account) return;
-			if (ordered.some(existing => existing.credentialId === account.credentialId)) {
-				await output(`${account.label} is listed twice — each account may appear only once.`);
-				return;
-			}
-			ordered.push(account);
-		}
-		applyAccountPriority(
-			context,
-			ordered.map(account => resolveAccountSelector(context, account.credentialId)),
-		);
-		const lines = [`Account priority for ${providerName}:`];
-		for (const [index, account] of ordered.entries()) {
-			lines.push(`${index + 1}. ${account.label}${index === 0 ? " (default)" : ""}`);
-		}
-		const unranked = accounts.filter(account => !ordered.some(entry => entry.credentialId === account.credentialId));
-		if (unranked.length > 0) {
-			lines.push("", `Unranked: ${unranked.map(account => account.label).join(", ")}`);
-		}
-		await output(lines.join("\n"));
-		return;
-	}
-
-	if (!verb || !selectorArg) {
-		const defaultCredentialId = authStorage.getDefaultAccountCredentialId(providerId);
-		const ranked = authStorage.getAccountPriorityCredentialIds(providerId);
-		const lines = [`OAuth accounts for ${providerName}:`];
-		for (const account of accounts) {
-			const rank = ranked.indexOf(account.credentialId);
-			lines.push(
-				`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}${
-					account.credentialId === defaultCredentialId ? " (default)" : ""
-				}${rank >= 0 ? ` [priority ${rank + 1}]` : ""}`,
-			);
-		}
+	const defaultCredentialId = authStorage.getDefaultAccountCredentialId(providerId);
+	const ranked = authStorage.getAccountPriorityCredentialIds(providerId);
+	const lines = [`OAuth accounts for ${providerName}:`];
+	for (const account of accounts) {
+		const rank = ranked.indexOf(account.credentialId);
 		lines.push(
-			"",
-			"Set the default with `/account default <number|email|account id>` (`none` clears it).",
-			"Set the fallover order with `/account priority <number> <number> …` (`none` clears it).",
+			`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}${
+				account.credentialId === defaultCredentialId ? " (default)" : ""
+			}${rank >= 0 ? ` [priority ${rank + 1}]` : ""}`,
 		);
-		await output(lines.join("\n"));
-		return;
 	}
-
-	if (selectorArg.toLowerCase() === "none") {
-		const hadPriority = clearDefaultAccount(context);
-		await output(
-			hadPriority
-				? `Cleared the default account and priority order for ${providerName}.`
-				: `Cleared the default account for ${providerName}.`,
-		);
-		return;
-	}
-
-	const account = await resolveOneAccount(accounts, selectorArg, providerName, output);
-	if (!account) return;
-	setDefaultAccount(context, account);
-	const rank = authStorage.getAccountPriorityCredentialIds(providerId).indexOf(account.credentialId);
-	await output(`Default account for ${providerName} is now ${account.label}${rank === 0 ? " (priority 1)" : ""}.`);
+	lines.push("", "Run `/account` in the interactive TUI to change the default or the fallover order.");
+	await output(lines.join("\n"));
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -445,35 +302,23 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "account",
 		description: "Manage the provider's accounts: default, priority order, session changes",
-		acpDescription: "Show or set the default account and priority order for the current provider",
-		acpInputHint: "[default [number|email|none]|priority [number...|none]]",
-		subcommands: [
-			{
-				name: "default",
-				description: "Set the default account for the current provider",
-				usage: "[number|email|none]",
-			},
-			{
-				name: "priority",
-				description: "Set the account fallover order (first entry is the default)",
-				usage: "[number...|none]",
-			},
-		],
-		allowArgs: true,
-		handle: async (command, runtime) => {
-			await handleAccountCommand(command.args, runtime.session, runtime.settings, runtime.output);
+		acpDescription: "List the current provider's accounts with default and priority markers",
+		handle: async (_command, runtime) => {
+			await handleAccountCommand(runtime.session, runtime.output);
 			return commandConsumed();
 		},
+		// Args are accepted only to be refused: without `allowArgs` the registry
+		// treats `/account default x` as unmatched and submits the line to the
+		// model as a prompt. Muscle memory from the removed verbs must not cost
+		// a request.
+		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			const { verb, rest } = parseSubcommand(command.args);
-			if ((verb === "default" || verb === "priority") && rest.trim()) {
-				await handleAccountCommand(command.args, runtime.ctx.session, runtime.ctx.settings, text =>
-					runtime.ctx.showStatus(text),
-				);
-				refreshStatusLine(runtime.ctx);
-			} else {
-				await runtime.ctx.showAccountManager();
+			if (command.args.trim()) {
+				runtime.ctx.showStatus("/account takes no arguments — change the default and priority order in the pane.");
+				runtime.ctx.editor.setText("");
+				return;
 			}
+			await runtime.ctx.showAccountManager();
 			runtime.ctx.editor.setText("");
 		},
 	},

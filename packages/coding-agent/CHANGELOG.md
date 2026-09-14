@@ -4,13 +4,13 @@
 
 ### Added
 
-- Added an interactive `/account` manager: per-provider account rows with live quota, active/default/priority markers, Enter to pin a default, `Shift+↑/↓` (or `[`/`]`) to reorder the fallover priority, and a session log of every account change with its reason — including advisor provider-sessions. Non-interactive `/account default …` and the new `/account priority …` cover print/RPC modes.
+- Added an interactive `/account` manager: per-provider account rows with live quota, active/default/priority markers, Enter to pin a default, `Shift+↑/↓` (or `[`/`]`) to reorder the fallover priority, and a session log of every account change with its reason — including advisor provider-sessions. In print/RPC modes `/account` lists the accounts with the same markers.
 - Added an optional status-line account chip: set `statusLine.segmentOptions.model.showAccount: true` under `statusLine.preset: custom` to show the OAuth account serving the session — plus one chip per advisor account — flagged with a distinct glyph and warning color when it is not the provider's pinned default.
 - Added `providers.accountPriority`, an ordered per-provider account list (head = pinned default, tail = fallover order) settable from `/account`.
 
 ### Fixed
 
-- Fixed advisor models ignoring the `/account default` pin: plan-gated advisor models (e.g. Codex GPT-5.6 Sol) were routed by quota ranking instead of the configured account.
+- Fixed advisor models ignoring the pinned default account: plan-gated advisor models (e.g. Codex GPT-5.6 Sol) were routed by quota ranking instead of the configured account.
 
 ## [18.1.16-fork.2] - 2026-09-13
 

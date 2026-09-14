@@ -121,6 +121,47 @@ describe("/gateway builtin slash command", () => {
 	});
 });
 
+describe("/account builtin slash command", () => {
+	function createAccountHarness() {
+		const showAccountManager = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const setText = vi.fn();
+		const ctx = {
+			editor: { setText } as unknown as InteractiveModeContext["editor"],
+			showAccountManager,
+			showStatus,
+		} as unknown as InteractiveModeContext;
+		return { runtime: { ctx }, showAccountManager, showStatus, setText };
+	}
+
+	test("opens the account manager pane", async () => {
+		const harness = createAccountHarness();
+
+		expect(await executeBuiltinSlashCommand("/account", harness.runtime)).toBe(true);
+
+		expect(harness.showAccountManager).toHaveBeenCalledTimes(1);
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	// The removed `default`/`priority` verbs must be consumed, not returned as
+	// unmatched: an unmatched slash line is submitted to the model as a prompt,
+	// so muscle memory would silently spend a request.
+	test.each(["/account default me@example.com", "/account priority 2 1", "/account bogus"])(
+		"consumes %j without opening the pane or leaking it as a prompt",
+		async text => {
+			const harness = createAccountHarness();
+
+			expect(await executeBuiltinSlashCommand(text, harness.runtime)).toBe(true);
+
+			expect(harness.showAccountManager).not.toHaveBeenCalled();
+			expect(harness.showStatus).toHaveBeenCalledWith(
+				"/account takes no arguments — change the default and priority order in the pane.",
+			);
+			expect(harness.setText).toHaveBeenCalledWith("");
+		},
+	);
+});
+
 describe("SelectorController auth-gateway console", () => {
 	let tempDir = "";
 	let previousAgentDir: string | undefined;

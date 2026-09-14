@@ -2973,7 +2973,8 @@ export class AuthStorage {
 	 * the session moved away from.
 	 */
 	#releaseProviderSessionCredentials(provider: string): void {
-		for (const [storageKey, sessionMap] of [...this.#sessionLastCredential.entries()]) {
+		// Deleting the visited key mid-iteration is well-defined for Map, so no snapshot.
+		for (const [storageKey, sessionMap] of this.#sessionLastCredential) {
 			if (storageKey !== provider && !storageKey.startsWith(`${provider}\0`)) continue;
 			for (const [sessionId, entry] of sessionMap) {
 				this.#releasedSessionCredentials.set(`${storageKey}\0${sessionId}`, entry.credentialId);
