@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import {
+	BUILTIN_SLASH_COMMAND_DEFS,
+	executeBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import type { Component, Container, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -143,23 +148,49 @@ describe("/account builtin slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 
-	// The removed `default`/`priority` verbs must be consumed, not returned as
-	// unmatched: an unmatched slash line is submitted to the model as a prompt,
-	// so muscle memory would silently spend a request.
-	test.each(["/account default me@example.com", "/account priority 2 1", "/account bogus"])(
-		"consumes %j without opening the pane or leaking it as a prompt",
-		async text => {
-			const harness = createAccountHarness();
+	// One runtime row: every nonempty arg hits the same rejection branch. What
+	// the removed verbs need beyond that is (a) the line not escaping as a
+	// prompt and (b) their absence from published metadata, both below.
+	test("refuses arguments instead of opening the pane or leaking a prompt", async () => {
+		const harness = createAccountHarness();
 
-			expect(await executeBuiltinSlashCommand(text, harness.runtime)).toBe(true);
+		// `true` means consumed: `false` would send the line to the model.
+		expect(await executeBuiltinSlashCommand("/account default me@example.com", harness.runtime)).toBe(true);
 
-			expect(harness.showAccountManager).not.toHaveBeenCalled();
-			expect(harness.showStatus).toHaveBeenCalledWith(
-				"/account takes no arguments — change the default and priority order in the pane.",
-			);
-			expect(harness.setText).toHaveBeenCalledWith("");
-		},
-	);
+		expect(harness.showAccountManager).not.toHaveBeenCalled();
+		expect(harness.showStatus).toHaveBeenCalledWith(
+			"/account takes no arguments — change the default and priority order in the pane.",
+		);
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	test("publishes no account subcommands to autocomplete or help", () => {
+		const account = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "account");
+
+		expect(account).toBeDefined();
+		expect(account?.subcommands).toBeUndefined();
+		// Args must stay dispatchable so the rejection above runs at all.
+		expect(account?.allowArgs).toBe(true);
+	});
+
+	// The ACP/headless surface has no pane, so it would be the one place a
+	// removed verb could still be honored — it must refuse without even
+	// reaching the provider account lookup.
+	test("refuses arguments on the ACP surface without listing accounts", async () => {
+		const output = vi.fn(async () => {});
+		const listCurrentProviderOAuthAccounts = vi.fn(async () => undefined);
+		const runtime = {
+			session: { listCurrentProviderOAuthAccounts },
+			output,
+		} as unknown as SlashCommandRuntime;
+
+		expect(await executeAcpBuiltinSlashCommand("/account priority 2 1", runtime)).toEqual({ consumed: true });
+
+		expect(listCurrentProviderOAuthAccounts).not.toHaveBeenCalled();
+		expect(output).toHaveBeenCalledWith(
+			"/account takes no arguments — change the default and priority order in the pane.",
+		);
+	});
 });
 
 describe("SelectorController auth-gateway console", () => {

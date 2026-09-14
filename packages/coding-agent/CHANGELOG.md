@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.1.16-fork.3] - 2026-09-15
+
 ### Added
 
-- Added an interactive `/account` manager: per-provider account rows with live quota, active/default/priority markers, Enter to pin a default, `Shift+↑/↓` (or `[`/`]`) to reorder the fallover priority, and a session log of every account change with its reason — including advisor provider-sessions. In print/RPC modes `/account` lists the accounts with the same markers.
+- Added an interactive `/account` manager: per-provider account rows with live quota, active/default/priority markers, Enter to pin a default, `Shift+↑/↓` (or `[`/`]`) to reorder the fallover priority, and a session log of every account change with its reason — including advisor provider-sessions. `/account` no longer takes `default`/`priority` arguments; in print/RPC modes it lists the accounts with the same markers.
 - Added an optional status-line account chip: set `statusLine.segmentOptions.model.showAccount: true` under `statusLine.preset: custom` to show the OAuth account serving the session — plus one chip per advisor account — flagged with a distinct glyph and warning color when it is not the provider's pinned default.
 - Added `providers.accountPriority`, an ordered per-provider account list (head = pinned default, tail = fallover order) settable from `/account`.
 

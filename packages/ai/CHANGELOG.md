@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.16-fork.3] - 2026-09-15
+
 ### Added
 
 - Added `providers.accountPriority`: an ordered per-provider account list whose head is the pinned default and whose tail is the fallover order, honored by both plain and live-usage-ranked selection.

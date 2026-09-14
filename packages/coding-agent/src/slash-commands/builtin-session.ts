@@ -136,12 +136,25 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
+/** Refusal shared by both `/account` surfaces, so the removed verbs are uniformly unavailable. */
+const ACCOUNT_NO_ARGS_MESSAGE = "/account takes no arguments — change the default and priority order in the pane.";
+
 /**
  * `/account` — read-only listing for surfaces with no TUI (ACP, headless).
  * Interactive hosts open the account pane instead, which is the only place
- * accounts are mutated; the markers here mirror it.
+ * accounts are mutated; the markers here mirror it. Arguments are refused
+ * rather than ignored: the removed `default`/`priority` verbs must fail the
+ * same way on every surface.
  */
-async function handleAccountCommand(session: AgentSession, output: SlashCommandRuntime["output"]): Promise<void> {
+async function handleAccountCommand(
+	arg: string,
+	session: AgentSession,
+	output: SlashCommandRuntime["output"],
+): Promise<void> {
+	if (arg.trim()) {
+		await output(ACCOUNT_NO_ARGS_MESSAGE);
+		return;
+	}
 	let accountList: SessionOAuthAccountList | undefined;
 	try {
 		accountList = await session.listCurrentProviderOAuthAccounts();
@@ -303,18 +316,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "account",
 		description: "Manage the provider's accounts: default, priority order, session changes",
 		acpDescription: "List the current provider's accounts with default and priority markers",
-		handle: async (_command, runtime) => {
-			await handleAccountCommand(runtime.session, runtime.output);
+		handle: async (command, runtime) => {
+			await handleAccountCommand(command.args, runtime.session, runtime.output);
 			return commandConsumed();
 		},
-		// Args are accepted only to be refused: without `allowArgs` the registry
-		// treats `/account default x` as unmatched and submits the line to the
-		// model as a prompt. Muscle memory from the removed verbs must not cost
-		// a request.
+		// Args are accepted only to be refused. `allowArgs: false` would make the
+		// registry report `/account default x` as unmatched, and the TUI submits
+		// an unmatched slash line to the model as a prompt — muscle memory from
+		// the removed verbs must not cost a request. The cost of `true` is that
+		// autocomplete still offers generic argument completion after the space;
+		// with `subcommands` gone it never suggests `default`/`priority`.
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			if (command.args.trim()) {
-				runtime.ctx.showStatus("/account takes no arguments — change the default and priority order in the pane.");
+				runtime.ctx.showStatus(ACCOUNT_NO_ARGS_MESSAGE);
 				runtime.ctx.editor.setText("");
 				return;
 			}
