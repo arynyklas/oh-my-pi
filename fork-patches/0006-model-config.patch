@@ -1,0 +1,656 @@
+diff --git a/docs/settings.md b/docs/settings.md
+index d3e24e8..e179e3f 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -494,6 +494,10 @@ | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
+ 
+ When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching roles when the session is not on those roles. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
+ 
++Claude account cooldowns are reconciled against fresh usage during `/usage`, account selection, and model-usage health checks. After a five-minute guard against lagging quota reports, healthy shared five-hour and weekly counters can clear a stale block; model-tier blocks also require that tier's counter to be reported and healthy. Missing, unknown, malformed, or header-only quota evidence does not clear a block. Legacy account-wide blocks require every reported shared and model-tier quota counter to be healthy; display-only Extra Usage spend is excluded. Sessions that already fell over from a configured default remain on their chosen sibling; a new session can use the recovered default.
++
++A session's saved account pin takes precedence over the default even after restart; that alone does not mean the default is out of quota. Use `/session pin <email|account id>` to switch an existing session to the recovered account. A fallback warning requires a recorded block relevant to the requested model, and its retry time includes model-tier blocks.
++
+ ### Tools and approvals
+ 
+ ```yaml
+@@ -714,6 +718,8 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
+ 
+ The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+ 
++`statusLine.segmentOptions.model.showAccount: true` (custom preset only) adds an account chip to the `model` segment: the OAuth account actually serving this session, plus one chip per advisor whose provider session resolved an account. A chip switches to the fallover glyph and warning color when that account is not the provider's pinned default (`providers.accountPriority` head or `providers.defaultAccount`). Chips only appear once a request has resolved a credential, and advisor chips are capped at two with a `+N` counter.
++
+ ### Interaction
+ 
+ | Key                    | Type    | Default         | Values                                                                                                  |
+@@ -770,6 +776,8 @@ | `providers.judgmentProvider`        | enum    | `auto`    | Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging). `auto` uses TypeSafe when `TYPESAFE_API_KEY` or a `/login typesafe` credential exists; failed TypeSafe requests fall back through `tiny`, `smol`, `default`, then the active session model. `llm` skips TypeSafe; a feature-configured local model remains the direct backend when TypeSafe is not selected.                                                                                                                       |
+ | `providers.tinyModel`               | enum    | `online`  | `online` or a local model (`lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`).                                                                                                                                                                                                                                                                                                                                                              |
+ | `providers.tinyModelDevice`         | enum    | `default` | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                         |
+ | `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                          |
++| `providers.defaultAccount`          | record  | `{}`      | Pinned stored account per provider id, e.g. `{"anthropic": "me@example.com"}`. Matched against the account email, account id, project id, enterprise URL, or `#<credential id>`. The pin serves every request — including plan-gated models and advisor traffic — until the account hits a usage limit or cannot serve the model; the session then moves to a sibling and stays there.                                                  |
++| `providers.accountPriority`         | record  | `{}`      | Ordered account preference per provider id, e.g. `{"anthropic": ["me@example.com", "backup@example.com"]}`. The head is the pinned default (so this supersedes `providers.defaultAccount` for that provider) and the rest is the fallover order. Edit it interactively with `/account`; changes apply to the next request, including advisor sessions, without a restart.                                                             |
+ | `providers.tinyModelDtype`          | enum    | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`.                                                                                                                                                                                                                                                                                                                                                                   |
+ | `providers.openaiWebsockets`        | enum    | `auto`    | `auto`, `off`, `on`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+ | `providers.openrouterVariant`       | enum    | `default` | `default`, `nitro`, `floor`, `online`, `exacto`.                                                                                                                                                                                                                                                                                                                                                                                       |
+diff --git a/packages/coding-agent/src/config/custom-models.ts b/packages/coding-agent/src/config/custom-models.ts
+index 4fbdb0a..e34315a 100644
+--- a/packages/coding-agent/src/config/custom-models.ts
++++ b/packages/coding-agent/src/config/custom-models.ts
+@@ -44,8 +44,9 @@ export function mergeAuthHeaderSources(
+ 	sources: readonly ConfigHeaderSource[],
+ 	authHeader: boolean | undefined,
+ 	apiKeyConfig: string | undefined,
++	dropAuthorizationFromFirstSource: boolean,
+ ): ConfigHeaderResolver | undefined {
+-	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig });
++	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig, dropAuthorizationFromFirstSource });
+ }
+ 
+ /**
+@@ -78,6 +79,7 @@ ): CustomModelOverlay | undefined {
+ 	if (!api) return undefined;
+ 	return {
+ 		id: modelDef.id,
++		requestModelId: modelDef.requestModelId,
+ 		provider: providerName,
+ 		api,
+ 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
+@@ -123,6 +125,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
+ 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
+ 	const built = buildModel({
+ 		id: resolvedModel.id,
++		requestModelId: resolvedModel.requestModelId,
+ 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
+ 		api: resolvedModel.api,
+ 		provider: resolvedModel.provider,
+diff --git a/packages/coding-agent/src/config/model-patch.ts b/packages/coding-agent/src/config/model-patch.ts
+index b37bc0c..aeaab62 100644
+--- a/packages/coding-agent/src/config/model-patch.ts
++++ b/packages/coding-agent/src/config/model-patch.ts
+@@ -224,6 +224,7 @@ /**
+  * always means "leave the base value alone".
+  */
+ export interface ModelPatch {
++	requestModelId?: string;
+ 	name?: string;
+ 	reasoning?: boolean;
+ 	thinking?: ThinkingConfig;
+@@ -256,6 +257,7 @@ /**
+ type ModelTransportPolicy = "merge" | "replace";
+ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
+ 	const result = { ...base };
++	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
+ 	if (patch.name !== undefined) result.name = patch.name;
+ 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
+ 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
+diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
+index 4914eaf..d65b82f 100644
+--- a/packages/coding-agent/src/config/model-registry.ts
++++ b/packages/coding-agent/src/config/model-registry.ts
+@@ -256,6 +256,7 @@ export class ModelRegistry {
+ 	#commandConfigsByProvider: Map<string, Set<string>> = new Map();
+ 	#keylessProviders: Set<string> = new Set();
+ 	#discoverableProviders: DiscoveryProviderConfig[] = [];
++	#configuredModelKeys: Set<string> = new Set();
+ 	#customModelOverlays: CustomModelOverlay[] = [];
+ 	#providerOverrides: Map<string, ProviderOverride> = new Map();
+ 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
+@@ -779,6 +780,7 @@ export class ModelRegistry {
+ 		this.#modelsConfigFile.invalidate();
+ 		this.#customProviderApiKeys.clear();
+ 		this.#keylessProviders.clear();
++		this.#configuredModelKeys.clear();
+ 		this.#discoverableProviders = [];
+ 		// Drop config-sourced apiKeys from AuthStorage before reload; entries
+ 		// removed from models.yml must actually disappear from the resolver, not
+@@ -859,6 +861,7 @@ export class ModelRegistry {
+ 			error: configError,
+ 		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
+ 		this.#configError = configError;
++		this.#configuredModelKeys = new Set(customModels.map(model => `${model.provider}/${model.id}`));
+ 		this.#keylessProviders = keylessProviders;
+ 		this.#discoverableProviders = discoverableProviders;
+ 		this.#customModelOverlays = customModels;
+@@ -1288,9 +1291,22 @@ export class ModelRegistry {
+ 		return models;
+ 	}
+ 
++	/**
++	 * Whether a cached row stripped of its headers (#5780) can be routed again.
++	 * An override that supplies auth itself — `apiKey`, an explicit `authHeader`
++	 * decision, or a literal `Authorization` header — has its headers rebuilt
++	 * live in {@link ModelRegistry.#applyProviderTransportOverride}, so those
++	 * rows stay usable; anything else must refetch rather than route without the
++	 * headers the provider requires.
++	 */
+ 	#canRestoreConfiguredDiscoveryHeaders(providerId: string): boolean {
+ 		const override = this.#providerOverrides.get(providerId);
+-		return override?.authHeader === true && override.apiKey !== undefined;
++		if (override === undefined) return false;
++		return (
++			override.apiKey !== undefined ||
++			override.authHeader !== undefined ||
++			Object.keys(override.headers ?? {}).some(key => key.toLowerCase() === "authorization")
++		);
+ 	}
+ 
+ 	#loadCachedDiscoverableModels(): Model<Api>[] {
+@@ -2263,6 +2279,7 @@ export class ModelRegistry {
+ 			headers?: Record<string, string>;
+ 			resolveHeaders?: Model<Api>["resolveHeaders"];
+ 			remoteCompaction?: RemoteCompactionConfig<Api>;
++			transport?: "pi-native";
+ 		},
+ 	>(
+ 		entry: T,
+@@ -2271,15 +2288,28 @@ export class ModelRegistry {
+ 			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+ 		>,
+ 	): T {
+-		const changesHeaders =
+-			override.headers !== undefined || (override.authHeader === true && override.apiKey !== undefined);
++		const explicitAuthorization =
++			override.headers !== undefined &&
++			Object.keys(override.headers).some(key => key.toLowerCase() === "authorization");
++		const effectiveTransport = override.transport ?? entry.transport;
++		// pi-native routes through a gateway that authenticates with the configured
++		// key, so a bare `apiKey` implies a bearer unless the override spells the
++		// Authorization header out itself.
++		const authHeader =
++			override.authHeader ??
++			(effectiveTransport === "pi-native" && override.apiKey !== undefined && !explicitAuthorization);
++		// A cached row's replayed Authorization must lose to config-supplied auth.
++		const dropCachedAuthorization =
++			override.authHeader !== undefined || override.apiKey !== undefined || explicitAuthorization;
++		const changesHeaders = override.headers !== undefined || (authHeader === true && override.apiKey !== undefined);
+ 		const resolveHeaders = changesHeaders
+ 			? mergeAuthHeaderSources(
+ 					override.headers
+ 						? [entry.resolveHeaders ?? entry.headers, override.headers]
+ 						: [entry.resolveHeaders ?? entry.headers],
+-					override.authHeader,
++					authHeader,
+ 					override.apiKey,
++					dropCachedAuthorization,
+ 				)
+ 			: entry.resolveHeaders;
+ 		return {
+@@ -2440,6 +2470,7 @@ export class ModelRegistry {
+ 		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
+ 			const modelDefs = providerConfig.models ?? [];
+ 			if (modelDefs.length === 0) continue; // Override-only, no custom models
++
+ 			if (providerConfig.apiKey) {
+ 				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+ 			}
+@@ -2602,6 +2633,14 @@ export class ModelRegistry {
+ 			.map(provider => provider.provider);
+ 	}
+ 
++	isKeylessProvider(provider: string): boolean {
++		return this.#keylessProviders.has(provider);
++	}
++
++	isConfiguredModel(provider: string, id: string): boolean {
++		return this.#configuredModelKeys.has(`${provider}/${id}`);
++	}
++
+ 	/**
+ 	 * Whether `providerId` is known to the registry: it has at least one live
+ 	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
+diff --git a/packages/coding-agent/src/config/models-config-schema-bundle.ts b/packages/coding-agent/src/config/models-config-schema-bundle.ts
+index 92313cf..d993213 100644
+--- a/packages/coding-agent/src/config/models-config-schema-bundle.ts
++++ b/packages/coding-agent/src/config/models-config-schema-bundle.ts
+@@ -174,6 +174,7 @@ export const getModelsConfigSchemaBundle = once(() => {
+ 
+ 	const ModelDefinitionSchema = type({
+ 		id: "string",
++		"requestModelId?": "string",
+ 		"name?": "string",
+ 		"api?": ApiSchema,
+ 		"baseUrl?": "string",
+@@ -207,6 +208,13 @@ export const getModelsConfigSchemaBundle = once(() => {
+ 		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
+ 			return ctx.mustBe("name a non-empty string");
+ 		}
++		if (
++			value.requestModelId !== undefined &&
++			typeof value.requestModelId === "string" &&
++			value.requestModelId.length === 0
++		) {
++			return ctx.mustBe("requestModelId a non-empty string");
++		}
+ 		if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
+ 			return ctx.mustBe("baseUrl a non-empty string");
+ 		}
+diff --git a/packages/coding-agent/src/config/resolve-config-value.ts b/packages/coding-agent/src/config/resolve-config-value.ts
+index c066153..362abb7 100644
+--- a/packages/coding-agent/src/config/resolve-config-value.ts
++++ b/packages/coding-agent/src/config/resolve-config-value.ts
+@@ -2,7 +2,11 @@ import { executeShell } from "@oh-my-pi/pi-natives";
+ import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+ 
+ const COMMAND_FAILURE_RETRY_MS = 30_000;
+-const commandResultCache = new Map<string, string>();
++// Successful command-backed secrets are cached briefly to avoid re-running the
++// command on every request, but must be reread after an external credential
++// rotation that no explicit invalidation observed.
++const COMMAND_SUCCESS_CACHE_MS = 30_000;
++const commandResultCache = new Map<string, { expiresAt: number; value: string }>();
+ const commandFailureRetryAt = new Map<string, number>();
+ const commandInFlight = new Map<string, Promise<string | undefined>>();
+ const commandGeneration = new Map<string, number>();
+@@ -16,6 +20,13 @@ /** Optional bearer-header derivation applied after explicitly configured header layers. */
+ export interface ConfigHeaderResolutionOptions {
+ 	authHeader?: boolean;
+ 	apiKeyConfig?: string;
++	/**
++	 * Drops an `Authorization` header carried by the FIRST source. Discovery
++	 * caches replay the header the provider was originally reached with; when a
++	 * models.yml override supplies auth itself that stale bearer must not win
++	 * over the freshly resolved one.
++	 */
++	dropAuthorizationFromFirstSource?: boolean;
+ }
+ 
+ /** Identify command-backed values when collecting credentials that must be invalidated together. */
+@@ -55,7 +66,8 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> {
+ 	const command = commandKey(valueConfig);
+ 
+ 	const cached = commandResultCache.get(command);
+-	if (cached !== undefined) return cached;
++	if (cached !== undefined && Date.now() < cached.expiresAt) return cached.value;
++	if (cached !== undefined) commandResultCache.delete(command);
+ 	const retryAt = commandFailureRetryAt.get(command);
+ 	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
+ 
+@@ -74,7 +86,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> {
+ 				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+ 			} else {
+ 				commandFailureRetryAt.delete(command);
+-				commandResultCache.set(command, result);
++				commandResultCache.set(command, { expiresAt: Date.now() + COMMAND_SUCCESS_CACHE_MS, value: result });
+ 			}
+ 			return result;
+ 		})
+@@ -174,11 +186,17 @@ export function createConfigHeaderResolver(
+ ): ConfigHeaderResolver | undefined {
+ 	const active = sources.filter((source): source is Exclude<ConfigHeaderSource, undefined> => source !== undefined);
+ 	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
++	// The flag targets raw source 0 (the discovery-cache replay). Filtering out
++	// an undefined leading layer must not promote a later one into that slot, so
++	// only drop when raw source 0 survived the filter.
++	const dropFromFirstActive = options?.dropAuthorizationFromFirstSource === true && sources[0] !== undefined;
+ 	return async signal => {
+ 		signal?.throwIfAborted();
+ 		const resolved: Record<string, string> = {};
+ 		let hasResolved = false;
+-		for (const source of active) {
++		for (let index = 0; index < active.length; index++) {
++			const source = active[index];
++			const dropAuthorization = dropFromFirstActive && index === 0;
+ 			const next =
+ 				typeof source === "function"
+ 					? await untilAborted(signal, () => source(signal))
+@@ -186,6 +204,7 @@ ): ConfigHeaderResolver | undefined {
+ 			signal?.throwIfAborted();
+ 			if (!next) continue;
+ 			for (const key in next) {
++				if (dropAuthorization && key.toLowerCase() === "authorization") continue;
+ 				resolved[key] = next[key];
+ 				hasResolved = true;
+ 			}
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 7f47b74..819ee71 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -655,6 +655,30 @@ export const SETTINGS_SCHEMA = {
+ 		},
+ 	},
+ 
++	"providers.defaultAccount": {
++		type: "record",
++		default: EMPTY_STRING_RECORD,
++		ui: {
++			tab: "providers",
++			group: "Services",
++			label: "Default Account",
++			description:
++				'Preferred stored account per provider id (for example "anthropic": "me@example.com"). Matched against the account email, account id, project id, enterprise URL, or "#<credential id>". The default serves every request until it hits a usage limit; the session then switches to another account and stays there. Providers omitted here balance across accounts automatically.',
++		},
++	},
++
++	"providers.accountPriority": {
++		type: "record",
++		default: {} as Record<string, string[]>,
++		ui: {
++			tab: "providers",
++			group: "Services",
++			label: "Account Priority",
++			description:
++				'Ordered stored accounts per provider id (for example "anthropic": ["me@example.com", "backup@example.com"]). Entries are matched like Default Account; the first entry is the pinned default and the rest are the fallover order, so requests only move down the list when an account is rate-limited or cannot serve the model. Set it from the `/account` manager. Providers omitted here fall back to Default Account, then to automatic balancing.',
++		},
++	},
++
+ 	"providers.openai-codex.codeMode": {
+ 		type: "enum",
+ 		values: ["off", "on", "auto"] as const,
+diff --git a/packages/coding-agent/test/model-registry-command-values.test.ts b/packages/coding-agent/test/model-registry-command-values.test.ts
+index 944f9ca..fd64d89 100644
+--- a/packages/coding-agent/test/model-registry-command-values.test.ts
++++ b/packages/coding-agent/test/model-registry-command-values.test.ts
+@@ -6,6 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
+ import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+ import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+ import { buildModel } from "@oh-my-pi/pi-catalog/build";
++import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+ import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+@@ -21,6 +22,11 @@ function stdoutCommand(value: string): string {
+ 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write(${JSON.stringify(value)})`)}`;
+ }
+ 
++function fileCommand(filePath: string): string {
++	const script = `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(filePath)}, "utf8"))`;
++	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
++}
++
+ function trackedTokenCommand(tokenFile: string, counterFile: string): string {
+ 	if (process.platform !== "win32") {
+ 		return `IFS= read -r token < ${shellQuote(tokenFile)}; printf 1 >> ${shellQuote(counterFile)}; [ "$token" = FAIL ] && exit 1; printf %s "$token"`;
+@@ -200,6 +206,243 @@ describe("ModelRegistry command-resolved models.yml values", () => {
+ 		expect(await Bun.file(counterFile).text()).toBe("");
+ 	});
+ 
++	test("provider refresh rereads a rotated command-backed API key", async () => {
++		const tokenPath = path.join(tempDir, "gateway.token");
++		fs.writeFileSync(tokenPath, "token-a");
++		fs.writeFileSync(
++			modelsPath,
++			JSON.stringify({
++				providers: {
++					"gateway-proxy": {
++						baseUrl: "https://gateway.example.com",
++						apiKey: `!${fileCommand(tokenPath)}`,
++						transport: "pi-native",
++						discovery: { type: "proxy" },
++					},
++				},
++			}),
++		);
++
++		const authorizations: string[] = [];
++		const fetchMock: FetchImpl = async (input, init) => {
++			const url = String(input);
++			if (url !== "https://gateway.example.com/v1/models") return new Response(null, { status: 404 });
++			authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
++			return Response.json({ data: [{ id: "openai-codex/test-model" }] });
++		};
++		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
++
++		await registry.refresh("online");
++		expect(authorizations.at(-1)).toBe("Bearer token-a");
++
++		fs.writeFileSync(tokenPath, "token-b");
++		await registry.refreshProvider("gateway-proxy", "online", { refreshCommandCredentials: true });
++
++		expect(authorizations.at(-1)).toBe("Bearer token-b");
++		const model = registry.find("gateway-proxy", "openai-codex/test-model");
++		expect(model).toBeDefined();
++		expect(await registry.getApiKey(model!)).toBe("token-b");
++	});
++
++	test("successful command-backed API keys expire in open registries", async () => {
++		let now = 1_000;
++		const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
++		try {
++			const tokenPath = path.join(tempDir, "rotating.token");
++			fs.writeFileSync(tokenPath, "token-a");
++			fs.writeFileSync(
++				modelsPath,
++				JSON.stringify({
++					providers: {
++						"gateway-proxy": {
++							baseUrl: "https://gateway.example.com",
++							apiKey: `!${fileCommand(tokenPath)}`,
++							authHeader: true,
++							transport: "pi-native",
++							models: [{ id: "test-model", api: "openai-completions" }],
++						},
++					},
++				}),
++			);
++
++			const registry = new ModelRegistry(authStorage, modelsPath);
++			const model = registry.find("gateway-proxy", "test-model");
++			expect(model).toBeDefined();
++			expect(await registry.getApiKey(model!)).toBe("token-a");
++			expect((await registry.resolveModelHeaders(model!))?.Authorization).toBe("Bearer token-a");
++
++			fs.writeFileSync(tokenPath, "token-b");
++			expect(await registry.getApiKey(model!)).toBe("token-a");
++
++			now += 30_001;
++			expect(await registry.getApiKey(model!)).toBe("token-b");
++			expect((await registry.resolveModelHeaders(model!))?.Authorization).toBe("Bearer token-b");
++		} finally {
++			nowSpy.mockRestore();
++		}
++	});
++
++	test("successful command-backed provider headers expire in open registries", async () => {
++		let now = 1_000;
++		const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
++		try {
++			const headerPath = path.join(tempDir, "rotating-header.token");
++			fs.writeFileSync(headerPath, "header-a");
++			fs.writeFileSync(
++				modelsPath,
++				JSON.stringify({
++					providers: {
++						"header-proxy": {
++							baseUrl: "https://gateway.example.com",
++							auth: "none",
++							headers: { "X-Gateway-Key": `!${fileCommand(headerPath)}` },
++							models: [{ id: "test-model", api: "openai-completions" }],
++						},
++					},
++				}),
++			);
++
++			const registry = new ModelRegistry(authStorage, modelsPath);
++			const model = registry.find("header-proxy", "test-model");
++			expect((await registry.resolveModelHeaders(model!))?.["X-Gateway-Key"]).toBe("header-a");
++
++			fs.writeFileSync(headerPath, "header-b");
++			expect((await registry.resolveModelHeaders(model!))?.["X-Gateway-Key"]).toBe("header-a");
++
++			now += 30_001;
++			expect((await registry.resolveModelHeaders(model!))?.["X-Gateway-Key"]).toBe("header-b");
++		} finally {
++			nowSpy.mockRestore();
++		}
++	});
++
++	test("pi-native providers replace stale cached Authorization after command-key rotation", async () => {
++		const tokenPath = path.join(tempDir, "cached-gateway.token");
++		fs.writeFileSync(tokenPath, "token-a");
++		fs.writeFileSync(
++			modelsPath,
++			JSON.stringify({
++				providers: {
++					"gateway-proxy": {
++						baseUrl: "https://gateway.example.com",
++						apiKey: `!${fileCommand(tokenPath)}`,
++						discovery: { type: "proxy" },
++					},
++				},
++			}),
++		);
++		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
++		writeModelCache(
++			"gateway-proxy",
++			cacheUpdatedAt,
++			[
++				buildModel({
++					id: "test-model",
++					name: "Test Model",
++					api: "openai-completions",
++					provider: "gateway-proxy",
++					baseUrl: "https://gateway.example.com",
++					transport: "pi-native",
++					headers: { Authorization: "Bearer token-a" },
++					reasoning: false,
++					input: ["text"],
++					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++					contextWindow: 128_000,
++					maxTokens: 4_096,
++				}),
++			],
++			true,
++			"",
++			path.join(tempDir, "models.db"),
++		);
++
++		let now = cacheUpdatedAt + 1_000;
++		const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
++		try {
++			const registry = new ModelRegistry(authStorage, modelsPath);
++			const model = registry.find("gateway-proxy", "test-model");
++			expect(model).toBeDefined();
++			expect((await registry.resolveModelHeaders(model!))?.Authorization).toBe("Bearer token-a");
++
++			fs.writeFileSync(tokenPath, "token-b");
++			now += 30_001;
++
++			expect(await registry.getApiKey(model!)).toBe("token-b");
++			expect((await registry.resolveModelHeaders(model!))?.Authorization).toBe("Bearer token-b");
++		} finally {
++			nowSpy.mockRestore();
++		}
++	});
++
++	test("authHeader false removes stale cached Authorization", async () => {
++		fs.writeFileSync(
++			modelsPath,
++			JSON.stringify({
++				providers: {
++					"gateway-proxy": {
++						baseUrl: "https://gateway.example.com",
++						apiKey: `!${stdoutCommand("token-b")}`,
++						authHeader: false,
++						transport: "pi-native",
++						discovery: { type: "proxy" },
++					},
++				},
++			}),
++		);
++		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
++		writeModelCache(
++			"gateway-proxy",
++			cacheUpdatedAt,
++			[
++				buildModel({
++					id: "test-model",
++					name: "Test Model",
++					api: "openai-completions",
++					provider: "gateway-proxy",
++					baseUrl: "https://gateway.example.com",
++					transport: "pi-native",
++					headers: { Authorization: "Bearer token-a" },
++					reasoning: false,
++					input: ["text"],
++					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++					contextWindow: 128_000,
++					maxTokens: 4_096,
++				}),
++			],
++			true,
++			"",
++			path.join(tempDir, "models.db"),
++		);
++
++		const registry = new ModelRegistry(authStorage, modelsPath);
++		const model = registry.find("gateway-proxy", "test-model");
++		expect(model).toBeDefined();
++		expect(await registry.getApiKey(model!)).toBe("token-b");
++		expect((await registry.resolveModelHeaders(model!))?.Authorization).toBeUndefined();
++	});
++
++	test("explicit provider Authorization wins over implicit pi-native API key auth", async () => {
++		fs.writeFileSync(
++			modelsPath,
++			JSON.stringify({
++				providers: {
++					"gateway-proxy": {
++						baseUrl: "https://gateway.example.com",
++						apiKey: `!${stdoutCommand("token-a")}`,
++						headers: { Authorization: "Bearer explicit" },
++						transport: "pi-native",
++						models: [{ id: "test-model", api: "openai-completions" }],
++					},
++				},
++			}),
++		);
++
++		const registry = new ModelRegistry(authStorage, modelsPath);
++		const model = registry.find("gateway-proxy", "test-model");
++		expect(model).toBeDefined();
++		expect((await registry.resolveModelHeaders(model!))?.Authorization).toBe("Bearer explicit");
++	});
++
+ 	test("401 reruns a command-backed API key and updates live auth headers", async () => {
+ 		const tokenFile = path.join(tempDir, "token.txt");
+ 		const counterFile = path.join(tempDir, "counter.txt");
+diff --git a/packages/coding-agent/test/model-registry.test.ts b/packages/coding-agent/test/model-registry.test.ts
+index 9d35c94..1be4d02 100644
+--- a/packages/coding-agent/test/model-registry.test.ts
++++ b/packages/coding-agent/test/model-registry.test.ts
+@@ -558,6 +558,46 @@ describe("ModelRegistry", () => {
+ 				expect(model.baseUrl).toBe("http://localhost:4000");
+ 			}
+ 		});
++
++		test("startup cache keeps transport override on discoverable proxy providers", () => {
++			writeRawModelsJson({
++				"xllm-gateway": {
++					baseUrl: "http://localhost:4000",
++					apiKey: "gateway-token",
++					transport: "pi-native",
++					discovery: { type: "proxy" },
++				},
++			});
++			writeModelCache(
++				"xllm-gateway",
++				Date.now(),
++				[
++					buildModel({
++						id: "gpt-5.6-sol",
++						name: "GPT-5.6 Sol",
++						provider: "xllm-gateway",
++						api: "openai-completions",
++						baseUrl: "http://localhost:4000/v1",
++						reasoning: true,
++						input: ["text"],
++						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++						contextWindow: 100000,
++						maxTokens: 8000,
++					}),
++				],
++				true,
++				"",
++				path.join(tempDir, "models.db"),
++			);
++
++			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
++				fetch: async input => {
++					throw new Error(`Offline startup should not fetch ${String(input)}`);
++				},
++			});
++
++			expect(registry.find("xllm-gateway", "gpt-5.6-sol")?.transport).toBe("pi-native");
++		});
+ 	});
+ 
+ 	describe("provider compat overrides", () => {

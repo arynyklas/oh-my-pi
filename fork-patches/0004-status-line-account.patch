@@ -1,0 +1,472 @@
+diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+index 788aea1..89a3c26 100644
+--- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
++++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
+@@ -104,6 +104,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+ 				{ label: "advisor error", session: { advisorStatus: "error" } },
+ 				{ label: "advisor paused", session: { advisorStatus: "paused" } },
+ 				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },
++				{
++					label: "account chip",
++					context: {
++						options: { model: { showThinkingLevel: true, showAccount: true } },
++						account: { label: "dev@example.com", fellBack: false },
++					},
++				},
++				{
++					label: "account fell over off the default",
++					context: {
++						options: { model: { showThinkingLevel: true, showAccount: true } },
++						account: { label: "backup@example.com (Acme)", fellBack: true },
++					},
++				},
++				{
++					label: "advisor account off the default",
++					session: { advisorStatus: "running" },
++					context: {
++						options: { model: { showThinkingLevel: true, showAccount: true } },
++						account: {
++							label: "dev@example.com",
++							fellBack: false,
++							advisors: [{ slug: "default", label: "backup@example.com (Acme)", fellBack: true }],
++						},
++					},
++				},
+ 			];
+ 		case "mode":
+ 			return [
+diff --git a/packages/coding-agent/src/modes/components/status-line/component.ts b/packages/coding-agent/src/modes/components/status-line/component.ts
+index cf63823..470bb7e 100644
+--- a/packages/coding-agent/src/modes/components/status-line/component.ts
++++ b/packages/coding-agent/src/modes/components/status-line/component.ts
+@@ -22,7 +22,10 @@ import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+ import { settings } from "../../../config/settings";
+ import type { AgentSession } from "../../../session/agent-session";
+ import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+-import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
++import {
++	formatAccountLabelAmong,
++	limitMatchesActiveAccount,
++} from "../../../slash-commands/helpers/active-oauth-account";
+ import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
+ import { withTimeoutSignal } from "../../../utils/fetch-timeout";
+ import { GH_COMMAND_TIMEOUT_MS, github } from "../../../utils/github";
+@@ -45,6 +48,7 @@ import { getPreset } from "./presets";
+ import { renderSegment, type SegmentContext } from "./segments";
+ import { getSeparator } from "./separators";
+ import type {
++	ActiveAccountStatus,
+ 	CollabStatus,
+ 	EffectiveStatusLineSettings,
+ 	StatusLineSegmentId,
+@@ -2128,6 +2132,7 @@ export class StatusLineComponent implements Component {
+ 			sessionAccent: sessionAccentEnabled,
+ 			previewTitle,
+ 			activeRepo: activeRepoCache.activeRepo,
++			account: segmentOptions?.model?.showAccount ? this.#resolveAccountStatus() : null,
+ 			width,
+ 			options: segmentOptions ?? {},
+ 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
+@@ -2164,6 +2169,57 @@ export class StatusLineComponent implements Component {
+ 		};
+ 	}
+ 
++	/**
++	 * Credential actually serving this session on the active model's provider,
++	 * plus whether it is not the configured `providers.defaultAccount`.
++	 *
++	 * `listOAuthAccounts` marks only the session-sticky row `active`, so the
++	 * chip stays hidden until the session has really resolved a credential —
++	 * unlike `getOAuthAccountIdentity`, which falls back to the first stored
++	 * row and would name an account no request has used yet. Fallover is
++	 * decided on durable credential ids, not labels: two subscriptions can
++	 * share one email, and the one-shot
++	 * {@link AuthStorage.consumeDefaultAccountFallover} notice belongs to the
++	 * session's warning, not to a chip that must keep flagging it all session.
++	 */
++	#resolveAccountStatus(): ActiveAccountStatus | null {
++		const session = this.session;
++		const provider = session.state.model?.provider ?? session.model?.provider;
++		const authStorage = session.modelRegistry?.authStorage;
++		if (!provider || !authStorage) return null;
++		const stored = authStorage.listOAuthAccounts(provider, session.sessionId);
++		const active = stored.find(account => account.active);
++		if (!active) return null;
++		const label = formatAccountLabelAmong(active, stored);
++		if (!label) return null;
++		const defaultCredentialId = authStorage.getDefaultAccountCredentialId(provider);
++		const fellBack = defaultCredentialId !== undefined && defaultCredentialId !== active.credentialId;
++		// Advisors run as their own provider sessions, so each can be stuck to a
++		// different credential than the primary (usage fallover hits them
++		// independently, and an advisor can be configured on another provider
++		// entirely). Every live advisor binding is reported — a match with the
++		// primary is the confirmation the chip exists for — but advisors sharing
++		// one account collapse into a single chip so a wide roster costs one
++		// cell, not one per advisor.
++		// Optional invocation: lightweight session doubles in tests need not
++		// implement the accessor.
++		const advisors: { slug: string; label: string; fellBack: boolean }[] = [];
++		for (const binding of session.getAdvisorAccountBindings?.() ?? []) {
++			const advisorStored = authStorage.listOAuthAccounts(binding.provider, binding.providerSessionId);
++			const advisorAccount = advisorStored.find(account => account.active);
++			if (!advisorAccount) continue;
++			const advisorLabel = formatAccountLabelAmong(advisorAccount, advisorStored);
++			if (!advisorLabel || advisors.some(entry => entry.label === advisorLabel)) continue;
++			const advisorDefaultId = authStorage.getDefaultAccountCredentialId(binding.provider);
++			advisors.push({
++				slug: binding.slug,
++				label: advisorLabel,
++				fellBack: advisorDefaultId !== undefined && advisorDefaultId !== advisorAccount.credentialId,
++			});
++		}
++		return advisors.length > 0 ? { label, fellBack, advisors } : { label, fellBack };
++	}
++
+ 	#resolveSettings(): EffectiveStatusLineSettings {
+ 		if (this.#effectiveSettings === undefined) {
+ 			this.#effectiveSettings = this.#computeEffectiveSettings();
+@@ -2189,6 +2245,13 @@ export class StatusLineComponent implements Component {
+ 			};
+ 		}
+ 
++		// The account chip is a custom-preset knob, like `leftSegments` /
++		// `rightSegments` above: built-in presets keep their fixed model segment
++		// even when the option is present in user settings.
++		if (!useCustomSegments && mergedSegmentOptions.model?.showAccount) {
++			mergedSegmentOptions.model.showAccount = false;
++		}
++
+ 		const leftSegments = useCustomSegments
+ 			? (this.#settings.leftSegments ?? presetDef.leftSegments)
+ 			: presetDef.leftSegments;
+diff --git a/packages/coding-agent/src/modes/components/status-line/segments.ts b/packages/coding-agent/src/modes/components/status-line/segments.ts
+index 3d1b7ec..9fab6fa 100644
+--- a/packages/coding-agent/src/modes/components/status-line/segments.ts
++++ b/packages/coding-agent/src/modes/components/status-line/segments.ts
+@@ -28,6 +28,13 @@ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ const STARTUP_PLACEHOLDER = "…";
+ 
++/**
++ * Max advisor account chips rendered in the model cell before the remainder
++ * collapses into a `+N` counter. Each chip costs two icons plus a truncated
++ * label, so an unbounded roster would eat the whole bar.
++ */
++const ADVISOR_ACCOUNT_CHIP_CAP = 2;
++
+ function withIcon(icon: string, text: string): string {
+ 	return icon ? `${icon} ${text}` : text;
+ }
+@@ -277,6 +284,39 @@ const modelSegment: StatusLineSegment = {
+ 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
+ 		// uses status colors to stay visibly distinct from the model name color.
+ 		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
++		// Account chip (`segmentOptions.model.showAccount`, custom preset only):
++		// which credential is serving this session, and — via a distinct glyph
++		// plus warning color — whether it is NOT the configured
++		// `providers.defaultAccount` (usage-limit fallover, changed default).
++		// Sits between the model name and the advisor badge so the model cell
++		// reads model → account → advisor.
++		const account = opts.showAccount ? ctx.account : null;
++		if (account) {
++			const icon = account.fellBack ? theme.icon.accountFallover : theme.icon.account;
++			const label = statusValue(ctx, truncateToWidth(sanitizeStatusText(account.label), TRUNCATE_LENGTHS.SHORT));
++			content += theme.fg(account.fellBack ? "warning" : "muted", ` ${withIcon(icon, label)}`);
++			// One advisor-marked chip per distinct advisor account (the resolver
++			// collapses advisors that share one account, and keeps chips even when
++			// they match the primary — that match is the confirmation the chip
++			// exists for). Two is the cap: a wide advisor roster would otherwise
++			// push every right-hand segment off the bar, so the rest collapse into
++			// a `+N` counter.
++			const advisors = account.advisors ?? [];
++			for (const advisor of advisors.slice(0, ADVISOR_ACCOUNT_CHIP_CAP)) {
++				const advisorIcon = advisor.fellBack ? theme.icon.accountFallover : theme.icon.account;
++				const advisorLabel = statusValue(
++					ctx,
++					truncateToWidth(sanitizeStatusText(advisor.label), TRUNCATE_LENGTHS.SHORT),
++				);
++				content += theme.fg(
++					advisor.fellBack ? "warning" : "muted",
++					` ${theme.icon.advisor}${withIcon(advisorIcon, advisorLabel)}`,
++				);
++			}
++			if (advisors.length > ADVISOR_ACCOUNT_CHIP_CAP) {
++				content += theme.fg("muted", ` +${advisors.length - ADVISOR_ACCOUNT_CHIP_CAP}`);
++			}
++		}
+ 		// Advisor symbol, colored by the worst status in the roster:
+ 		// success = all running, warning = quota-exhausted, error = failed,
+ 		// dim = everything paused/no-model. Per-advisor detail lives in
+diff --git a/packages/coding-agent/src/modes/components/status-line/types.ts b/packages/coding-agent/src/modes/components/status-line/types.ts
+index 1f5f623..8edbb85 100644
+--- a/packages/coding-agent/src/modes/components/status-line/types.ts
++++ b/packages/coding-agent/src/modes/components/status-line/types.ts
+@@ -21,7 +21,7 @@ export interface CollabStatus {
+ }
+ 
+ export interface StatusLineSegmentOptions {
+-	model?: { showThinkingLevel?: boolean };
++	model?: { showThinkingLevel?: boolean; showAccount?: boolean };
+ 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
+ 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+ 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
+@@ -56,6 +56,24 @@ // ═══════════════════════════════════════════════════════════════════════════
+ // Segment Rendering
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
++/** Account chip payload for the model segment (`segmentOptions.model.showAccount`). */
++export interface ActiveAccountStatus {
++	/** Display label of the serving credential: email, else account/project id, org-suffixed when distinct. */
++	label: string;
++	/**
++	 * True when `providers.defaultAccount` pins a different credential than the
++	 * one serving this session — a usage-limit fallover off the default, or a
++	 * default changed after the session pinned its sibling.
++	 */
++	fellBack: boolean;
++	/**
++	 * Advisor bindings whose serving account differs from the primary's;
++	 * empty/absent when every advisor is served by the same credential as the
++	 * primary model (the common case, which must not add chip noise).
++	 */
++	advisors?: readonly { slug: string; label: string; fellBack: boolean }[];
++}
++
+ export type RGB = readonly [number, number, number];
+ 
+ export interface SegmentContext {
+@@ -173,6 +191,13 @@ export interface SegmentContext {
+ 		sevenDay?: { percent: number; resetHours?: number };
+ 		monthly?: { percent: number; resetHours?: number };
+ 	} | null;
++	/**
++	 * Credential actually serving this session for the active model's provider,
++	 * resolved only when the model segment's `showAccount` option is on.
++	 * Absent/null when the provider authenticates with an API key (no OAuth
++	 * identity to attribute) or the option is off.
++	 */
++	account?: ActiveAccountStatus | null;
+ }
+ 
+ export interface RenderedSegment {
+diff --git a/packages/coding-agent/src/modes/theme/symbols.ts b/packages/coding-agent/src/modes/theme/symbols.ts
+index 5fa9b4d..6e77623 100644
+--- a/packages/coding-agent/src/modes/theme/symbols.ts
++++ b/packages/coding-agent/src/modes/theme/symbols.ts
+@@ -97,6 +97,8 @@ export type SymbolKey =
+ 	| "icon.subscription"
+ 	| "icon.advisor"
+ 	| "icon.advisorClosed"
++	| "icon.account"
++	| "icon.accountFallover"
+ 	| "icon.time"
+ 	| "icon.omp"
+ 	| "icon.esc"
+@@ -457,6 +459,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
+ 	"icon.subscription": "(sub)",
+ 	"icon.advisor": "👁",
+ 	"icon.advisorClosed": "🙈",
++	"icon.account": "📧",
++	"icon.accountFallover": "🔀",
+ 	"icon.time": "⏱",
+ 	"icon.omp": "π",
+ 	"icon.esc": "⎋",
+@@ -815,6 +819,10 @@ const NERD_SYMBOLS: SymbolMap = {
+ 	"icon.advisor": "\uea70",
+ 	// pick:  (nf-oct-eye_closed)
+ 	"icon.advisorClosed": "\ueae7",
++	// pick: U+F0E0 (nf-fa-envelope) | alt: U+F007 (nf-fa-user)
++	"icon.account": "\uf0e0",
++	// pick: U+F0EC (nf-fa-exchange) | alt: U+F074 (nf-fa-random)
++	"icon.accountFallover": "\uf0ec",
+ 	// pick:  | alt: ◷ ◴
+ 	"icon.time": "\uf017",
+ 	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
+@@ -1190,6 +1198,8 @@ const ASCII_SYMBOLS: SymbolMap = {
+ 	"icon.subscription": "(sub)",
+ 	"icon.advisor": "(adv)",
+ 	"icon.advisorClosed": "(adv)",
++	"icon.account": "(acct)",
++	"icon.accountFallover": "(alt)",
+ 	"icon.time": "t:",
+ 	"icon.omp": "pi",
+ 	"icon.esc": "esc",
+diff --git a/packages/coding-agent/src/modes/theme/theme-class.ts b/packages/coding-agent/src/modes/theme/theme-class.ts
+index 7b69608..9fba3e0 100644
+--- a/packages/coding-agent/src/modes/theme/theme-class.ts
++++ b/packages/coding-agent/src/modes/theme/theme-class.ts
+@@ -592,6 +592,8 @@ export class Theme {
+ 			subscription: this.#symbols["icon.subscription"],
+ 			advisor: this.#symbols["icon.advisor"],
+ 			advisorClosed: this.#symbols["icon.advisorClosed"],
++			account: this.#symbols["icon.account"],
++			accountFallover: this.#symbols["icon.accountFallover"],
+ 			time: this.#symbols["icon.time"],
+ 			omp: this.#symbols["icon.omp"],
+ 			esc: this.#symbols["icon.esc"],
+diff --git a/packages/coding-agent/test/modes/components/status-line/component.test.ts b/packages/coding-agent/test/modes/components/status-line/component.test.ts
+index 598a056..dfffe56 100644
+--- a/packages/coding-agent/test/modes/components/status-line/component.test.ts
++++ b/packages/coding-agent/test/modes/components/status-line/component.test.ts
+@@ -1,6 +1,6 @@
+ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+ import { createGallerySegmentContext } from "../../../../src/cli/gallery-fixtures/segments";
+-import { Settings } from "../../../../src/config/settings";
++import { Settings, settings } from "../../../../src/config/settings";
+ import { StatusLineComponent } from "../../../../src/modes/components/status-line/component";
+ import { renderSegment } from "../../../../src/modes/components/status-line/segments";
+ import { loadTheme } from "../../../../src/modes/theme/loader";
+@@ -268,4 +268,62 @@ describe("StatusLineComponent", () => {
+ 			setThemeInstance(baseTheme);
+ 		}
+ 	});
++
++	// The chip is the only place the user can see WHICH account serves the
++	// primary model and each advisor, so the component's resolution (session
++	// sticky per provider-session, default comparison, custom-preset gate) is
++	// the contract under test here — the segment renderer is covered separately.
++	it("attributes the serving account for the primary model and every advisor", () => {
++		const accounts = [
++			{ position: 0, credentialId: 11, email: "primary@example.com", active: true },
++			{ position: 1, credentialId: 12, email: "sibling@example.com", active: false },
++		];
++		const advisorAccounts = [
++			{ position: 0, credentialId: 21, email: "codex-default@example.com", active: false },
++			{ position: 1, credentialId: 22, email: "codex-sibling@example.com", active: true },
++		];
++		const session = {
++			...makeSessionWithLastMessage(null),
++			sessionId: "primary-session",
++			modelRegistry: {
++				isUsingOAuth: () => true,
++				authStorage: {
++					listOAuthAccounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),
++					// anthropic serves its pinned default; openai-codex fell over to a sibling.
++					getDefaultAccountCredentialId: (provider: string) => (provider === "anthropic" ? 11 : 21),
++					// Read by the usage-refresh cache key, unrelated to the chip.
++					getOAuthAccountIdentity: () => undefined,
++				},
++			},
++			getAdvisorAccountBindings: () => [
++				{ slug: "architect", provider: "openai-codex", providerSessionId: "primary-session-advisor-architect" },
++			],
++		};
++		session.state.model = { name: "Opus", contextWindow: 128000, provider: "anthropic" } as never;
++
++		settings.set("statusLine.preset", "custom");
++		settings.set("statusLine.leftSegments", ["model"]);
++		settings.set("statusLine.segmentOptions", { model: { showAccount: true } });
++		try {
++			const custom = statusLines.track(new StatusLineComponent(session as unknown as AgentSession));
++			const stripped = Bun.stripANSI(custom.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
++			expect(stripped).toContain(`${theme.icon.account} primary@example.com`);
++			// Advisor chip carries the advisor icon and the fallover glyph, since
++			// the advisor is not on its provider's default account.
++			expect(stripped).toContain(`${theme.icon.advisor}${theme.icon.accountFallover} codex-sibling@example.com`);
++			expect(stripped).not.toContain("sibling@example.com codex-default");
++
++			// The chip is a custom-preset knob: the same option under a built-in
++			// preset renders nothing.
++			settings.set("statusLine.preset", "default");
++			const builtin = statusLines.track(new StatusLineComponent(session as unknown as AgentSession));
++			const builtinStripped = Bun.stripANSI(builtin.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
++			expect(builtinStripped).not.toContain("primary@example.com");
++			expect(builtinStripped).not.toContain("codex-sibling@example.com");
++		} finally {
++			settings.set("statusLine.preset", "default");
++			settings.set("statusLine.leftSegments", []);
++			settings.set("statusLine.segmentOptions", {});
++		}
++	});
+ });
+diff --git a/packages/coding-agent/test/status-line-model.test.ts b/packages/coding-agent/test/status-line-model.test.ts
+index 71a9ffe..aab4c16 100644
+--- a/packages/coding-agent/test/status-line-model.test.ts
++++ b/packages/coding-agent/test/status-line-model.test.ts
+@@ -158,3 +158,86 @@ describe("status line model segment compact thinking level", () => {
+ 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
+ 	});
+ });
++
++describe("status line model segment account chip", () => {
++	function createAccountContext(
++		account: NonNullable<SegmentContext["account"]>,
++		showAccount: boolean,
++	): SegmentContext {
++		const ctx = createModelContext(false);
++		ctx.options = { model: { showAccount } };
++		ctx.account = account;
++		return ctx;
++	}
++
++	it("renders no account text when showAccount is absent", () => {
++		const ctx = createModelContext(false);
++		ctx.account = { label: "dev@example.com", fellBack: false };
++		const rendered = renderSegment("model", ctx).content;
++		expect(rendered).toContain("Test Model");
++		expect(rendered).not.toContain("dev@example.com");
++	});
++
++	it("renders the serving account muted, and warning-colored when off the default", () => {
++		const matching = renderSegment(
++			"model",
++			createAccountContext({ label: "dev@example.com", fellBack: false }, true),
++		).content;
++		expect(matching).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
++
++		const fellBack = renderSegment(
++			"model",
++			createAccountContext({ label: "backup@example.com (Acme)", fellBack: true }, true),
++		).content;
++		expect(fellBack).toContain(theme.fg("warning", ` ${theme.icon.accountFallover} backup@example.com (Acme)`));
++	});
++
++	it("adds an advisor-marked chip for an advisor served by another account", () => {
++		const rendered = renderSegment(
++			"model",
++			createAccountContext(
++				{
++					label: "dev@example.com",
++					fellBack: false,
++					advisors: [{ slug: "default", label: "advisor@example.com", fellBack: true }],
++				},
++				true,
++			),
++		).content;
++		expect(rendered).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
++		expect(rendered).toContain(
++			theme.fg("warning", ` ${theme.icon.advisor}${theme.icon.accountFallover} advisor@example.com`),
++		);
++	});
++
++	it("renders only the primary chip when no advisor account differs", () => {
++		const rendered = renderSegment(
++			"model",
++			createAccountContext({ label: "dev@example.com", fellBack: false, advisors: [] }, true),
++		).content;
++		expect(rendered).toContain(theme.fg("muted", ` ${theme.icon.account} dev@example.com`));
++		expect(rendered).not.toContain(theme.icon.advisor);
++	});
++
++	it("caps advisor chips at two and counts the remainder", () => {
++		const rendered = renderSegment(
++			"model",
++			createAccountContext(
++				{
++					label: "dev@example.com",
++					fellBack: false,
++					advisors: [
++						{ slug: "a", label: "one@example.com", fellBack: false },
++						{ slug: "b", label: "two@example.com", fellBack: false },
++						{ slug: "c", label: "three@example.com", fellBack: false },
++					],
++				},
++				true,
++			),
++		).content;
++		expect(rendered).toContain("one@example.com");
++		expect(rendered).toContain("two@example.com");
++		expect(rendered).not.toContain("three@example.com");
++		expect(rendered).toContain(theme.fg("muted", " +1"));
++	});
++});

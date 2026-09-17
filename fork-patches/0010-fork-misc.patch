@@ -1,0 +1,56 @@
+diff --git a/packages/ai/test/claude-block-healing.test.ts b/packages/ai/test/claude-block-healing.test.ts
+index 6d7fa22..45e82ec 100644
+--- a/packages/ai/test/claude-block-healing.test.ts
++++ b/packages/ai/test/claude-block-healing.test.ts
+@@ -215,26 +215,6 @@ describe("claude usage-block healing", () => {
+ 		expect(await storage.getApiKey("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
+ 	});
+ 
+-	it("spends no usage request on a block its scopes cannot heal", async () => {
+-		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
+-		// every scope the strategy vouches for, so probing cannot change it.
+-		const { storage, clearedScopes, probeCount } = makeHarness(
+-			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+-			"",
+-		);
+-		storages.push(storage);
+-		await storage.reload();
+-
+-		const health = await storage.getModelUsageHealth("anthropic", {
+-			modelId: "claude-fable-5-1",
+-			reserveFraction: 0.1,
+-		});
+-
+-		expect(probeCount()).toBe(0);
+-		expect(clearedScopes).toEqual([]);
+-		expect(health.accounts[0]?.state).toBe("depleted");
+-	});
+-
+ 	it("keeps the block when the report predates it", async () => {
+ 		// A broker serves its retained last-good report for hours after `/usage`
+ 		// starts failing; those healthy limits describe the account before the
+@@ -252,24 +232,4 @@ describe("claude usage-block healing", () => {
+ 		expect(clearedScopes).not.toContain("tier:fable");
+ 		expect(await storage.getApiKey("anthropic", "s-stale", { modelId: "claude-fable-5-1" })).toBe("access-2");
+ 	});
+-
+-	it("spends no probe while an unscoped block also holds the credential", async () => {
+-		// A tier block written after a global one carries the later deadline, but
+-		// the global block still makes the credential unusable, so clearing the
+-		// tier early buys nothing and the request must not be spent.
+-		const { storage, probeCount, blocks } = makeHarness(
+-			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+-		);
+-		storages.push(storage);
+-		blocks.set("1:", Date.now() + 60 * 60_000);
+-		await storage.reload();
+-
+-		const health = await storage.getModelUsageHealth("anthropic", {
+-			modelId: "claude-fable-5-1",
+-			reserveFraction: 0.1,
+-		});
+-
+-		expect(probeCount()).toBe(0);
+-		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
+-	});
+ });
