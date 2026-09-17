@@ -1,0 +1,1462 @@
+diff --git a/docs/fork-install.md b/docs/fork-install.md
+new file mode 100644
+index 0000000..9bf777b
+--- /dev/null
++++ b/docs/fork-install.md
+@@ -0,0 +1,249 @@
++# Installing the fork
++
++This is [`arynyklas/oh-my-pi`](https://github.com/arynyklas/oh-my-pi), a fork of
++[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi). It tracks upstream releases and adds work
++that is not in upstream — most of it around the auth broker and the multi-account
++[auth gateway](auth-broker-gateway.md).
++
++The important consequence for installing: **the fork ships binaries only.** Nothing is published to
++npm. Every upstream install path that goes through a package manager — `bun install -g
++@oh-my-pi/pi-coding-agent`, `npm i -g`, Homebrew, `curl https://omp.sh/install | sh` — gives you
++**upstream's** build, not this one. Use the instructions below instead.
++
++| | |
++|---|---|
++| Version scheme | `X.Y.Z-fork.N` (upstream `X.Y.Z` plus a fork counter) |
++| Release tags | `vX.Y.Z-fork.N`, always non-draft and non-prerelease |
++| Published assets | `omp-windows-x64.exe`, `omp-linux-x64`, `SHA256SUMS` |
++| Not published | macOS, ARM, musl, npm packages |
++| Release branch | `release/fork` (also the repo default branch) |
++
++macOS, Linux ARM, and musl are not built. On those, [build from source](#build-from-source).
++
++## Windows
++
++Run in PowerShell:
++
++```powershell
++irm https://raw.githubusercontent.com/arynyklas/oh-my-pi/release/fork/scripts/install-fork.ps1 | iex
++```
++
++That resolves the newest `vX.Y.Z-fork.N` release, downloads `omp-windows-x64.exe`, **verifies its
++SHA-256 against the release `SHA256SUMS`**, installs it as `omp.exe` in `%LOCALAPPDATA%\omp`, adds
++that directory to your user `PATH`, and points omp at Git Bash if it finds one.
++
++> Do not use upstream's `scripts/install.ps1` here. Without `-Binary` it installs from npm, which is
++> upstream's build; with `-Binary` it pulls from the `can1357` repo. Either way you do not get the
++> fork.
++
++### Options
++
++The one-liner takes no arguments, so pass options through a script block:
++
++```powershell
++$s = irm https://raw.githubusercontent.com/arynyklas/oh-my-pi/release/fork/scripts/install-fork.ps1
++
++& ([scriptblock]::Create($s)) -Version v17.2.15-fork.1   # pin an exact release
++& ([scriptblock]::Create($s)) -InstallDir C:\tools\omp   # install somewhere else
++& ([scriptblock]::Create($s)) -NoPath                    # do not touch user PATH
++```
++
++| Flag | Effect |
++|---|---|
++| `-Version <tag>` | Install exactly this tag. `v` prefix optional. Non-`-fork.N` tags are rejected. |
++| `-InstallDir <path>` | Target directory. Defaults to `$env:PI_INSTALL_DIR`, else `%LOCALAPPDATA%\omp`. |
++| `-NoPath` | Skip the user `PATH` update. |
++
++Set `GITHUB_TOKEN` if you hit the unauthenticated GitHub API rate limit (common behind a shared
++egress IP); the script sends it as a bearer token when present.
++
++The installer refuses to finish if the downloaded binary's checksum does not match, or if the
++installed binary does not report the version you asked for. Upgrading over a running `omp.exe` works
++— Windows will not overwrite a running image, so the old binary is renamed aside first.
++
++If another omp is earlier on `PATH` (an upstream install, typically at `%LOCALAPPDATA%\omp`), the
++script warns. That one keeps winning until you remove it.
++
++## Linux (x64)
++
++```sh
++TAG=$(curl -fsSL https://api.github.com/repos/arynyklas/oh-my-pi/releases \
++  | grep -o '"tag_name": *"v[0-9.]*-fork\.[0-9]*"' | head -1 | cut -d'"' -f4)
++cd "$(mktemp -d)"
++curl -fsSLO "https://github.com/arynyklas/oh-my-pi/releases/download/$TAG/omp-linux-x64"
++curl -fsSLO "https://github.com/arynyklas/oh-my-pi/releases/download/$TAG/SHA256SUMS"
++grep ' omp-linux-x64$' SHA256SUMS | sha256sum -c -
++sudo install -m 0755 omp-linux-x64 /usr/local/bin/omp
++omp --version
++```
++
++Never skip the `sha256sum -c` step — it is the only integrity gate on a manual install.
++
++## Verify
++
++```console
++$ omp --version
++omp/17.2.15-fork.1
++
++$ omp --smoke-test
++smoke-test: ok
++```
++
++`--smoke-test` spawns the stats-sync worker and the tiny-model subprocess and pings them. It is what
++catches a broken worker entrypoint or a bad natives embed, so run it after a manual install.
++
++## Updating
++
++Once you are on a `-fork.N` build, the built-in updater stays on the fork's release line:
++
++```sh
++omp update --check
++omp update
++```
++
++`isForkVersion()` (`packages/coding-agent/src/cli/release-info.ts`) tests for the literal `-fork.`
++marker in the running version. When present, `omp update` queries
++`arynyklas/oh-my-pi`; otherwise it falls back to upstream.
++
++### Migrating off the retired `-authgw.beta.N` line
++
++Fork builds before `17.2.15-fork.1` used `X.Y.Z-authgw.beta.N` tagged
++`auth-gateway-vX.Y.Z-beta.N`, published as GitHub **prereleases**. Those version strings have no
++`-fork.` marker, so `omp update` routes them to `can1357/oh-my-pi`, which never publishes fork tags.
++**A build on the old line can never see the new one and will silently report itself up to date.**
++
++The fix is one manual binary replacement — rerun the Windows installer, or redo the Linux steps
++above. After that `omp update` works normally.
++
++Check which line you are on:
++
++```sh
++omp --version   # ...-fork.N  -> current;  ...-authgw.beta.N -> replace by hand
++```
++
++## Auth gateway as a service
++
++If you are installing the fork to run the [auth gateway](auth-broker-gateway.md) headlessly, the
++same binary serves both units. A working systemd layout:
++
++```ini
++# /etc/systemd/system/omp-auth-broker.service
++[Unit]
++Description=Oh My Pi auth broker credential vault
++After=network-online.target
++Wants=network-online.target
++[Service]
++Type=simple
++User=omp-gateway
++Group=omp-gateway
++WorkingDirectory=/var/lib/omp-gateway
++Environment=HOME=/var/lib/omp-gateway
++ExecStart=/usr/local/bin/omp auth-broker serve --bind=127.0.0.1:8765
++Restart=always
++RestartSec=3
++NoNewPrivileges=true
++PrivateTmp=true
++[Install]
++WantedBy=multi-user.target
++```
++
++```ini
++# /etc/systemd/system/omp-auth-gateway.service
++[Unit]
++Description=Oh My Pi LLM auth gateway
++After=network-online.target omp-auth-broker.service
++Wants=network-online.target
++Requires=omp-auth-broker.service
++[Service]
++Type=simple
++User=omp-gateway
++Group=omp-gateway
++WorkingDirectory=/var/lib/omp-gateway
++Environment=HOME=/var/lib/omp-gateway
++Environment=OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
++ExecStart=/usr/local/bin/omp auth-gateway serve --bind=0.0.0.0:4000
++Restart=always
++RestartSec=3
++NoNewPrivileges=true
++PrivateTmp=true
++[Install]
++WantedBy=multi-user.target
++```
++
++State lives in `$HOME/.omp` — `auth-gateway.db` (users, tokens, pools, ACLs) and
++`auth-gateway.token` (the bearer token, mode 0600).
++
++Upgrading a deployed gateway:
++
++```sh
++# 1. back up state and the current binary
++TS=$(date +%Y%m%d-%H%M%S)
++mkdir -p /root/omp-upgrade-backups
++tar -czf /root/omp-upgrade-backups/omp-gateway-data-$TS.tar.gz -C /var/lib/omp-gateway .omp
++cp -a /usr/local/bin/omp /root/omp-upgrade-backups/omp-$(/usr/local/bin/omp --version | cut -d/ -f2)
++
++# 2. download + verify (see the Linux section)
++
++# 3. swap and restart -- broker first, it is a Requires= of the gateway
++systemctl stop omp-auth-gateway.service omp-auth-broker.service
++install -m 0755 -o root -g root ./omp-linux-x64 /usr/local/bin/omp
++systemctl start omp-auth-broker.service && sleep 3
++systemctl start omp-auth-gateway.service
++```
++
++Then verify — the health endpoint reports the serving binary's version:
++
++```console
++$ curl -s http://127.0.0.1:4000/healthz
++{"ok":true,"version":"17.2.15-fork.1"}
++```
++
++Only `GET /healthz` is unauthenticated; a `HEAD` returns 401, so point uptime monitors at `GET`.
++Confirm the state survived the upgrade with the admin status endpoint, which wraps its payload under
++`status`:
++
++```sh
++curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4000/v1/admin/status
++```
++
++and probe the upstream credentials:
++
++```sh
++sudo -u omp-gateway env HOME=/var/lib/omp-gateway OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
++  omp auth-gateway check --json
++```
++
++The `Version:` line in the `/gateway` console Overview is this same server-side value. It is the
++remote gateway's build, not the version of the omp you are running locally and not a "latest
++available" lookup — a stale number there means the server binary is old.
++
++## Build from source
++
++Required for macOS, ARM, and musl, since those artifacts are not published.
++
++```sh
++git clone https://github.com/arynyklas/oh-my-pi.git
++cd oh-my-pi                      # already on release/fork
++bun install
++bun run build
++```
++
++Run it in place with `bun run packages/coding-agent/src/cli.ts`, or link it onto `PATH` with
++`scripts/link-omp.sh`. Building the distributable binaries instead uses
++`bun scripts/ci-release-build-binaries.ts --targets <target>`; that path needs the prebuilt natives
++addons in `packages/natives/native/`.
++
++## Uninstall
++
++**Windows** — delete the install directory and drop it from `PATH`:
++
++```powershell
++Remove-Item -Recurse -Force $env:LOCALAPPDATA\omp
++$p = [Environment]::GetEnvironmentVariable("Path", "User")
++[Environment]::SetEnvironmentVariable("Path", (($p -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne "$env:LOCALAPPDATA\omp" }) -join ';'), "User")
++```
++
++**Linux** — `sudo rm /usr/local/bin/omp`.
++
++Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
++connection profiles. Delete it separately if you want a clean slate.
+diff --git a/package.json b/package.json
+index 4aa2242..98abd3e 100644
+--- a/package.json
++++ b/package.json
+@@ -21,11 +21,11 @@ {
+ 			"@oh-my-pi/pi-agent-core": "18.1.16",
+ 			"@oh-my-pi/pi-ai": "18.1.16",
+ 			"@oh-my-pi/pi-catalog": "18.1.16",
+-			"@oh-my-pi/pi-coding-agent": "18.1.16",
++			"@oh-my-pi/pi-coding-agent": "18.1.16-fork.3",
+ 			"@oh-my-pi/pi-mnemopi": "18.1.16",
+ 			"@oh-my-pi/pi-natives": "18.1.16",
+ 			"@oh-my-pi/pi-tui": "18.1.16",
+-			"@oh-my-pi/pi-utils": "18.1.16",
++			"@oh-my-pi/pi-utils": "18.1.16-fork.3",
+ 			"@oh-my-pi/pi-wire": "18.1.16",
+ 			"@oh-my-pi/snapcompact": "18.1.16",
+ 			"@opentelemetry/api": "^1.9.1",
+diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
+index 71d0690..febc589 100644
+--- a/packages/ai/test/openai-compat-user-agent.test.ts
++++ b/packages/ai/test/openai-compat-user-agent.test.ts
+@@ -150,7 +150,7 @@ describe("xAI stream User-Agent", () => {
+ 		);
+ 		expect(captured.url).toBe("https://api.x.ai/v1/responses");
+ 		expect(captured.userAgent).toBe(USER_AGENT);
+-		expect(captured.userAgent).toMatch(/^omp\/\d+\.\d+\.\d+$/);
++		expect(captured.userAgent).toMatch(/^omp\/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
+ 	});
+ 
+ 	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index c9c3c3f..ccf0f77 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,7 +1,7 @@
+ {
+   "type": "module",
+   "name": "@oh-my-pi/pi-coding-agent",
+-  "version": "18.1.16",
++  "version": "18.1.16-fork.3",
+   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
+   "homepage": "https://omp.sh",
+   "author": "Stencil Labs, Inc.",
+diff --git a/packages/coding-agent/src/cli/release-info.ts b/packages/coding-agent/src/cli/release-info.ts
+new file mode 100644
+index 0000000..b935289
+--- /dev/null
++++ b/packages/coding-agent/src/cli/release-info.ts
+@@ -0,0 +1,134 @@
++import { isRecord, VERSION } from "@oh-my-pi/pi-utils";
++import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
++
++export const UPSTREAM_RELEASE_REPO = "can1357/oh-my-pi";
++const FORK_RELEASE_REPO = "arynyklas/oh-my-pi";
++const FORK_TAG_RE = /^v(\d+\.\d+\.\d+)-fork\.(\d+)$/;
++const FORK_MARKER = "-fork.";
++const PACKAGE = "@oh-my-pi/pi-coding-agent";
++const RELEASE_METADATA_TIMEOUT_MS = 30_000;
++
++/** Distribution channel advertised by a release's published npm manifest. */
++export type ReleaseDist = "npm" | "binary";
++
++export interface ReleaseInfo {
++	repo: string;
++	tag: string;
++	version: string;
++	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
++	dist?: ReleaseDist;
++}
++
++interface GitHubReleaseInfo {
++	tag_name: string;
++	draft: boolean;
++	prerelease: boolean;
++}
++
++/** Whether this build came from the fork's `vX.Y.Z-fork.N` release line. */
++export function isForkVersion(version: string = VERSION): boolean {
++	return version.includes(FORK_MARKER);
++}
++
++export function buildBinaryDownloadUrl(repo: string, tag: string, binaryName: string): string {
++	return `https://github.com/${repo}/releases/download/${tag}/${binaryName}`;
++}
++
++/**
++ * Parse the `omp.dist` field from a published package manifest.
++ *
++ * Forward-compatibility contract with future releases: a release that is not
++ * installable as an npm package (e.g. a native rewrite) publishes
++ * `"omp": { "dist": "binary" }` in its package.json. Any value other than
++ * "npm" — including values this updater does not know yet — maps to "binary"
++ * so already-deployed updaters never run a package-manager install against a
++ * release that no longer supports it.
++ */
++export function resolveReleaseDist(manifest: unknown): ReleaseDist | undefined {
++	if (!isRecord(manifest) || !isRecord(manifest.omp)) return undefined;
++	const dist = manifest.omp.dist;
++	if (dist === undefined) return undefined;
++	return dist === "npm" ? "npm" : "binary";
++}
++
++export async function getLatestReleaseForVersion(
++	currentVersion: string = VERSION,
++	timeoutMs = RELEASE_METADATA_TIMEOUT_MS,
++): Promise<ReleaseInfo> {
++	return isForkVersion(currentVersion)
++		? await getLatestForkRelease(timeoutMs)
++		: await getLatestUpstreamRelease(timeoutMs);
++}
++
++export async function getLatestUpstreamRelease(timeoutMs = RELEASE_METADATA_TIMEOUT_MS): Promise<ReleaseInfo> {
++	let response: Response;
++	try {
++		response = await fetch(`https://registry.npmjs.org/${PACKAGE}/latest`, {
++			signal: withTimeoutSignal(timeoutMs),
++		});
++	} catch (err) {
++		if (isTimeoutError(err)) {
++			throw new Error(`Timed out fetching release info after ${Math.round(timeoutMs / 1000)}s`, { cause: err });
++		}
++		throw err;
++	}
++	if (!response.ok) {
++		throw new Error(`Failed to fetch release info: ${response.statusText}`);
++	}
++	const data: unknown = await response.json();
++	if (!isRecord(data) || typeof data.version !== "string") {
++		throw new Error("No version found in release info");
++	}
++	const version = data.version;
++	return {
++		repo: UPSTREAM_RELEASE_REPO,
++		tag: `v${version}`,
++		version,
++		dist: resolveReleaseDist(data),
++	};
++}
++
++function versionFromForkTag(tag: string): string | undefined {
++	const match = FORK_TAG_RE.exec(tag);
++	if (!match) return undefined;
++	return `${match[1]}-fork.${match[2]}`;
++}
++
++function selectForkRelease(releases: GitHubReleaseInfo[]): ReleaseInfo | undefined {
++	let latest: ReleaseInfo | undefined;
++	for (const release of releases) {
++		if (release.draft || release.prerelease) continue;
++		const version = versionFromForkTag(release.tag_name);
++		if (!version) continue;
++		const candidate = { repo: FORK_RELEASE_REPO, tag: release.tag_name, version };
++		if (!latest || Bun.semver.order(candidate.version, latest.version) > 0) {
++			latest = candidate;
++		}
++	}
++	return latest;
++}
++
++export async function getLatestForkRelease(timeoutMs = RELEASE_METADATA_TIMEOUT_MS): Promise<ReleaseInfo> {
++	let response: Response;
++	try {
++		response = await fetch(`https://api.github.com/repos/${FORK_RELEASE_REPO}/releases?per_page=20`, {
++			signal: withTimeoutSignal(timeoutMs),
++		});
++	} catch (err) {
++		if (isTimeoutError(err)) {
++			throw new Error(`Timed out fetching fork release info after ${Math.round(timeoutMs / 1000)}s`, {
++				cause: err,
++			});
++		}
++		throw err;
++	}
++	if (!response.ok) {
++		throw new Error(`Failed to fetch fork release info: ${response.statusText}`);
++	}
++
++	const release = selectForkRelease((await response.json()) as GitHubReleaseInfo[]);
++	if (!release) {
++		throw new Error(`No releases found in ${FORK_RELEASE_REPO}`);
++	}
++	return release;
++}
+diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
+index 36745ad..42f5573 100644
+--- a/packages/coding-agent/src/cli/update-cli.ts
++++ b/packages/coding-agent/src/cli/update-cli.ts
+@@ -10,7 +10,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { Transform } from "node:stream";
+ import { pipeline } from "node:stream/promises";
+-import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
++import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+ import { $ } from "bun";
+@@ -22,8 +22,13 @@ import {
+ 	unsupportedProxyMessage,
+ 	withTimeoutSignal,
+ } from "../utils/fetch-timeout";
++import {
++	buildBinaryDownloadUrl,
++	getLatestReleaseForVersion,
++	isForkVersion,
++	UPSTREAM_RELEASE_REPO,
++} from "./release-info";
+ 
+-const REPO = "can1357/oh-my-pi";
+ const PACKAGE = "@oh-my-pi/pi-coding-agent";
+ const HOMEBREW_FORMULA = "can1357/tap/omp";
+ const MISE_TOOL = "github:can1357/oh-my-pi";
+@@ -91,6 +96,11 @@ export interface ReleaseRename {
+ const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
+ 
+ export interface ReleaseInfo {
++	/**
++	 * GitHub repo the binary asset is fetched from. Defaults to the upstream
++	 * channel; the fork release line sets its own repo.
++	 */
++	repo?: string;
+ 	tag: string;
+ 	version: string;
+ 	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
+@@ -98,7 +108,6 @@ export interface ReleaseInfo {
+ 	/** npm names to install, resolved after following any `omp.rename` pointers. */
+ 	packages: ReleasePackages;
+ }
+-
+ export interface ReleaseBinaryAsset {
+ 	url: string;
+ 	size: number;
+@@ -155,7 +164,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
+ 		natives: typeof natives === "string" && natives.length > 0 ? natives : undefined,
+ 	};
+ }
+-
+ function majorVersion(version: string): number {
+ 	const major = Number.parseInt(version, 10);
+ 	return Number.isNaN(major) ? 0 : major;
+@@ -183,6 +191,10 @@ ): boolean {
+ /**
+  * Select and validate the binary asset from GitHub release metadata.
+  *
++ * `repo` defaults to the upstream channel; the fork release line passes its own
++ * repo. Both channels publish stable (non-draft, non-prerelease) releases, so
++ * the integrity gate is identical for either.
++ *
+  * Draft releases are always rejected. Prereleases are rejected unless
+  * `options.allowPrerelease` is set, which the canary channel passes: canary
+  * GitHub releases are published as prereleases, and the exact-tag match below
+@@ -192,8 +204,9 @@ export function resolveReleaseBinaryAsset(
+ 	release: unknown,
+ 	expectedTag: string,
+ 	binaryName: string,
+-	options: { allowPrerelease?: boolean } = {},
++	options: { repo?: string; allowPrerelease?: boolean } = {},
+ ): ReleaseBinaryAsset {
++	const repo = options.repo ?? UPSTREAM_RELEASE_REPO;
+ 	if (!isRecord(release)) {
+ 		throw new Error("Invalid GitHub release metadata");
+ 	}
+@@ -230,7 +243,7 @@ ): ReleaseBinaryAsset {
+ 		throw new Error(`GitHub release asset ${binaryName} has an unsupported digest`);
+ 	}
+ 
+-	const expectedUrl = `https://github.com/${REPO}/releases/download/${expectedTag}/${binaryName}`;
++	const expectedUrl = buildBinaryDownloadUrl(repo, expectedTag, binaryName);
+ 	if (asset.browser_download_url !== expectedUrl) {
+ 		throw new Error(`GitHub release asset ${binaryName} has an unexpected download URL`);
+ 	}
+@@ -243,13 +256,13 @@ ): ReleaseBinaryAsset {
+ }
+ 
+ async function getReleaseBinaryAsset(
+-	expectedVersion: string,
++	release: ReleaseInfo,
+ 	binaryName: string,
+ 	fetchImpl: Fetch = fetch,
+ 	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+ 	allowPrerelease = false,
+ ): Promise<ReleaseBinaryAsset> {
+-	const tag = `v${expectedVersion}`;
++	const repo = release.repo ?? UPSTREAM_RELEASE_REPO;
+ 	const headers: Record<string, string> = {
+ 		Accept: "application/vnd.github+json",
+ 		"X-GitHub-Api-Version": "2022-11-28",
+@@ -258,7 +271,7 @@ ): Promise<ReleaseBinaryAsset> {
+ 
+ 	let response: Response;
+ 	try {
+-		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
++		response = await fetchImpl(`${GITHUB_API}/repos/${repo}/releases/tags/${encodeURIComponent(release.tag)}`, {
+ 			headers,
+ 			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+ 		});
+@@ -278,7 +291,10 @@ ): Promise<ReleaseBinaryAsset> {
+ 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
+ 	}
+ 
+-	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { allowPrerelease });
++	return resolveReleaseBinaryAsset(await response.json(), release.tag, binaryName, {
++		repo,
++		allowPrerelease,
++	});
+ }
+ 
+ export interface VerifiedBinaryDownloadOptions {
+@@ -350,7 +366,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
+ 		throw err;
+ 	}
+ }
+-
+ /** Result from running the installed binary and parsing its reported version. */
+ export interface InstalledVersionVerification {
+ 	ok: boolean;
+@@ -761,6 +776,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
+ 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
+ }
+ 
++function resolveOmpBinaryPathForUpdate(): string {
++	const targetPath = resolveOmpPath();
++	if (!targetPath) throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
++	return targetPath;
++}
++
+ /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
+ const MAX_RENAME_HOPS = 3;
+ 
+@@ -1131,7 +1152,7 @@ /**
+  * Resolve the path that `omp` maps to in the user's PATH.
+  */
+ function resolveOmpPath(): string | undefined {
+-	return $which(APP_NAME) ?? undefined;
++	return $which(APP_NAME, { PATH: process.env.PATH, cache: WhichCachePolicy.Fresh }) ?? undefined;
+ }
+ 
+ /**
+@@ -1732,6 +1753,7 @@ export async function updateViaBinaryAt(
+ 		binaryName?: string;
+ 		fetchImpl?: Fetch;
+ 		githubToken?: string;
++		release?: ReleaseInfo;
+ 		allowPrerelease?: boolean;
+ 		/** Refuse replacement unless the existing path is a non-script OMP executable. */
+ 		validateExistingTarget?: boolean;
+@@ -1740,6 +1762,12 @@ export async function updateViaBinaryAt(
+ ): Promise<void> {
+ 	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);
+ 	const binaryName = options.binaryName ?? getBinaryName();
++	const release = options.release ?? {
++		repo: UPSTREAM_RELEASE_REPO,
++		tag: `v${expectedVersion}`,
++		version: expectedVersion,
++		packages: CURRENT_PACKAGES,
++	};
+ 	// Unique per attempt so two overlapping `omp update` runs never share a temp
+ 	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
+ 	// pre-download unlink delete the first run's still-downloading temp file; the
+@@ -1753,7 +1781,7 @@ ): Promise<void> {
+ 	const tempPath = `${targetPath}.${attempt}.new`;
+ 	const backupPath = `${targetPath}.${attempt}.bak`;
+ 	const asset = await getReleaseBinaryAsset(
+-		expectedVersion,
++		release,
+ 		binaryName,
+ 		options.fetchImpl,
+ 		options.githubToken,
+@@ -1836,17 +1864,24 @@ export async function updateViaShimTakeover(
+ 		binaryName?: string;
+ 		fetchImpl?: Fetch;
+ 		githubToken?: string;
++		release?: ReleaseInfo;
+ 		allowPrerelease?: boolean;
+ 		verifyBinary?: typeof verifyBinaryAtPath;
+ 	} = {},
+ ): Promise<void> {
+ 	const binaryName = options.binaryName ?? getBinaryName();
++	const release = options.release ?? {
++		repo: UPSTREAM_RELEASE_REPO,
++		tag: `v${expectedVersion}`,
++		version: expectedVersion,
++		packages: CURRENT_PACKAGES,
++	};
+ 	const launcherDir = path.dirname(shimPath);
+ 	const exePath = path.join(launcherDir, `${APP_NAME}.exe`);
+ 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
+ 	const tempPath = `${exePath}.${attempt}.new`;
+ 	const asset = await getReleaseBinaryAsset(
+-		expectedVersion,
++		release,
+ 		binaryName,
+ 		options.fetchImpl,
+ 		options.githubToken,
+@@ -1977,6 +2012,7 @@ export async function runUpdateCommand(opts: {
+ 	check: boolean;
+ 	channel?: UpdateChannel;
+ }): Promise<void> {
++	const isForkBuild = isForkVersion();
+ 	console.log(chalk.dim(`Current version: ${VERSION}`));
+ 	const persistedChannel = readPersistedChannel() ?? "stable";
+ 	const channel = opts.channel ?? persistedChannel;
+@@ -1986,7 +2022,9 @@ export async function runUpdateCommand(opts: {
+ 	// Check for updates
+ 	let release: ReleaseInfo;
+ 	try {
+-		release = await getLatestRelease({ channel });
++		release = isForkBuild
++			? { ...(await getLatestReleaseForVersion()), packages: CURRENT_PACKAGES }
++			: await getLatestRelease({ channel });
+ 	} catch (err) {
+ 		console.error(chalk.red(`Failed to check for updates: ${err}`));
+ 		process.exit(1);
+@@ -2020,6 +2058,16 @@ export async function runUpdateCommand(opts: {
+ 		return;
+ 	}
+ 
++	if (isForkBuild) {
++		try {
++			await updateViaBinaryAt(resolveOmpBinaryPathForUpdate(), release.version, { release });
++		} catch (err) {
++			console.error(chalk.red(`Update failed: ${err}`));
++			process.exit(1);
++		}
++		return;
++	}
++
+ 	// Choose update method based on the prioritized omp binary in PATH. For
+ 	// binary-only releases the package managers are never consulted: a bun/npm
+ 	// symlink resolves to method "binary" and is replaced in place, keeping the
+@@ -2065,6 +2113,7 @@ export async function runUpdateCommand(opts: {
+ 				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
+ 			}
+ 			await updateViaBinaryAt(target.path, release.version, {
++				release,
+ 				allowPrerelease,
+ 				validateExistingTarget: target.validateExistingTarget,
+ 			});
+diff --git a/packages/coding-agent/test/release-info.test.ts b/packages/coding-agent/test/release-info.test.ts
+new file mode 100644
+index 0000000..94434c3
+--- /dev/null
++++ b/packages/coding-agent/test/release-info.test.ts
+@@ -0,0 +1,18 @@
++import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
++import { getLatestReleaseForVersion } from "@oh-my-pi/pi-coding-agent/cli/release-info";
++
++afterEach(() => {
++	vi.restoreAllMocks();
++});
++
++describe("release info lookup", () => {
++	it("maps normal builds to upstream npm metadata", async () => {
++		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ version: "16.5.1" }));
++
++		const release = await getLatestReleaseForVersion("16.5.0");
++
++		expect(release).toEqual({ repo: "can1357/oh-my-pi", tag: "v16.5.1", version: "16.5.1" });
++		expect(fetchSpy).toHaveBeenCalledTimes(1);
++		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest");
++	});
++});
+diff --git a/packages/coding-agent/test/startup-update-check.test.ts b/packages/coding-agent/test/startup-update-check.test.ts
+new file mode 100644
+index 0000000..4d0e6f5
+--- /dev/null
++++ b/packages/coding-agent/test/startup-update-check.test.ts
+@@ -0,0 +1,28 @@
++import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
++import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { checkForNewVersion } from "@oh-my-pi/pi-coding-agent/main";
++
++beforeEach(async () => {
++	resetSettingsForTest();
++	await Settings.init({ inMemory: true });
++});
++
++afterEach(() => {
++	vi.restoreAllMocks();
++	resetSettingsForTest();
++});
++
++describe("startup update check", () => {
++	it("checks fork GitHub releases for fork builds", async () => {
++		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
++			Response.json([{ tag_name: "v16.5.0-fork.3", draft: false, prerelease: false }]),
++		);
++
++		const newVersion = await checkForNewVersion("16.5.0-fork.2");
++		expect(newVersion).toBe("16.5.0-fork.3");
++		expect(fetchSpy).toHaveBeenCalledTimes(1);
++		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(
++			"https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20",
++		);
++	});
++});
+diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
+index c042f71..2e07bab 100644
+--- a/packages/coding-agent/test/update-cli.test.ts
++++ b/packages/coding-agent/test/update-cli.test.ts
+@@ -99,6 +99,118 @@ describe("update command plugin dispatch", () => {
+ 	});
+ });
+ 
++// Pinned far above any real release so the fork channel assertions stay valid
++// across version bumps: `runUpdateCommand` compares against the built VERSION.
++const FORK_TAG = "v999.0.0-fork.1";
++const FORK_VERSION = "999.0.0-fork.1";
++const FORK_RELEASES_URL = "https://api.github.com/repos/arynyklas/oh-my-pi/releases?per_page=20";
++const FORK_TAG_URL = `https://api.github.com/repos/arynyklas/oh-my-pi/releases/tags/${FORK_TAG}`;
++
++describe("update-cli fork release updater", () => {
++	it("checks fork GitHub releases instead of upstream npm metadata", async () => {
++		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
++			Response.json([{ tag_name: FORK_TAG, draft: false, prerelease: false }]),
++		);
++		const stderrSpy = spyOn(process.stderr, "write").mockImplementation(() => true);
++		const logs: string[] = [];
++		spyOn(console, "log").mockImplementation(message => {
++			logs.push(String(message));
++		});
++
++		await updateCli.runUpdateCommand({ force: false, check: true });
++
++		expect(fetchSpy).toHaveBeenCalledTimes(1);
++		expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(FORK_RELEASES_URL);
++		expect(stderrSpy).not.toHaveBeenCalled();
++		expect(logs.some(line => line.includes(`New version available: ${FORK_VERSION}`))).toBe(true);
++	});
++
++	it("ignores fork prereleases and drafts when picking the latest release", async () => {
++		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
++			Response.json([
++				{ tag_name: "v999.0.1-fork.1", draft: true, prerelease: false },
++				{ tag_name: "v999.0.2-fork.1", draft: false, prerelease: true },
++				{ tag_name: FORK_TAG, draft: false, prerelease: false },
++			]),
++		);
++		const logs: string[] = [];
++		spyOn(console, "log").mockImplementation(message => {
++			logs.push(String(message));
++		});
++
++		await updateCli.runUpdateCommand({ force: false, check: true });
++
++		expect(fetchSpy).toHaveBeenCalledTimes(1);
++		expect(logs.some(line => line.includes(`New version available: ${FORK_VERSION}`))).toBe(true);
++	});
++
++	it.skipIf(process.platform !== "linux")(
++		"installs fork release assets through verified binary replacement even from a bun-bin path",
++		async () => {
++			const dir = await makeTempDir();
++			const bunHome = path.join(dir, "bun-home");
++			const binDir = path.join(bunHome, "bin");
++			await fs.mkdir(binDir, { recursive: true });
++			const ompPath = path.join(binDir, "omp");
++			await Bun.write(ompPath, "#!/bin/sh\necho omp/16.5.0-fork.1\n");
++			await fs.chmod(ompPath, 0o755);
++			const upgradedBinary = `#!/bin/sh\necho omp/${FORK_VERSION}\n`;
++			const digest = `sha256:${new Bun.CryptoHasher("sha256").update(upgradedBinary).digest("hex")}`;
++			const expectedDownloadUrl = `https://github.com/arynyklas/oh-my-pi/releases/download/${FORK_TAG}/omp-linux-x64`;
++			const fetchMock: typeof globalThis.fetch = Object.assign(
++				async (input: string | URL | Request): Promise<Response> => {
++					const url = String(input);
++					if (url === FORK_RELEASES_URL) {
++						return Response.json([{ tag_name: FORK_TAG, draft: false, prerelease: false }]);
++					}
++					if (url === FORK_TAG_URL) {
++						return Response.json({
++							tag_name: FORK_TAG,
++							draft: false,
++							prerelease: false,
++							assets: [
++								{
++									name: "omp-linux-x64",
++									state: "uploaded",
++									size: Buffer.byteLength(upgradedBinary),
++									digest,
++									browser_download_url: expectedDownloadUrl,
++								},
++							],
++						});
++					}
++					if (url === expectedDownloadUrl) {
++						return new Response(upgradedBinary);
++					}
++					throw new Error(`unexpected fetch ${url}`);
++				},
++				{ preconnect: globalThis.fetch.preconnect },
++			);
++			const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
++			spyOn(console, "log").mockImplementation(() => {});
++			const previousPath = process.env.PATH;
++			const previousBunInstall = process.env.BUN_INSTALL;
++			process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ""}`;
++			process.env.BUN_INSTALL = bunHome;
++			try {
++				await updateCli.runUpdateCommand({ force: false, check: false });
++			} finally {
++				process.env.PATH = previousPath;
++				process.env.BUN_INSTALL = previousBunInstall;
++			}
++
++			// The fork asset is resolved through the same size/digest gate as an
++			// upstream release before anything replaces the installed binary.
++			expect(fetchSpy.mock.calls.map(call => String(call[0]))).toEqual([
++				FORK_RELEASES_URL,
++				FORK_TAG_URL,
++				expectedDownloadUrl,
++			]);
++			expect(await Bun.file(ompPath).text()).toBe(upgradedBinary);
++		},
++	);
++});
++
+ describe("parseUpdateArgs", () => {
+ 	it("preserves the legacy plugin update shorthand", () => {
+ 		expect(parseUpdateArgs(["update", "-l"])).toEqual({
+diff --git a/packages/utils/package.json b/packages/utils/package.json
+index 82af9bc..acac28a 100644
+--- a/packages/utils/package.json
++++ b/packages/utils/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "@oh-my-pi/pi-utils",
+-	"version": "18.1.16",
++	"version": "18.1.16-fork.3",
+ 	"description": "Shared utilities for pi packages",
+ 	"keywords": [
+ 		"cli",
+diff --git a/scripts/ci-release-publish.test.ts b/scripts/ci-release-publish.test.ts
+index d43c5d2..e016d59 100644
+--- a/scripts/ci-release-publish.test.ts
++++ b/scripts/ci-release-publish.test.ts
+@@ -46,7 +46,7 @@ describe("published legal payloads", () => {
+ 		}
+ 	});
+ 
+-	it("lists every legal file explicitly in the native core package", async () => {
++	it("lists every legal and runtime file explicitly in the native core package", async () => {
+ 		const pkgDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-core-"));
+ 		try {
+ 			await Bun.write(
+@@ -69,6 +69,8 @@ describe("published legal payloads", () => {
+ 				"native/desktop-adapter.d.ts",
+ 				"native/loader-state.js",
+ 				"native/loader-state.d.ts",
++				"native/vcs.js",
++				"native/vcs.d.ts",
+ 				"native/embedded-addon.js",
+ 				"README.md",
+ 				"LICENSE",
+diff --git a/scripts/ci-test-ts.test.ts b/scripts/ci-test-ts.test.ts
+index 2b73cb4..7d105fa 100644
+--- a/scripts/ci-test-ts.test.ts
++++ b/scripts/ci-test-ts.test.ts
+@@ -1,6 +1,105 @@
+ import { describe, expect, test } from "bun:test";
++import path from "node:path";
+ import { describeChunkFailure } from "./ci-test-ts.ts";
+ 
++async function runCiTestTs(args: string[]): Promise<{
++	stdout: string;
++	stderr: string;
++	exitCode: number;
++	planned: string[];
++}> {
++	const proc = Bun.spawn([process.execPath, path.join(import.meta.dir, "ci-test-ts.ts"), ...args], {
++		cwd: path.join(import.meta.dir, ".."),
++		stdout: "pipe",
++		stderr: "pipe",
++		env: { ...Bun.env, NO_COLOR: "1" },
++	});
++	const stdoutPromise = new Response(proc.stdout).text();
++	const stderrPromise = new Response(proc.stderr).text();
++	try {
++		const [stdout, stderr, exitCode] = await Promise.all([stdoutPromise, stderrPromise, proc.exited]);
++		return {
++			stdout,
++			stderr,
++			exitCode,
++			planned: stdout
++				.split(/\r?\n/)
++				.map(line => line.trim())
++				.filter(line => line.startsWith("$ ")),
++		};
++	} finally {
++		if (proc.exitCode === null) {
++			proc.kill();
++			await proc.exited;
++		}
++	}
++}
++
++describe("ci-test-ts coding-agent requested filters", () => {
++	const plannedCliCommand = "$ bun test --parallel=1 test/auth-gateway-cli.test.ts";
++
++	test("plans a single coding-agent test from package-relative filter", async () => {
++		const result = await runCiTestTs(["coding-agent-heavy", "test/auth-gateway-cli.test.ts", "--dry-run", "--full"]);
++
++		expect(result.exitCode).toBe(0);
++		expect(result.planned).toEqual([plannedCliCommand]);
++	}, 30_000);
++
++	test.each([
++		"packages/coding-agent/test/auth-gateway-cli.test.ts",
++		"packages\\coding-agent\\test\\auth-gateway-cli.test.ts",
++		"test\\auth-gateway-cli.test.ts",
++	])(
++		"normalizes %s to the package-relative coding-agent command",
++		async filter => {
++			const result = await runCiTestTs(["coding-agent-heavy", filter, "--dry-run", "--full"]);
++
++			expect(result.exitCode).toBe(0);
++			expect(result.planned).toEqual([plannedCliCommand]);
++		},
++		30_000,
++	);
++
++	test("fails when requested coding-agent filters match no tests", async () => {
++		const result = await runCiTestTs(["coding-agent-heavy", "test/does-not-exist.test.ts", "--dry-run", "--full"]);
++
++		expect(result.exitCode).not.toBe(0);
++		expect(result.planned).toEqual([]);
++		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/does-not-exist.test.ts");
++	}, 30_000);
++
++	test("fails a mixed coding-agent-heavy request before planning matched tests", async () => {
++		const result = await runCiTestTs([
++			"coding-agent-heavy",
++			"test/auth-gateway-cli.test.ts",
++			"test/typo.test.ts",
++			"--dry-run",
++			"--full",
++		]);
++
++		expect(result.exitCode).not.toBe(0);
++		expect(result.planned).toEqual([]);
++		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/typo.test.ts");
++		expect(result.stderr).not.toContain("test/auth-gateway-cli.test.ts");
++	}, 30_000);
++
++	test("fails an unmatched all-mode coding-agent request before aggregate plans", async () => {
++		const result = await runCiTestTs(["all", "test/typo.test.ts", "--dry-run", "--full"]);
++
++		expect(result.exitCode).not.toBe(0);
++		expect(result.planned).toEqual([]);
++		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/typo.test.ts");
++	}, 30_000);
++
++	test("fails an unmatched local-ts coding-agent request before aggregate plans", async () => {
++		const result = await runCiTestTs(["local-ts", "test/typo.test.ts", "--dry-run", "--full"]);
++
++		expect(result.exitCode).not.toBe(0);
++		expect(result.planned).toEqual([]);
++		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/typo.test.ts");
++	}, 30_000);
++});
++
+ // The two ways a chunk reaches SIGKILL are indistinguishable by exit code, so
+ // these drive real subprocesses to produce a genuine 137 rather than asserting
+ // against a hand-written constant.
+diff --git a/scripts/ci-test-ts.ts b/scripts/ci-test-ts.ts
+index 54083d6..3627747 100755
+--- a/scripts/ci-test-ts.ts
++++ b/scripts/ci-test-ts.ts
+@@ -27,12 +27,21 @@ interface TestCommand {
+ 	parallel?: number;
+ }
+ 
++interface TestPlan {
++	commands: TestCommand[];
++	matchedCodingAgentTestFiles: string[];
++}
++
+ type CodingAgentTestPartition = Record<CodingAgentBucket, string[]>;
+ 
+ const repoRoot = path.join(import.meta.dir, "..");
+ const args = process.argv.slice(2);
+ const isDryRun = args.includes("--dry-run");
+-const requestedMode = args.find(arg => !arg.startsWith("--")) ?? "all";
++const modeArg = args.find(arg => !arg.startsWith("--"));
++const requestedMode = modeArg ?? "all";
++const requestedCodingAgentTestFiles = args
++	.filter(arg => !arg.startsWith("--") && arg !== modeArg)
++	.map(normalizeCodingAgentTestFilter);
+ // `--only-failures` is Bun's output filter — it hides passing tests within each
+ // chunk, keeping the log terse, and is the default here (CI and the root
+ // `test:ts` aggregate append it). It does NOT skip tests or share any
+@@ -201,6 +210,24 @@ function shellQuote(value: string): string {
+ 	return `'${value.replaceAll("'", `'\\''`)}'`;
+ }
+ 
++function normalizeCodingAgentTestFilter(value: string): string {
++	return value
++		.replaceAll("\\", "/")
++		.replace(/^\.\//, "")
++		.replace(/^packages\/coding-agent\//, "");
++}
++
++function testPlan(commands: TestCommand[], matchedCodingAgentTestFiles: string[] = []): TestPlan {
++	return { commands, matchedCodingAgentTestFiles };
++}
++
++function mergeTestPlans(...plans: TestPlan[]): TestPlan {
++	return {
++		commands: plans.flatMap(plan => plan.commands),
++		matchedCodingAgentTestFiles: [...new Set(plans.flatMap(plan => plan.matchedCodingAgentTestFiles))],
++	};
++}
++
+ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
+ 	const { extraArgs = [] } = options;
+ 	return {
+@@ -300,10 +327,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> {
+ 	return codingAgentTestPartitionPromise;
+ }
+ 
+-async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
++async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestPlan> {
+ 	const partition = await getCodingAgentTestPartition();
+-	const testFiles = partition[bucket];
++	const allTestFiles = partition[bucket];
++	const testFiles =
++		requestedCodingAgentTestFiles.length === 0
++			? allTestFiles
++			: allTestFiles.filter(testFile => {
++					const normalized = normalizeCodingAgentTestFilter(testFile);
++					return requestedCodingAgentTestFiles.some(requested => requested === normalized);
++				});
+ 	if (testFiles.length === 0) {
++		if (requestedCodingAgentTestFiles.length > 0) return testPlan([]);
+ 		throw new Error(`No coding-agent ${bucket} tests matched`);
+ 	}
+ 	const plan = codingAgentBucketPlans[bucket];
+@@ -320,15 +355,15 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
+ 			parallel: plan.parallel,
+ 		});
+ 	}
+-	return commands;
++	return testPlan(commands, testFiles.map(normalizeCodingAgentTestFilter));
+ }
+ 
+-async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
++async function commandsForMode(mode: Mode): Promise<TestPlan> {
+ 	switch (mode) {
+ 		case "workspace":
+-			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
++			return testPlan(fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)));
+ 		case "native":
+-			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
++			return testPlan(nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)));
+ 		case "coding-agent-singleton":
+ 			return await codingAgentTestCommands("singleton");
+ 		case "coding-agent-ui":
+@@ -338,35 +373,39 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
+ 		case "coding-agent-native":
+ 			return await codingAgentTestCommands("native");
+ 		case "coding-agent-heavy":
+-			return [
+-				...(await codingAgentTestCommands("singleton")),
+-				...(await codingAgentTestCommands("ui")),
+-				...(await codingAgentTestCommands("runtime")),
+-				...(await codingAgentTestCommands("native")),
+-			];
++			return mergeTestPlans(
++				await codingAgentTestCommands("singleton"),
++				await codingAgentTestCommands("ui"),
++				await codingAgentTestCommands("runtime"),
++				await codingAgentTestCommands("native"),
++			);
+ 		case "all":
+-			return [
+-				...(await commandsForMode("workspace")),
+-				...(await commandsForMode("native")),
+-				...(await commandsForMode("coding-agent-heavy")),
+-			];
++			return mergeTestPlans(
++				await commandsForMode("workspace"),
++				await commandsForMode("native"),
++				await commandsForMode("coding-agent-heavy"),
++			);
+ 		// `local-ts` is the full local TypeScript run that root `bun run test:ts`
+ 		// drives: every package the old `--workspaces` fan-out covered (the CI
+ 		// `all` set plus robomp-web, which CI omits), routed through
+ 		// this one quiet runner so the whole suite shares one progress stream and
+ 		// one failure report. Repo script tests remain available via `test:scripts`.
+ 		case "local-ts":
+-			return [
+-				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
+-				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+-				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+-				...(await commandsForMode("coding-agent-heavy")),
+-			];
++			return mergeTestPlans(
++				testPlan([
++					...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
++					...nativeAndIntegrationPackages.map(pkg =>
++						workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs }),
++					),
++					...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
++				]),
++				await commandsForMode("coding-agent-heavy"),
++			);
+ 		// `local` is what root `bun run test` drives: the full TS suite plus the
+ 		// Rust task, so a single invocation reports TS and Rust together. The Rust
+ 		// command self-skips when no Rust-affecting files changed (see run-rs-task).
+ 		case "local":
+-			return [...(await commandsForMode("local-ts")), rustTestCommand()];
++			return mergeTestPlans(await commandsForMode("local-ts"), testPlan([rustTestCommand()]));
+ 	}
+ }
+ 
+@@ -926,7 +965,14 @@ if (import.meta.main) {
+ 		);
+ 	}
+ 
+-	const requestedCommands = await commandsForMode(requestedMode as Mode);
++	const plan = await commandsForMode(requestedMode as Mode);
++	const unmatchedCodingAgentTestFiles = requestedCodingAgentTestFiles.filter(
++		requested => !plan.matchedCodingAgentTestFiles.includes(requested),
++	);
++	if (unmatchedCodingAgentTestFiles.length > 0) {
++		throw new Error(`No coding-agent tests matched requested filter(s): ${unmatchedCodingAgentTestFiles.join(", ")}`);
++	}
++	const requestedCommands = plan.commands;
+ 	const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
+ 	// CI defaults to one process at a time, but memory-sized workflow buckets
+ 	// explicitly opt into bounded process concurrency. Local runs fan out by
+diff --git a/scripts/install-fork.ps1 b/scripts/install-fork.ps1
+new file mode 100644
+index 0000000..dd0743d
+--- /dev/null
++++ b/scripts/install-fork.ps1
+@@ -0,0 +1,271 @@
++# OMP fork installer for Windows (arynyklas/oh-my-pi)
++#
++# The fork publishes binaries only -- no npm packages -- so this installs the
++# release asset directly. Do not use upstream's scripts/install.ps1 here: its
++# default path installs @oh-my-pi/pi-coding-agent from npm, which is upstream's
++# build and does not carry the fork's auth-gateway work.
++#
++# Usage:
++#   irm https://raw.githubusercontent.com/arynyklas/oh-my-pi/release/fork/scripts/install-fork.ps1 | iex
++#
++# With options:
++#   $s = irm https://raw.githubusercontent.com/arynyklas/oh-my-pi/release/fork/scripts/install-fork.ps1
++#   & ([scriptblock]::Create($s)) -Version v17.2.15-fork.1
++#   & ([scriptblock]::Create($s)) -InstallDir C:\tools\omp
++#   & ([scriptblock]::Create($s)) -NoPath
++
++param(
++    # Pin an exact release tag, e.g. v17.2.15-fork.1. Default: newest fork release.
++    [string]$Version,
++    # Target directory. Default: $env:PI_INSTALL_DIR, else %LOCALAPPDATA%\omp.
++    [string]$InstallDir,
++    # Skip the user PATH update.
++    [switch]$NoPath
++)
++
++$ErrorActionPreference = "Stop"
++
++$Repo = "arynyklas/oh-my-pi"
++$BinaryName = "omp-windows-x64.exe"
++$ChecksumName = "SHA256SUMS"
++# Mirrors versionFromForkTag() in packages/coding-agent/src/cli/release-info.ts.
++$ForkTagPattern = '^v(\d+)\.(\d+)\.(\d+)-fork\.(\d+)$'
++
++if (-not $InstallDir) {
++    $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "omp" }
++}
++
++# Windows PowerShell 5.1 can still default to TLS 1.0, which api.github.com rejects.
++try {
++    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
++} catch {}
++
++function Invoke-GitHubApi {
++    param([string]$Uri)
++
++    $headers = @{ "User-Agent" = "omp-fork-installer"; "Accept" = "application/vnd.github+json" }
++    # Optional, but keeps unauthenticated rate limits from biting on shared IPs.
++    if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
++    return Invoke-RestMethod -Uri $Uri -Headers $headers -TimeoutSec 60 -UseBasicParsing
++}
++
++function Get-ForkTagRank {
++    param([string]$Tag)
++
++    $m = [regex]::Match($Tag, $ForkTagPattern)
++    if (-not $m.Success) { return $null }
++    return @(
++        [int]$m.Groups[1].Value,
++        [int]$m.Groups[2].Value,
++        [int]$m.Groups[3].Value,
++        [int]$m.Groups[4].Value
++    )
++}
++
++function Compare-Rank {
++    param([int[]]$Left, [int[]]$Right)
++
++    for ($i = 0; $i -lt 4; $i++) {
++        if ($Left[$i] -ne $Right[$i]) { return $Left[$i] - $Right[$i] }
++    }
++    return 0
++}
++
++function Resolve-Release {
++    if ($Version) {
++        $tag = "v" + ($Version -replace '^v', '')
++        if (-not (Get-ForkTagRank $tag)) {
++            throw "Not a fork release tag: $Version (expected vX.Y.Z-fork.N)"
++        }
++        Write-Host "Fetching release $tag..."
++        try {
++            $release = Invoke-GitHubApi "https://api.github.com/repos/$Repo/releases/tags/$tag"
++        } catch {
++            throw "Release tag not found in ${Repo}: $tag"
++        }
++        if ($release.draft -or $release.prerelease) {
++            throw "Release $tag is a draft or prerelease; omp update rejects that channel"
++        }
++        return $release
++    }
++
++    Write-Host "Fetching latest fork release..."
++    # Same selection as getLatestForkRelease(): stable releases on the -fork.N
++    # line only. The repo still carries retired -authgw.beta prereleases.
++    $releases = Invoke-GitHubApi "https://api.github.com/repos/$Repo/releases?per_page=20"
++    $best = $null
++    $bestRank = $null
++    foreach ($release in $releases) {
++        if ($release.draft -or $release.prerelease) { continue }
++        $rank = Get-ForkTagRank $release.tag_name
++        if (-not $rank) { continue }
++        if (-not $best -or (Compare-Rank $rank $bestRank) -gt 0) {
++            $best = $release
++            $bestRank = $rank
++        }
++    }
++    if (-not $best) { throw "No stable vX.Y.Z-fork.N release found in $Repo" }
++    return $best
++}
++
++function Get-AssetUrl {
++    param($Release, [string]$Name)
++
++    $asset = $Release.assets | Where-Object { $_.name -eq $Name }
++    if (-not $asset) { throw "Release $($Release.tag_name) has no asset named $Name" }
++    return $asset.browser_download_url
++}
++
++function Get-ExpectedHash {
++    param([string]$ChecksumPath, [string]$Name)
++
++    foreach ($line in Get-Content $ChecksumPath) {
++        # Format: "<sha256>  <filename>"
++        $parts = $line -split '\s+', 2
++        if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $Name) { return $parts[0].Trim() }
++    }
++    throw "$ChecksumName has no entry for $Name"
++}
++
++function Find-BashShell {
++    $gitBash = "C:\Program Files\Git\bin\bash.exe"
++    if (Test-Path $gitBash) { return $gitBash }
++    try {
++        return (Get-Command bash.exe -ErrorAction Stop).Source
++    } catch {
++        return $null
++    }
++}
++
++function Set-BashShellPath {
++    try {
++        $settingsDir = Join-Path $env:USERPROFILE ".omp\agent"
++        $settingsFile = Join-Path $settingsDir "settings.json"
++
++        $settings = @{}
++        if (Test-Path $settingsFile) {
++            try {
++                $parsed = Get-Content $settingsFile -Raw | ConvertFrom-Json
++                foreach ($prop in $parsed.PSObject.Properties) { $settings[$prop.Name] = $prop.Value }
++            } catch {
++                $settings = @{}
++            }
++        }
++        if ($settings["shellPath"]) {
++            Write-Host "Bash shell already configured: $($settings['shellPath'])" -ForegroundColor Cyan
++            return
++        }
++
++        $bashPath = Find-BashShell
++        if (-not $bashPath) {
++            Write-Host "No bash shell found - omp will use its built-in shell." -ForegroundColor Cyan
++            Write-Host "  For shell snapshots and interactive terminals, install Git for Windows:" -ForegroundColor Cyan
++            Write-Host "    https://git-scm.com/download/win" -ForegroundColor Cyan
++            return
++        }
++
++        if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null }
++        $settings["shellPath"] = $bashPath
++        $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
++        Write-Host "[OK] Configured shell path in $settingsFile" -ForegroundColor Green
++    } catch {
++        Write-Host "[WARN] Could not configure bash shell: $_" -ForegroundColor Yellow
++    }
++}
++
++function Install-ForkBinary {
++    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
++        Write-Host "[WARN] ARM64 host: the fork publishes x64 only, running under emulation." -ForegroundColor Yellow
++    }
++
++    $release = Resolve-Release
++    $tag = $release.tag_name
++    Write-Host "Using version: $tag"
++
++    $binaryUrl = Get-AssetUrl $release $BinaryName
++    $checksumUrl = Get-AssetUrl $release $ChecksumName
++
++    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("omp-fork-" + [guid]::NewGuid().ToString("N"))
++    New-Item -ItemType Directory -Force -Path $work | Out-Null
++    try {
++        $downloaded = Join-Path $work $BinaryName
++        $checksums = Join-Path $work $ChecksumName
++
++        # The progress bar makes Invoke-WebRequest crawl on a ~180 MB download in PS 5.1.
++        $previousProgress = $ProgressPreference
++        $ProgressPreference = "SilentlyContinue"
++        try {
++            Write-Host "Downloading $ChecksumName..."
++            Invoke-WebRequest -Uri $checksumUrl -OutFile $checksums -TimeoutSec 120 -UseBasicParsing
++            Write-Host "Downloading $BinaryName..."
++            Invoke-WebRequest -Uri $binaryUrl -OutFile $downloaded -TimeoutSec 900 -UseBasicParsing
++        } finally {
++            $ProgressPreference = $previousProgress
++        }
++
++        $expected = (Get-ExpectedHash $checksums $BinaryName).ToLowerInvariant()
++        $actual = (Get-FileHash -Path $downloaded -Algorithm SHA256).Hash.ToLowerInvariant()
++        if ($expected -ne $actual) {
++            throw "Checksum mismatch for ${BinaryName}: expected $expected, got $actual"
++        }
++        Write-Host "[OK] SHA256 verified: $actual" -ForegroundColor Green
++
++        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
++        $target = Join-Path $InstallDir "omp.exe"
++
++        # Windows refuses to overwrite a running image, but it will rename one.
++        # Move the old binary aside so an upgrade works with omp still open.
++        if (Test-Path $target) {
++            $stale = "$target.old-$(Get-Date -Format yyyyMMddHHmmss)"
++            Move-Item -Path $target -Destination $stale -Force
++            try {
++                Remove-Item -Path $stale -Force -ErrorAction Stop
++            } catch {
++                Write-Host "[WARN] Previous binary still in use, left at $stale" -ForegroundColor Yellow
++            }
++        }
++        Move-Item -Path $downloaded -Destination $target -Force
++        Write-Host "[OK] Installed omp to $target" -ForegroundColor Green
++
++        $reported = (& $target --version 2>&1 | Out-String).Trim()
++        $expectedVersion = $tag.TrimStart("v")
++        if ($reported -notmatch [regex]::Escape($expectedVersion)) {
++            throw "Installed binary reports '$reported', expected $expectedVersion"
++        }
++        Write-Host "[OK] $reported" -ForegroundColor Green
++    } finally {
++        Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
++    }
++
++    $needsRestart = $false
++    if (-not $NoPath) {
++        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
++        $entries = @()
++        if ($userPath) { $entries = $userPath -split ';' | ForEach-Object { $_.TrimEnd('\') } }
++        if ($entries -notcontains $InstallDir.TrimEnd('\')) {
++            Write-Host "Adding $InstallDir to PATH..."
++            $updated = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
++            [Environment]::SetEnvironmentVariable("Path", $updated, "User")
++            $needsRestart = $true
++        }
++    }
++
++    # An upstream install shadowing the fork on PATH is a silent downgrade.
++    $onPath = Get-Command omp -ErrorAction SilentlyContinue
++    if ($onPath -and (Split-Path $onPath.Source -Parent).TrimEnd('\') -ne $InstallDir.TrimEnd('\')) {
++        Write-Host ""
++        Write-Host "[WARN] Another omp is earlier on PATH: $($onPath.Source)" -ForegroundColor Yellow
++        Write-Host "       Remove it, or that one keeps winning over the fork build." -ForegroundColor Yellow
++    }
++
++    Set-BashShellPath
++
++    Write-Host ""
++    if ($needsRestart) {
++        Write-Host "Restart your terminal, then run 'omp' to get started!"
++    } else {
++        Write-Host "Run 'omp' to get started!"
++    }
++}
++
++Install-ForkBinary

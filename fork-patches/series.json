@@ -1,0 +1,213 @@
+{
+	"base": "v18.1.16",
+	"baseCommit": "61b1b8aef634334eaf1412afd003a763e1d1b9c1",
+	"head": "HEAD",
+	"headCommit": "2506f7a92e1eb9082cb2af4b0833a3c79169f006",
+	"generated": "2026-09-17T09:50:52.924Z",
+	"excluded": [
+		"bun.lock",
+		"fork-patches/"
+	],
+	"patches": [
+		{
+			"patch": "0001-fork-release-channel.patch",
+			"topic": "fork-release-channel",
+			"subject": "build(fork): route version, update channel and installers to the fork",
+			"files": [
+				"docs/fork-install.md",
+				"package.json",
+				"packages/ai/test/openai-compat-user-agent.test.ts",
+				"packages/coding-agent/package.json",
+				"packages/coding-agent/src/cli/release-info.ts",
+				"packages/coding-agent/src/cli/update-cli.ts",
+				"packages/coding-agent/test/release-info.test.ts",
+				"packages/coding-agent/test/startup-update-check.test.ts",
+				"packages/coding-agent/test/update-cli.test.ts",
+				"packages/utils/package.json",
+				"scripts/ci-release-publish.test.ts",
+				"scripts/ci-test-ts.test.ts",
+				"scripts/ci-test-ts.ts",
+				"scripts/install-fork.ps1"
+			]
+		},
+		{
+			"patch": "0002-auth-gateway.patch",
+			"topic": "auth-gateway",
+			"subject": "feat(ai): add the auth gateway, access control and admin surfaces",
+			"files": [
+				"docs/auth-broker-gateway.md",
+				"packages/ai/src/auth-broker/remote-store.ts",
+				"packages/ai/src/auth-gateway/access-control.ts",
+				"packages/ai/src/auth-gateway/access-store.ts",
+				"packages/ai/src/auth-gateway/admin-url.ts",
+				"packages/ai/src/auth-gateway/client.test.ts",
+				"packages/ai/src/auth-gateway/client.ts",
+				"packages/ai/src/auth-gateway/http.ts",
+				"packages/ai/src/auth-gateway/index.ts",
+				"packages/ai/src/auth-gateway/management-schemas.ts",
+				"packages/ai/src/auth-gateway/management-types.ts",
+				"packages/ai/src/auth-gateway/management.ts",
+				"packages/ai/src/auth-gateway/server.ts",
+				"packages/ai/src/auth-gateway/types.ts",
+				"packages/ai/src/auth/sqlite-credential-store.ts",
+				"packages/ai/test/auth-broker-remote-store.test.ts",
+				"packages/ai/test/auth-gateway-access-store.test.ts",
+				"packages/ai/test/auth-gateway-admin-client.test.ts",
+				"packages/ai/test/auth-gateway-audit.test.ts",
+				"packages/ai/test/auth-gateway-graceful-shutdown.test.ts",
+				"packages/ai/test/auth-gateway-idle-timeout.test.ts",
+				"packages/ai/test/auth-gateway-integration-helpers.ts",
+				"packages/ai/test/auth-gateway-management.test.ts",
+				"packages/ai/test/auth-gateway-model-list.test.ts",
+				"packages/ai/test/auth-gateway-pools.test.ts",
+				"packages/ai/test/auth-gateway-users.test.ts",
+				"packages/coding-agent/src/auth-gateway/profiles.ts",
+				"packages/coding-agent/src/auth-gateway/run-tui.ts",
+				"packages/coding-agent/src/cli/auth-gateway-cli.ts",
+				"packages/coding-agent/src/commands/auth-gateway.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/account-login.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/console-controller.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/console.test.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/console.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/dialogs.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/flow-dialog.ts",
+				"packages/coding-agent/src/modes/components/auth-gateway/profile-settings.ts",
+				"packages/coding-agent/test/auth-gateway-cli.test.ts",
+				"packages/coding-agent/test/auth-gateway-profile-settings.test.ts",
+				"packages/coding-agent/test/auth-gateway-profiles.test.ts",
+				"packages/coding-agent/test/auth-gateway-tui.test.ts"
+			]
+		},
+		{
+			"patch": "0003-account-selection.patch",
+			"topic": "account-selection",
+			"subject": "feat(ai): pin provider accounts by priority and journal selections",
+			"files": [
+				"packages/ai/src/auth-broker/discover.ts",
+				"packages/ai/src/auth-storage.ts",
+				"packages/ai/test/auth-storage-account-priority.test.ts",
+				"packages/ai/test/auth-storage-api-key-login.test.ts",
+				"packages/ai/test/auth-storage-check-credentials.test.ts",
+				"packages/ai/test/auth-storage-claude-block-healing.test.ts",
+				"packages/ai/test/auth-storage-codex-selection.test.ts",
+				"packages/ai/test/auth-storage-default-account.test.ts",
+				"packages/ai/test/auth-storage-email-dedupe.test.ts",
+				"packages/ai/test/auth-storage-force-refresh-rotate.test.ts",
+				"packages/ai/test/auth-storage-selection-policy.test.ts",
+				"packages/ai/test/discover-default-accounts.test.ts",
+				"packages/coding-agent/src/modes/components/account-manager-selector.ts",
+				"packages/coding-agent/src/modes/components/oauth-authorization-link.ts",
+				"packages/coding-agent/src/modes/components/oauth-selector.ts",
+				"packages/coding-agent/src/session/auth-storage.ts",
+				"packages/coding-agent/src/session/session-advisors.ts",
+				"packages/coding-agent/src/slash-commands/helpers/account-priority.ts",
+				"packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts",
+				"packages/coding-agent/test/modes/components/account-manager-selector.test.ts"
+			]
+		},
+		{
+			"patch": "0004-status-line-account.patch",
+			"topic": "status-line-account",
+			"subject": "feat(coding-agent): show the serving account in the custom status line",
+			"files": [
+				"packages/coding-agent/src/cli/gallery-fixtures/segments.ts",
+				"packages/coding-agent/src/modes/components/status-line/component.ts",
+				"packages/coding-agent/src/modes/components/status-line/segments.ts",
+				"packages/coding-agent/src/modes/components/status-line/types.ts",
+				"packages/coding-agent/src/modes/theme/symbols.ts",
+				"packages/coding-agent/src/modes/theme/theme-class.ts",
+				"packages/coding-agent/test/modes/components/status-line/component.test.ts",
+				"packages/coding-agent/test/status-line-model.test.ts"
+			]
+		},
+		{
+			"patch": "0005-usage-and-stats.patch",
+			"topic": "usage-and-stats",
+			"subject": "feat(stats): extend usage reporting, aggregation and CLI views",
+			"files": [
+				"packages/ai/src/usage/claude.ts",
+				"packages/ai/src/usage/match.test.ts",
+				"packages/ai/src/usage/match.ts",
+				"packages/coding-agent/src/cli/stats-cli.ts",
+				"packages/coding-agent/src/cli/usage-cli.ts",
+				"packages/coding-agent/src/slash-commands/helpers/usage-report.ts",
+				"packages/coding-agent/src/utils/usage-format.ts",
+				"packages/coding-agent/test/modes/controllers/usage-command.test.ts",
+				"packages/coding-agent/test/usage-cli.test.ts",
+				"packages/stats/CHANGELOG.md",
+				"packages/stats/src/aggregator.ts",
+				"packages/stats/src/db.ts",
+				"packages/stats/src/index.ts",
+				"packages/stats/src/parser.ts",
+				"packages/stats/src/sync-worker.ts",
+				"packages/stats/test/parser-large-session.test.ts",
+				"packages/stats/test/priority-premium-requests.test.ts"
+			]
+		},
+		{
+			"patch": "0006-model-config.patch",
+			"topic": "model-config",
+			"subject": "feat(coding-agent): extend model registry, patches and settings schema",
+			"files": [
+				"docs/settings.md",
+				"packages/coding-agent/src/config/custom-models.ts",
+				"packages/coding-agent/src/config/model-config-values.ts",
+				"packages/coding-agent/src/config/model-patch.ts",
+				"packages/coding-agent/src/config/model-registry.ts",
+				"packages/coding-agent/src/config/models-config-schema-bundle.ts",
+				"packages/coding-agent/src/config/settings-schema.ts",
+				"packages/coding-agent/test/model-registry-command-values.test.ts",
+				"packages/coding-agent/test/model-registry.test.ts"
+			]
+		},
+		{
+			"patch": "0007-tui-and-modes.patch",
+			"topic": "tui-and-modes",
+			"subject": "feat(coding-agent): fork TUI controllers, selectors and slash commands",
+			"files": [
+				"packages/coding-agent/src/main.ts",
+				"packages/coding-agent/src/modes/components/settings-selector.ts",
+				"packages/coding-agent/src/modes/controllers/command-controller.ts",
+				"packages/coding-agent/src/modes/controllers/event-controller.ts",
+				"packages/coding-agent/src/modes/controllers/mcp-command-controller.ts",
+				"packages/coding-agent/src/modes/controllers/selector-controller.ts",
+				"packages/coding-agent/src/modes/interactive-mode.ts",
+				"packages/coding-agent/src/modes/types.ts",
+				"packages/coding-agent/src/session/agent-session.ts",
+				"packages/coding-agent/src/slash-commands/builtin-modes.ts",
+				"packages/coding-agent/src/slash-commands/builtin-session.ts",
+				"packages/coding-agent/src/utils/clipboard.ts",
+				"packages/coding-agent/test/acp-builtins.test.ts",
+				"packages/coding-agent/test/builtin-slash-commands.test.ts",
+				"packages/coding-agent/test/event-controller-error-banner.test.ts",
+				"packages/coding-agent/test/modes/components/composer-shape-preview.test.ts",
+				"packages/coding-agent/test/modes/components/settings-multiselect.test.ts",
+				"packages/coding-agent/test/modes/components/settings-selector-memory-refresh.test.ts",
+				"packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts",
+				"packages/tui/CHANGELOG.md",
+				"packages/tui/src/components/input.ts",
+				"packages/tui/test/input.test.ts",
+				"packages/utils/src/dirs.ts",
+				"packages/utils/src/index.ts"
+			]
+		},
+		{
+			"patch": "0008-fork-tooling.patch",
+			"topic": "fork-tooling",
+			"subject": "build(fork): carry the patch-series exporter and its docs",
+			"files": [
+				"docs/fork-patches.md",
+				"scripts/fork-patches.ts"
+			]
+		},
+		{
+			"patch": "0009-changelogs.patch",
+			"topic": "changelogs",
+			"subject": "docs(fork): record fork changelog entries",
+			"files": [
+				"packages/ai/CHANGELOG.md",
+				"packages/coding-agent/CHANGELOG.md"
+			]
+		}
+	]
+}

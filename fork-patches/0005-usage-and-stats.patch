@@ -1,0 +1,3353 @@
+diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
+index a981dd2..2d06901 100644
+--- a/packages/ai/src/usage/claude.ts
++++ b/packages/ai/src/usage/claude.ts
+@@ -827,5 +827,53 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+ 		const kind = getClaudeModelKind(context);
+ 		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
+ 	},
++	healableBlockScopes(report) {
++		// Partial response headers cannot vouch for every quota gating a scope.
++		if (report.metadata?.source === "ratelimit-headers") return [];
++		// Display normalization drops missing counters and clamps negatives.
++		// Neither is evidence of recovery: retain the block on malformed payloads.
++		if (isRecord(report.raw)) {
++			for (const key of ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]) {
++				const bucket = report.raw[key];
++				if (bucket === undefined || bucket === null) continue;
++				const used = isRecord(bucket) ? toNumber(bucket.utilization) : undefined;
++				if (used === undefined || !Number.isFinite(used) || used < 0) return [];
++			}
++			if (report.raw.limits !== undefined && report.raw.limits !== null) {
++				if (!Array.isArray(report.raw.limits)) return [];
++				for (const entry of report.raw.limits) {
++					const used = isRecord(entry) ? toNumber(entry.percent) : undefined;
++					if (used === undefined || !Number.isFinite(used) || used < 0) return [];
++				}
++			}
++		}
++		const shared = report.limits.filter(limit => limit.scope.shared === true);
++		if (!shared.some(limit => limit.id === "anthropic:5h") || !shared.some(limit => limit.id === "anthropic:7d")) {
++			return [];
++		}
++		const isHealthy = (limit: UsageLimit): boolean => {
++			const used = resolveUsedFraction(limit);
++			return (
++				(limit.status === "ok" || limit.status === "warning") &&
++				used !== undefined &&
++				Number.isFinite(used) &&
++				used >= 0 &&
++				used < 1
++			);
++		};
++		if (!shared.every(isHealthy)) return [];
++		const scopes: { blockScope: string; limits: UsageLimit[] }[] = [];
++		// A legacy/global block has no model attribution. Require all reported
++		// quota counters to recover rather than guessing which model caused it.
++		// Extra-usage spend is display-only, just as in model quota gating.
++		const quotaLimits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined);
++		if (quotaLimits.every(isHealthy)) scopes.push({ blockScope: "", limits: quotaLimits });
++		const tiers = new Set(report.limits.map(limit => limit.scope.tier).filter(tier => tier !== undefined));
++		for (const tier of tiers) {
++			const limits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier === tier);
++			if (limits.every(isHealthy)) scopes.push({ blockScope: `tier:${tier}`, limits });
++		}
++		return scopes;
++	},
+ 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
+ };
+diff --git a/packages/ai/src/usage/match.test.ts b/packages/ai/src/usage/match.test.ts
+new file mode 100644
+index 0000000..c8cc54a
+--- /dev/null
++++ b/packages/ai/src/usage/match.test.ts
+@@ -0,0 +1,208 @@
++import { describe, expect, it } from "bun:test";
++import type { Provider } from "../types";
++import type { UsageReport } from "../usage";
++import { matchUsageReportsToIdentities, matchUsageReportToIdentity } from "./match";
++
++const openai = "openai" as Provider;
++const anthropic = "anthropic" as Provider;
++const openaiCodex = "openai-codex" as Provider;
++
++function report(
++	provider: Provider,
++	metadata: Record<string, unknown>,
++	limitScope: UsageReport["limits"][number]["scope"] = { provider },
++): UsageReport {
++	return {
++		provider,
++		fetchedAt: 1,
++		metadata,
++		limits: [
++			{
++				id: "window",
++				label: "Window",
++				scope: limitScope,
++				amount: { used: 1, limit: 10, unit: "requests" },
++			},
++		],
++	};
++}
++
++describe("matchUsageReportToIdentity", () => {
++	it("matches same-provider reports by account id, email, or project id", () => {
++		const reports = [
++			report(openai, { accountId: "acct-a" }),
++			report(openai, { email: "person@example.com" }),
++			report(openai, { project_id: "proj-1" }),
++			report(anthropic, { accountId: "acct-a" }),
++		];
++
++		expect(matchUsageReportToIdentity(reports, { provider: openai, accountId: " ACCT-A " })).toBe(reports[0]);
++		expect(matchUsageReportToIdentity(reports, { provider: openai, email: "PERSON@example.com" })).toBe(reports[1]);
++		expect(matchUsageReportToIdentity(reports, { provider: openai, projectId: "PROJ-1" })).toBe(reports[2]);
++	});
++
++	it("matches account and project ids exposed only on limit scopes", () => {
++		const reports = [
++			report(openai, {}, { provider: openai, accountId: "acct-scope" }),
++			report(openai, {}, { provider: openai, projectId: "proj-scope" }),
++		];
++
++		expect(matchUsageReportToIdentity(reports, { provider: openai, accountId: "acct-scope" })).toBe(reports[0]);
++		expect(matchUsageReportToIdentity(reports, { provider: openai, projectId: "proj-scope" })).toBe(reports[1]);
++	});
++
++	it("prefers account id over a shared email regardless of report order", () => {
++		const reports = [
++			report(openai, { accountId: "acct-b", email: "shared@example.com" }),
++			report(openai, { accountId: "acct-a", email: "other@example.com" }),
++		];
++
++		expect(
++			matchUsageReportToIdentity(reports, {
++				provider: openai,
++				accountId: "acct-a",
++				email: "shared@example.com",
++			}),
++		).toBe(reports[1]);
++	});
++
++	it("matches Anthropic single reports by email despite differing account ids", () => {
++		const reports = [
++			report(anthropic, { accountId: "other-org-id", email: "other@example.com" }),
++			report(anthropic, { accountId: "org-id", email: "person@example.com" }),
++		];
++
++		expect(
++			matchUsageReportToIdentity(reports, {
++				provider: anthropic,
++				accountId: "saved-credential-uuid",
++				email: "person@example.com",
++			}),
++		).toBe(reports[1]);
++	});
++
++	it("prefers canonical email before account id for email-identified providers", () => {
++		for (const provider of [anthropic, openaiCodex]) {
++			const reports = [
++				report(provider, { accountId: "saved-credential-id", email: "wrong@example.com" }),
++				report(provider, { accountId: "provider-org-id", email: "right@example.com" }),
++			];
++
++			expect(
++				matchUsageReportToIdentity(reports, {
++					provider,
++					accountId: "saved-credential-id",
++					email: "right@example.com",
++				}),
++			).toBe(reports[1]);
++		}
++	});
++
++	it("uses organization before canonical email for multi-subscription accounts", () => {
++		const reports = [
++			report(anthropic, { orgId: "org-b", email: "shared@example.com", accountId: "member-b" }),
++			report(anthropic, { orgId: "org-a", email: "shared@example.com", accountId: "member-a" }),
++		];
++
++		expect(
++			matchUsageReportToIdentity(reports, {
++				provider: anthropic,
++				orgId: "org-a",
++				email: "shared@example.com",
++				accountId: "saved-member-a",
++			}),
++		).toBe(reports[1]);
++		expect(
++			matchUsageReportToIdentity(reports, {
++				provider: anthropic,
++				email: "shared@example.com",
++			}),
++		).toBeNull();
++	});
++
++	it("falls back to the lone same-provider report", () => {
++		const reports = [report(anthropic, { accountId: "other" }), report(openai, {})];
++
++		expect(matchUsageReportToIdentity(reports, { provider: openai, accountId: "missing" })).toBe(reports[1]);
++	});
++
++	it("refuses ambiguous provider-only matches", () => {
++		const reports = [report(openai, {}), report(openai, { accountId: "acct-b" })];
++
++		expect(matchUsageReportToIdentity(reports, { provider: openai, accountId: "acct-a" })).toBeNull();
++		expect(matchUsageReportToIdentity(reports, { provider: openai })).toBeNull();
++	});
++});
++
++describe("matchUsageReportsToIdentities", () => {
++	it("does not assign one reported account to every saved same-provider credential", () => {
++		const identities = [
++			{ provider: openai, accountId: "acct-reported" },
++			{ provider: openai, accountId: "acct-unreported" },
++		];
++		const reports = [report(openai, { accountId: "acct-reported" })];
++
++		const matches = matchUsageReportsToIdentities(reports, identities);
++
++		expect(matches.get(identities[0]!)).toBe(reports[0]);
++		expect(matches.has(identities[1]!)).toBe(false);
++	});
++
++	it("matches Anthropic usage by email even when report account id is the org id", () => {
++		const identities = [
++			{ provider: anthropic, accountId: "saved-credential-uuid", email: "person@example.com" },
++			{ provider: anthropic, accountId: "other-saved-credential-uuid", email: "other@example.com" },
++		];
++		const reports = [
++			report(anthropic, { accountId: "org-id", email: "person@example.com" }),
++			report(anthropic, { accountId: "other-org-id", email: "other@example.com" }),
++		];
++
++		const matches = matchUsageReportsToIdentities(reports, identities);
++
++		expect(matches.get(identities[0]!)).toBe(reports[0]);
++		expect(matches.get(identities[1]!)).toBe(reports[1]);
++	});
++
++	it("maps same-email Anthropic accounts to their own organizations", () => {
++		const identities = [
++			{ provider: anthropic, orgId: "org-a", email: "shared@example.com", accountId: "saved-a" },
++			{ provider: anthropic, orgId: "org-b", email: "shared@example.com", accountId: "saved-b" },
++		];
++		const reports = [
++			report(anthropic, { orgId: "org-b", email: "shared@example.com", accountId: "member-b" }),
++			report(anthropic, { orgId: "org-a", email: "shared@example.com", accountId: "member-a" }),
++		];
++
++		const matches = matchUsageReportsToIdentities(reports, identities);
++
++		expect(matches.get(identities[0]!)).toBe(reports[1]);
++		expect(matches.get(identities[1]!)).toBe(reports[0]);
++	});
++
++	it("falls back only when one unclaimed account and one unclaimed report remain for a provider", () => {
++		const identities = [
++			{ provider: openai, accountId: "acct-known" },
++			{ provider: openai, accountId: "acct-unknown" },
++		];
++		const reports = [report(openai, { accountId: "acct-known" }), report(openai, {})];
++
++		const matches = matchUsageReportsToIdentities(reports, identities);
++
++		expect(matches.get(identities[0]!)).toBe(reports[0]);
++		expect(matches.get(identities[1]!)).toBe(reports[1]);
++	});
++
++	it("does not fallback-pair unclaimed account and report with contradictory identities", () => {
++		const identities = [
++			{ provider: openai, accountId: "acct-a" },
++			{ provider: openai, accountId: "acct-b" },
++		];
++		const reports = [report(openai, { accountId: "acct-a" }), report(openai, { accountId: "acct-c" })];
++
++		const matches = matchUsageReportsToIdentities(reports, identities);
++
++		expect(matches.get(identities[0]!)).toBe(reports[0]);
++		expect(matches.has(identities[1]!)).toBe(false);
++	});
++});
+diff --git a/packages/ai/src/usage/match.ts b/packages/ai/src/usage/match.ts
+new file mode 100644
+index 0000000..6d2e036
+--- /dev/null
++++ b/packages/ai/src/usage/match.ts
+@@ -0,0 +1,252 @@
++import type { UsageReport } from "../usage";
++
++const EMAIL_CANONICAL_PROVIDERS: Record<string, true> = { anthropic: true, "openai-codex": true };
++
++export interface UsageReportIdentity {
++	provider: string;
++	accountId?: string | null;
++	email?: string | null;
++	projectId?: string | null;
++	orgId?: string | null;
++}
++
++export interface UsageReportMatchOptions {
++	allowProviderFallback?: boolean;
++}
++
++/**
++ * Match a provider usage report to a specific credential/account identity.
++ *
++ * The aggregate usage endpoint returns one or more reports per provider. A report
++ * may identify the account through metadata or through limit scopes. The single
++ * report helper preserves the broker's historical lone-provider fallback by
++ * default; account-list UIs should use {@link matchUsageReportsToIdentities} so
++ * one reported account is never assigned to several saved rows.
++ */
++export function matchUsageReportToIdentity(
++	reports: readonly UsageReport[],
++	identity: UsageReportIdentity,
++	options: UsageReportMatchOptions = {},
++): UsageReport | null {
++	const candidates = reports.filter(report => report.provider === identity.provider);
++	if (candidates.length === 0) return null;
++	const scoped = scopeUsageReportCandidates(candidates, identity);
++	const exact = matchExactUsageReportCandidate(scoped.candidates, identity);
++	if (exact) return exact;
++	if (options.allowProviderFallback !== false && scoped.allowLoneFallback) return scoped.candidates[0] ?? null;
++	return null;
++}
++
++export function matchUsageReportsToIdentities<T extends UsageReportIdentity>(
++	reports: readonly UsageReport[],
++	identities: readonly T[],
++): Map<T, UsageReport> {
++	const matches = new Map<T, UsageReport>();
++	const claimed = new Set<UsageReport>();
++	for (const identity of identities) {
++		const candidates = reports.filter(report => report.provider === identity.provider && !claimed.has(report));
++		const scoped = scopeUsageReportCandidates(candidates, identity);
++		const match = matchExactUsageReportCandidate(scoped.candidates, identity);
++		if (!match) continue;
++		matches.set(identity, match);
++		claimed.add(match);
++	}
++
++	const providers = new Set([
++		...reports.map(report => report.provider),
++		...identities.map(identity => identity.provider),
++	]);
++	for (const provider of providers) {
++		const remainingReports = reports.filter(report => report.provider === provider && !claimed.has(report));
++		const remainingIdentities = identities.filter(
++			identity => identity.provider === provider && !matches.has(identity),
++		);
++		if (remainingReports.length === 1 && remainingIdentities.length === 1) {
++			const report = remainingReports[0]!;
++			const identity = remainingIdentities[0]!;
++			const orgSafeFallback = matchUsageReportToIdentity([report], identity) === report;
++			const identityHasAttribution =
++				identityHasBaseAttribution(identity) || normalizeIdentity(identity.orgId) !== undefined;
++			if (orgSafeFallback && (!usageReportHasAttribution(report) || !identityHasAttribution)) {
++				matches.set(identity, report);
++				claimed.add(report);
++			}
++		}
++	}
++	return matches;
++}
++
++function scopeUsageReportCandidates(
++	candidates: readonly UsageReport[],
++	identity: UsageReportIdentity,
++): { candidates: readonly UsageReport[]; allowLoneFallback: boolean } {
++	const orgId = normalizeIdentity(identity.orgId);
++	const reportsWithOrg = candidates.filter(report => normalizedReportOrgIds(report).length > 0);
++	if (orgId) {
++		if (reportsWithOrg.length === 0) return { candidates: [], allowLoneFallback: false };
++		const sameOrg = reportsWithOrg.filter(report => normalizedReportOrgIds(report).includes(orgId));
++		return {
++			candidates: sameOrg,
++			allowLoneFallback: sameOrg.length === 1 && !identityHasBaseAttribution(identity),
++		};
++	}
++	const orgless = candidates.filter(report => normalizedReportOrgIds(report).length === 0);
++	return {
++		candidates: orgless,
++		allowLoneFallback: candidates.length === 1 && orgless.length === 1,
++	};
++}
++
++function matchExactUsageReportCandidate(
++	candidates: readonly UsageReport[],
++	identity: UsageReportIdentity,
++): UsageReport | null {
++	const accountId = normalizeIdentity(identity.accountId);
++	const email = normalizeIdentity(identity.email);
++	const projectId = normalizeIdentity(identity.projectId);
++	const emailIsCanonical = identity.provider in EMAIL_CANONICAL_PROVIDERS;
++	if (email && emailIsCanonical) {
++		const match = candidates.find(
++			report => normalizedReportEmails(report).includes(email) && !reportHasProjectConflict(report, projectId),
++		);
++		if (match) return match;
++	}
++	if (accountId) {
++		const match = candidates.find(report => normalizedReportAccountIds(report).includes(accountId));
++		if (match) return match;
++	}
++	if (projectId) {
++		const match = candidates.find(
++			report =>
++				normalizedReportProjectIds(report).includes(projectId) && !reportHasAccountConflict(report, accountId),
++		);
++		if (match) return match;
++	}
++	if (email && !emailIsCanonical) {
++		const match = candidates.find(
++			report =>
++				normalizedReportEmails(report).includes(email) &&
++				!reportHasAccountConflict(report, accountId) &&
++				!reportHasProjectConflict(report, projectId),
++		);
++		if (match) return match;
++	}
++	return null;
++}
++
++export function findMatchingUsageReportIndex(reports: readonly UsageReport[], overlay: UsageReport): number {
++	const metadata = (overlay.metadata ?? {}) as Record<string, unknown>;
++	const match = matchUsageReportToIdentity(reports, {
++		provider: overlay.provider,
++		accountId: readMetadataString(metadata, "accountId"),
++		email: readMetadataString(metadata, "email"),
++		projectId: readMetadataString(metadata, "projectId"),
++		orgId: readMetadataString(metadata, "orgId"),
++	});
++	return match ? reports.indexOf(match) : -1;
++}
++
++/**
++ * Strict membership test: does `report` belong to exactly this identity?
++ *
++ * Unlike {@link matchUsageReportToIdentity} there is no lone-candidate
++ * fallback — organization must line up exactly (both org-scoped and equal, or
++ * both org-less), and any base identifier the identity carries must appear in
++ * the report. Used to filter a broker's aggregate report list down to the rows
++ * one credential owns.
++ */
++export function usageReportMatchesIdentity(report: UsageReport, identity: UsageReportIdentity): boolean {
++	const orgId = normalizeIdentity(identity.orgId);
++	const reportOrgIds = normalizedReportOrgIds(report);
++	if (orgId === undefined ? reportOrgIds.length > 0 : !reportOrgIds.includes(orgId)) return false;
++
++	const accountId = normalizeIdentity(identity.accountId);
++	const email = normalizeIdentity(identity.email);
++	const projectId = normalizeIdentity(identity.projectId);
++	if (accountId === undefined && email === undefined && projectId === undefined) return orgId !== undefined;
++	if (accountId !== undefined && normalizedReportAccountIds(report).includes(accountId)) return true;
++	if (email !== undefined && normalizedReportEmails(report).includes(email)) return true;
++	return projectId !== undefined && normalizedReportProjectIds(report).includes(projectId);
++}
++
++function reportHasAccountConflict(report: UsageReport, accountId: string | undefined): boolean {
++	const accountIds = normalizedReportAccountIds(report);
++	return accountId !== undefined && accountIds.length > 0 && !accountIds.includes(accountId);
++}
++
++function reportHasProjectConflict(report: UsageReport, projectId: string | undefined): boolean {
++	const projectIds = normalizedReportProjectIds(report);
++	return projectId !== undefined && projectIds.length > 0 && !projectIds.includes(projectId);
++}
++
++function normalizedReportOrgIds(report: UsageReport): string[] {
++	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
++	return uniqueDefined([
++		normalizeIdentity(readMetadataString(metadata, "orgId")),
++		normalizeIdentity(readMetadataString(metadata, "org_id")),
++		...report.limits.map(limit => normalizeIdentity(limit.scope.orgId)),
++	]);
++}
++
++function normalizedReportAccountIds(report: UsageReport): string[] {
++	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
++	return uniqueDefined([
++		normalizeIdentity(readMetadataString(metadata, "accountId")),
++		normalizeIdentity(readMetadataString(metadata, "account_id")),
++		...report.limits.map(limit => normalizeIdentity(limit.scope.accountId)),
++	]);
++}
++
++function normalizedReportProjectIds(report: UsageReport): string[] {
++	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
++	return uniqueDefined([
++		normalizeIdentity(readMetadataString(metadata, "projectId")),
++		normalizeIdentity(readMetadataString(metadata, "project_id")),
++		...report.limits.map(limit => normalizeIdentity(limit.scope.projectId)),
++	]);
++}
++
++function normalizedReportEmails(report: UsageReport): string[] {
++	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
++	return uniqueDefined([normalizeIdentity(readMetadataString(metadata, "email"))]);
++}
++
++function uniqueDefined(values: Array<string | undefined>): string[] {
++	return [...new Set(values.filter((value): value is string => value !== undefined))];
++}
++
++function usageReportHasAttribution(report: UsageReport): boolean {
++	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
++	if (readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id")) return true;
++	if (readMetadataString(metadata, "email")) return true;
++	if (readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id")) return true;
++	if (readMetadataString(metadata, "orgId") ?? readMetadataString(metadata, "org_id")) return true;
++	for (const limit of report.limits) {
++		if (
++			normalizeIdentity(limit.scope.accountId) ||
++			normalizeIdentity(limit.scope.projectId) ||
++			normalizeIdentity(limit.scope.orgId)
++		) {
++			return true;
++		}
++	}
++	return false;
++}
++
++function identityHasBaseAttribution(identity: UsageReportIdentity): boolean {
++	return (
++		normalizeIdentity(identity.accountId) !== undefined ||
++		normalizeIdentity(identity.email) !== undefined ||
++		normalizeIdentity(identity.projectId) !== undefined
++	);
++}
++
++function normalizeIdentity(value: string | null | undefined): string | undefined {
++	const trimmed = value?.trim();
++	return trimmed ? trimmed.toLowerCase() : undefined;
++}
++
++function readMetadataString(metadata: Record<string, unknown>, key: string): string | undefined {
++	const value = metadata[key];
++	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
++}
+diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/src/cli/stats-cli.ts
+index 7f99557..ab9c9e6 100644
+--- a/packages/coding-agent/src/cli/stats-cli.ts
++++ b/packages/coding-agent/src/cli/stats-cli.ts
+@@ -5,7 +5,7 @@ /**
+  */
+ 
+ import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
+-import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
++import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { openPath } from "../utils/open";
+ 
+@@ -14,7 +14,13 @@ /**
+  * the final "Synced ..." summary still prints either way.
+  */
+ function createSyncProgressReporter(): {
+-	onProgress: (event: { current: number; total: number; sessionFile: string }) => void;
++	onProgress: (event: {
++		current: number;
++		total: number;
++		sessionFile: string;
++		fileOffset: number;
++		fileBytes: number;
++	}) => void;
+ 	finish: () => void;
+ } {
+ 	const stream = process.stderr;
+@@ -31,7 +37,13 @@ function createSyncProgressReporter(): {
+ 			const label = chalk.dim(shortenSessionFile(event.sessionFile));
+ 			const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
+ 			const counter = chalk.cyan(`[${event.current}/${event.total}]`);
+-			const line = `${counter} ${pct}%  ${label}`;
++			// Multi-gigabyte transcripts are parsed in chunks; show intra-file
++			// movement so a file that takes tens of seconds does not look hung.
++			const bytes =
++				event.fileBytes > 0 && event.fileOffset < event.fileBytes
++					? ` ${formatBytes(event.fileOffset)}/${formatBytes(event.fileBytes)}`
++					: "";
++			const line = `${counter} ${pct}%  ${label}${bytes}`;
+ 			const columns = stream.columns ?? 120;
+ 			const trimmed = truncateToWidth(line, columns - 1);
+ 			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
+diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
+index 99f6b04..a21868d 100644
+--- a/packages/coding-agent/src/cli/usage-cli.ts
++++ b/packages/coding-agent/src/cli/usage-cli.ts
+@@ -7,25 +7,34 @@ /**
+  * credentials produced no usage report are listed too, so the output
+  * always covers the full credential pool.
+  */
+-import {
+-	ANTHROPIC_OAUTH_GRANT_TTL_MS,
+-	type AuthStorage,
+-	type DisabledCredentialSummary,
+-	resolveUsedFraction,
+-	type UsageHistoryEntry,
+-	type UsageLimit,
+-	type UsageReport,
+-	type UsageUnit,
++import type {
++	AuthStorage,
++	DisabledCredentialSummary,
++	OAuthAccountIdentity,
++	UsageHistoryEntry,
++	UsageReport,
+ } from "@oh-my-pi/pi-ai";
+ import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+ import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
+-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
++import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { ModelRegistry } from "../config/model-registry";
+ import { discoverAuthStorage } from "../sdk";
++import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
+ import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+-
+-const BAR_WIDTH = 28;
++import {
++	collectUnreportedAccounts,
++	computeProviderWindowStats,
++	formatProviderName,
++	formatUsageBreakdown,
++	isActionableDisable,
++	type LimitStatus,
++	type ProviderWindowStat,
++	STATUS_COLOR,
++	type UsageAccountIdentity,
++} from "../utils/usage-format";
++
++export * from "../utils/usage-format";
+ 
+ export interface UsageCommandArgs {
+ 	action?: string;
+@@ -34,25 +43,10 @@ export interface UsageCommandArgs {
+ 	redact?: boolean;
+ 	/** Show recorded usage-limit history instead of a live snapshot. */
+ 	history?: boolean;
+-	/** History window in days (with `history` or the `clients` action). */
++	/** History window in days (with `history`). */
+ 	days?: number;
+ }
+ 
+-/** Identity slice of a stored credential, for "every account" coverage. */
+-export interface UsageAccountIdentity {
+-	provider: string;
+-	type: "api_key" | "oauth";
+-	email?: string;
+-	accountId?: string;
+-	projectId?: string;
+-	enterpriseUrl?: string;
+-	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
+-	orgId?: string;
+-	orgName?: string;
+-	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
+-	authorizedAt?: number;
+-}
+-
+ /**
+  * Minimal-reveal masks for identity strings (`--redact`).
+  *
+@@ -172,569 +166,6 @@ ): string[] {
+ 	return values;
+ }
+ 
+-type LimitStatus = NonNullable<UsageLimit["status"]>;
+-
+-function resolveStatus(limit: UsageLimit): LimitStatus {
+-	if (limit.status && limit.status !== "unknown") return limit.status;
+-	const fraction = resolveUsedFraction(limit);
+-	if (fraction === undefined) return "unknown";
+-	if (fraction >= 1) return "exhausted";
+-	if (fraction >= 0.8) return "warning";
+-	return "ok";
+-}
+-
+-const STATUS_COLOR: Record<LimitStatus, (text: string) => string> = {
+-	exhausted: chalk.red,
+-	warning: chalk.yellow,
+-	ok: chalk.green,
+-	unknown: chalk.dim,
+-};
+-
+-/** Worst-of aggregation: exhausted > warning > ok > unknown. */
+-function aggregateStatus(limits: UsageLimit[]): LimitStatus {
+-	const statuses = limits.map(resolveStatus);
+-	if (statuses.includes("exhausted")) return "exhausted";
+-	if (statuses.includes("warning")) return "warning";
+-	if (statuses.includes("ok")) return "ok";
+-	return "unknown";
+-}
+-
+-function formatProviderName(provider: string): string {
+-	return provider
+-		.split(/[-_]/g)
+-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
+-		.join(" ");
+-}
+-
+-function formatUnitValue(value: number, unit: UsageUnit): string {
+-	if (unit === "usd") return `$${value.toFixed(2)}`;
+-	return formatNumber(value);
+-}
+-
+-const UNIT_SUFFIX: Record<UsageUnit, string> = {
+-	tokens: " tokens",
+-	requests: " requests",
+-	credits: " credits",
+-	minutes: " min",
+-	bytes: " bytes",
+-	percent: "",
+-	usd: "",
+-	unknown: "",
+-};
+-
+-function describeAmount(limit: UsageLimit): string {
+-	const amount = limit.amount;
+-	const parts: string[] = [];
+-	const absoluteUnit = amount.unit !== "percent" && amount.unit !== "unknown";
+-	const fraction = resolveUsedFraction(limit);
+-	if (absoluteUnit && amount.used !== undefined && amount.limit !== undefined) {
+-		parts.push(
+-			`${formatUnitValue(amount.used, amount.unit)} / ${formatUnitValue(amount.limit, amount.unit)}${UNIT_SUFFIX[amount.unit]}`,
+-		);
+-	} else if (absoluteUnit && amount.remaining !== undefined) {
+-		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
+-	} else if (
+-		absoluteUnit &&
+-		amount.used !== undefined &&
+-		Number.isFinite(amount.used) &&
+-		amount.limit === undefined &&
+-		amount.remaining === undefined &&
+-		fraction === undefined
+-	) {
+-		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
+-	}
+-	if (fraction !== undefined) {
+-		parts.push(`${(fraction * 100).toFixed(1)}% used`);
+-	} else if (amount.remainingFraction !== undefined) {
+-		parts.push(`${(amount.remainingFraction * 100).toFixed(1)}% left`);
+-	}
+-	if (parts.length === 0) parts.push("no data");
+-	return parts.join(" · ");
+-}
+-
+-function renderBar(limit: UsageLimit): string {
+-	const fraction = resolveUsedFraction(limit);
+-	if (fraction === undefined) return chalk.dim("·".repeat(BAR_WIDTH));
+-	const clamped = Math.min(Math.max(fraction, 0), 1);
+-	const filled = Math.round(clamped * BAR_WIDTH);
+-	const color = STATUS_COLOR[resolveStatus(limit)];
+-	return color("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
+-}
+-
+-/** Append the window label when the limit label doesn't already carry it. */
+-function limitTitle(limit: UsageLimit): string {
+-	let label = limit.label;
+-	const tier = limit.scope.tier;
+-	if (tier && !label.toLowerCase().includes(tier.toLowerCase())) label = `${label} (${tier})`;
+-	const windowLabel = limit.window?.label ?? limit.scope.windowId;
+-	if (!windowLabel) return label;
+-	if (windowLabel.toLowerCase() === "quota window") return label;
+-	if (label.toLowerCase().includes(windowLabel.toLowerCase())) return label;
+-	return `${label} (${windowLabel})`;
+-}
+-
+-function reportAccountLabel(report: UsageReport, index: number): string {
+-	const meta = report.metadata ?? {};
+-	for (const key of ["email", "accountId", "projectId"] as const) {
+-		const value = meta[key];
+-		if (typeof value === "string" && value) return value;
+-	}
+-	for (const limit of report.limits) {
+-		const scoped = limit.scope.accountId ?? limit.scope.projectId;
+-		if (scoped) return scoped;
+-	}
+-	return `account ${index + 1}`;
+-}
+-
+-/** Lowercased identity strings a report can be attributed to. */
+-function reportIdentifiers(report: UsageReport): Set<string> {
+-	const ids = new Set<string>();
+-	const add = (value: unknown): void => {
+-		if (typeof value === "string" && value) ids.add(value.toLowerCase());
+-	};
+-	const meta = report.metadata ?? {};
+-	add(meta.email);
+-	add(meta.accountId);
+-	add(meta.projectId);
+-	add(meta.orgId);
+-	for (const limit of report.limits) {
+-		add(limit.scope.accountId);
+-		add(limit.scope.projectId);
+-		add(limit.scope.orgId);
+-	}
+-	return ids;
+-}
+-
+-/**
+- * Stored credentials that no usage report could be attributed to.
+- *
+- * Conservative on purpose: when a provider's reports carry no identity at
+- * all (or the credential is an API key alongside existing reports), we
+- * can't attribute, so we don't claim the account is missing.
+- */
+-export function collectUnreportedAccounts(
+-	reports: UsageReport[],
+-	accounts: UsageAccountIdentity[],
+-): UsageAccountIdentity[] {
+-	const byProvider = new Map<string, UsageReport[]>();
+-	for (const report of reports) {
+-		const list = byProvider.get(report.provider) ?? [];
+-		list.push(report);
+-		byProvider.set(report.provider, list);
+-	}
+-	return accounts.filter(account => {
+-		const providerReports = byProvider.get(account.provider) ?? [];
+-		if (providerReports.length === 0) return true;
+-		if (account.type === "api_key") return false;
+-		// Org-decisive attribution when EITHER side carries an org (Anthropic
+-		// multi-subscription): two orgs share every other identifier, so an
+-		// org-scoped account is covered only by its own org's report, and an
+-		// org-less legacy account is never covered by an org-attributed sibling
+-		// report — its own fetch failing must surface as "no usage data". Its
+-		// own ORG-LESS report still covers it, though: a mixed pool (fresh
+-		// org-scoped logins beside pre-org-capture rows) must not duplicate
+-		// every legacy account. The shared org is a GATE, not a match: two Team
+-		// members share the org id while drawing on per-user pools, so coverage
+-		// also requires the account's own base identity inside the same-org
+-		// subset (an org-only account, with no base identifiers, is covered by
+-		// any same-org report). The email/account fallback below applies only
+-		// when both sides are org-less.
+-		const accountOrg = account.orgId?.toLowerCase();
+-		const ids = [account.email, account.accountId, account.projectId]
+-			.filter((value): value is string => typeof value === "string" && value.length > 0)
+-			.map(value => value.toLowerCase());
+-		const sameOrgReports: UsageReport[] = [];
+-		let sawReportOrg = false;
+-		for (const report of providerReports) {
+-			const metaOrg = report.metadata?.orgId;
+-			if (typeof metaOrg === "string" && metaOrg) {
+-				sawReportOrg = true;
+-				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
+-			}
+-		}
+-		if (accountOrg || sawReportOrg) {
+-			const candidates = accountOrg
+-				? sameOrgReports
+-				: providerReports.filter(report => {
+-						const metaOrg = report.metadata?.orgId;
+-						return !(typeof metaOrg === "string" && metaOrg);
+-					});
+-			if (candidates.length === 0) return true;
+-			if (ids.length === 0) return false;
+-			return !candidates.some(report => {
+-				const identifiers = reportIdentifiers(report);
+-				return ids.some(id => identifiers.has(id));
+-			});
+-		}
+-		if (ids.length === 0) return false;
+-		const reported = new Set<string>();
+-		let anyIdentified = false;
+-		for (const report of providerReports) {
+-			const identifiers = reportIdentifiers(report);
+-			if (identifiers.size > 0) anyIdentified = true;
+-			for (const id of identifiers) reported.add(id);
+-		}
+-		if (!anyIdentified) return false;
+-		return !ids.some(id => reported.has(id));
+-	});
+-}
+-
+-/** Compose the account label from parts, masking each part individually so `--redact` cannot be bypassed by the composite string. */
+-function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
+-	if (account.type === "api_key") return "API key";
+-	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
+-	const masked = redaction?.get(base) ?? base;
+-	// orgId fallback: the uuid is the actual scoped identity; a token response
+-	// can carry it without a display name, and two same-email rows must still
+-	// be tellable apart.
+-	const org = account.orgName ?? account.orgId;
+-	if (!org || org === base) return masked;
+-	return `${masked} · ${redaction?.get(org) ?? org}`;
+-}
+-
+-function formatAccountHeader(
+-	report: UsageReport,
+-	index: number,
+-	nowMs: number,
+-	redaction?: Map<string, string>,
+-): string {
+-	const status = aggregateStatus(report.limits);
+-	const icon = STATUS_COLOR[status]("●");
+-	const label = reportAccountLabel(report, index);
+-	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
+-	const metaOrgName = report.metadata?.orgName;
+-	const metaOrgId = report.metadata?.orgId;
+-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+-	if (typeof org === "string" && org && org !== label) {
+-		header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+-	}
+-	const planType = report.metadata?.planType;
+-	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
+-	const savedResets = report.resetCredits?.availableCount ?? 0;
+-	if (savedResets > 0) {
+-		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
+-		const credits = report.resetCredits?.credits;
+-		if (credits) {
+-			const expiries = credits
+-				.filter(c => c.expiresAt)
+-				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
+-				.filter(c => !Number.isNaN(c.ms))
+-				.sort((a, b) => a.ms - b.ms);
+-			const upcoming = expiries.find(c => c.ms > nowMs);
+-			if (upcoming) {
+-				header += chalk.dim(
+-					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
+-				);
+-			} else {
+-				const lastExpired = expiries.at(-1);
+-				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
+-			}
+-		}
+-	}
+-	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
+-		header += chalk.dim(` · fetched ${formatDuration(nowMs - report.fetchedAt)} ago`);
+-	}
+-	return header;
+-}
+-
+-function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): string[] {
+-	const status = resolveStatus(limit);
+-	const title = limitTitle(limit);
+-	const padded = title.padEnd(labelWidth);
+-	const details: string[] = [describeAmount(limit)];
+-	const resetsAt = limit.window?.resetsAt;
+-	if (resetsAt !== undefined && resetsAt > nowMs) {
+-		details.push(`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`);
+-	}
+-	const lines = [
+-		`      ${STATUS_COLOR[status]("●")} ${padded}  ${renderBar(limit)}  ${chalk.dim(details.join(" · "))}`,
+-	];
+-	if (limit.notes && limit.notes.length > 0) {
+-		lines.push(`        ${chalk.dim(limit.notes.join(" · "))}`);
+-	}
+-	return lines;
+-}
+-
+-interface ProviderLimitTemplate {
+-	id: string;
+-	title: string;
+-}
+-
+-function collectProviderLimitTemplates(reports: UsageReport[]): ProviderLimitTemplate[] {
+-	const seen = new Set<string>();
+-	const templates: ProviderLimitTemplate[] = [];
+-	for (const report of reports) {
+-		for (const limit of report.limits) {
+-			if (seen.has(limit.id)) continue;
+-			seen.add(limit.id);
+-			templates.push({ id: limit.id, title: limitTitle(limit) });
+-		}
+-	}
+-	return templates;
+-}
+-
+-function formatMissingLimitLine(template: ProviderLimitTemplate, labelWidth: number): string {
+-	const padded = template.title.padEnd(labelWidth);
+-	return `      ${chalk.dim("○")} ${padded}  ${chalk.dim("·".repeat(BAR_WIDTH))}  ${chalk.dim("not reported")}`;
+-}
+-
+-/** Per-window capacity stat: how much account quota is burned and left. */
+-export interface ProviderWindowStat {
+-	/** Compact window label, e.g. "5h", "7d". */
+-	window: string;
+-	durationMs?: number;
+-	/** Meter identity when a provider keeps independent meters in one window. */
+-	meter?: string;
+-	/** Accounts reporting a limit in this window. */
+-	accounts: number;
+-	/** Sum of each account's binding used fraction - accounts' worth of quota burned. */
+-	usedAccounts: number;
+-	/** Accounts' worth of quota still available across reporting accounts. */
+-	remainingAccounts: number;
+-}
+-
+-function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
+-	if (report.provider !== "openai-codex") return undefined;
+-	const tier = limit.scope.tier?.trim().toLowerCase();
+-	if (tier) return tier;
+-	const slug = limit.id.toLowerCase().split(":")[1];
+-	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
+-}
+-
+-/**
+- * Aggregate one provider's reports into per-window quota capacity stats.
+- *
+- * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
+- * account contributes its single highest used fraction. Codex keeps each meter
+- * in its own bucket because chat and Spark can share a window duration.
+- */
+-export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
+-	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
+-	for (const report of reports) {
+-		const accountMax = new Map<string, number>();
+-		for (const limit of report.limits) {
+-			const fraction = resolveUsedFraction(limit);
+-			if (fraction === undefined) continue;
+-			const durationMs = limit.window?.durationMs;
+-			const windowKey =
+-				durationMs !== undefined ? `d:${durationMs}` : (limit.scope.windowId ?? limit.window?.label ?? limit.label);
+-			const meter = meterForLimit(report, limit);
+-			const key = meter === undefined ? windowKey : `m:${meter}\0${windowKey}`;
+-			const previous = accountMax.get(key);
+-			if (previous === undefined || fraction > previous) accountMax.set(key, fraction);
+-			if (!buckets.has(key)) {
+-				const window =
+-					durationMs !== undefined
+-						? formatDuration(durationMs)
+-						: (limit.window?.label ?? limit.scope.windowId ?? limit.label);
+-				buckets.set(key, { window, durationMs, meter, fractions: [] });
+-			}
+-		}
+-		for (const [key, fraction] of accountMax) buckets.get(key)!.fractions.push(fraction);
+-	}
+-	return [...buckets.values()]
+-		.sort((a, b) => {
+-			const duration = (a.durationMs ?? Number.POSITIVE_INFINITY) - (b.durationMs ?? Number.POSITIVE_INFINITY);
+-			return duration !== 0 ? duration : (a.meter ?? "").localeCompare(b.meter ?? "");
+-		})
+-		.map(bucket => {
+-			const usedAccounts = bucket.fractions.reduce((sum, fraction) => sum + fraction, 0);
+-			return {
+-				window: bucket.window,
+-				durationMs: bucket.durationMs,
+-				...(bucket.meter === undefined ? {} : { meter: bucket.meter }),
+-				accounts: bucket.fractions.length,
+-				usedAccounts,
+-				remainingAccounts: Math.max(0, bucket.fractions.length - usedAccounts),
+-			};
+-		});
+-}
+-
+-/** Re-login warnings render once remaining grant life drops below this. */
+-const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+-
+-/**
+- * Re-login deadline line for providers whose OAuth grants expire a fixed
+- * period after the interactive login (today: Anthropic, ~30 days regardless
+- * of refresh rotation). Silent until the deadline is under a week out — a
+- * nudge before the broker auto-disables the row, not a permanent countdown.
+- */
+-function formatReloginDeadline(
+-	account: UsageAccountIdentity,
+-	nowMs: number,
+-	redaction?: Map<string, string>,
+-): string | undefined {
+-	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
+-	const remaining = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS - nowMs;
+-	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
+-	const label = accountIdentityLabel(account, redaction);
+-	if (remaining <= 0) {
+-		return `  ${chalk.red(`⚠ ${label} — grant is past Anthropic's ~30d lifetime; re-login now`)}`;
+-	}
+-	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (Anthropic expires OAuth grants ~30d after login)`)}`;
+-}
+-
+-/**
+- * Tombstones worth a row in `omp usage`: OAuth credentials torn down
+- * automatically (refresh failure, upstream invalidation). Rows the user
+- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+- */
+-function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
+-	if (summary.type !== "oauth") return false;
+-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+-
+-	// Do not display tombstone if there is an active account for the same provider
+-	// matching the same identity (email, accountId, or org).
+-	const summaryEmail = summary.email?.toLowerCase();
+-	const summaryAccountId = summary.accountId?.toLowerCase();
+-	const summaryOrgId = summary.orgId?.toLowerCase();
+-
+-	const matchesActive = activeAccounts.some(account => {
+-		if (account.provider !== summary.provider) return false;
+-
+-		const accountEmail = account.email?.toLowerCase();
+-		const accountAccountId = account.accountId?.toLowerCase();
+-		const accountOrgId = account.orgId?.toLowerCase();
+-
+-		// If email or accountId match, it's the same identity
+-		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
+-		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
+-
+-		// Fallback: if orgId matches and neither email nor accountId contradicts
+-		if (summaryOrgId && accountOrgId && summaryOrgId === accountOrgId) return true;
+-
+-		return false;
+-	});
+-
+-	return !matchesActive;
+-}
+-
+-/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
+-function shortDisableCause(cause: string): string {
+-	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
+-	if (description) return description;
+-	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
+-	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
+-	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
+-}
+-
+-/** Label for a disabled tombstone, masking each identity part under `--redact`. */
+-function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
+-	const base = summary.email ?? summary.accountId ?? "OAuth account";
+-	const masked = redaction?.get(base) ?? base;
+-	const org = summary.orgName ?? summary.orgId;
+-	if (!org || org === base) return masked;
+-	return `${masked} · ${redaction?.get(org) ?? org}`;
+-}
+-
+-/**
+- * Render the full text breakdown: per provider, per account, every limit
+- * with a bar, amounts, and reset times; unattributed credentials trail
+- * each provider section as "no usage data" rows.
+- */
+-export function formatUsageBreakdown(
+-	reports: UsageReport[],
+-	accounts: UsageAccountIdentity[],
+-	nowMs: number,
+-	redaction?: Map<string, string>,
+-	disabled: DisabledCredentialSummary[] = [],
+-): string {
+-	const reportsByProvider = new Map<string, UsageReport[]>();
+-	for (const report of reports) {
+-		const list = reportsByProvider.get(report.provider) ?? [];
+-		list.push(report);
+-		reportsByProvider.set(report.provider, list);
+-	}
+-	const unreported = collectUnreportedAccounts(reports, accounts);
+-	const unreportedByProvider = new Map<string, UsageAccountIdentity[]>();
+-	for (const account of unreported) {
+-		const list = unreportedByProvider.get(account.provider) ?? [];
+-		list.push(account);
+-		unreportedByProvider.set(account.provider, list);
+-	}
+-	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
+-	for (const summary of disabled) {
+-		if (!isActionableDisable(summary, accounts)) continue;
+-		const list = disabledByProvider.get(summary.provider) ?? [];
+-		list.push(summary);
+-		disabledByProvider.set(summary.provider, list);
+-	}
+-
+-	const providers = [
+-		...new Set([...reportsByProvider.keys(), ...unreportedByProvider.keys(), ...disabledByProvider.keys()]),
+-	].sort((a, b) => a.localeCompare(b));
+-
+-	const lines: string[] = [];
+-	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
+-	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
+-	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
+-
+-	for (const provider of providers) {
+-		const providerReports = reportsByProvider.get(provider) ?? [];
+-		const providerUnreported = unreportedByProvider.get(provider) ?? [];
+-		const accountCount = providerReports.length + providerUnreported.length;
+-		lines.push("");
+-		lines.push(
+-			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}`,
+-		);
+-		// Provider-wide disclaimers render once per provider, not per limit.
+-		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+-		for (const note of providerNotes)
+-			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
+-
+-		const providerLimitTemplates = collectProviderLimitTemplates(providerReports);
+-		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
+-
+-		providerReports.forEach((report, index) => {
+-			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+-			if (report.limits.length === 0) {
+-				lines.push(`      ${chalk.dim("no limits reported")}`);
+-				return;
+-			}
+-			const limitsById = new Map<string, UsageLimit>();
+-			for (const limit of report.limits) limitsById.set(limit.id, limit);
+-			for (const template of providerLimitTemplates) {
+-				const limit = limitsById.get(template.id);
+-				if (limit) {
+-					lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+-				} else {
+-					lines.push(formatMissingLimitLine(template, labelWidth));
+-				}
+-			}
+-		});
+-
+-		for (const account of providerUnreported) {
+-			const label = accountIdentityLabel(account, redaction);
+-			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
+-		}
+-
+-		for (const summary of disabledByProvider.get(provider) ?? []) {
+-			const label = disabledIdentityLabel(summary, redaction);
+-			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
+-			lines.push(
+-				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+-			);
+-		}
+-
+-		for (const account of accounts) {
+-			if (account.provider !== provider) continue;
+-			const warning = formatReloginDeadline(account, nowMs, redaction);
+-			if (warning) lines.push(warning);
+-		}
+-
+-		const stats = computeProviderWindowStats(providerReports);
+-		if (stats.length > 0) {
+-			const parts = stats.map(stat => {
+-				const meterLabel = stat.meter ? ` (${stat.meter.charAt(0).toUpperCase()}${stat.meter.slice(1)})` : "";
+-				return `${stat.window}${meterLabel} → ${stat.usedAccounts.toFixed(2)}/${stat.accounts} ${stat.accounts === 1 ? "account" : "accounts"} used (${stat.remainingAccounts.toFixed(2)}× quota left)`;
+-			});
+-			lines.push(`  ${chalk.dim(`capacity: ${parts.join(" · ")}`)}`);
+-		}
+-	}
+-
+-	return lines.join("\n");
+-}
+-
+ const HISTORY_SPARK_WIDTH = 48;
+ const SPARK_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
+ 
+@@ -1198,7 +629,28 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			return;
+ 		}
+ 
+-		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
++		const defaultAccountLabels = new Map<string, string>();
++		for (const provider of new Set([
++			...filteredReports.map(report => report.provider),
++			...accounts.map(account => account.provider),
++		])) {
++			const identity = authStorage.getDefaultAccountIdentity(provider);
++			if (!identity) continue;
++			const maskedIdentity: OAuthAccountIdentity = redaction
++				? {
++						email: maskIdentity(redaction, identity.email),
++						accountId: maskIdentity(redaction, identity.accountId),
++						projectId: maskIdentity(redaction, identity.projectId),
++						orgId: maskIdentity(redaction, identity.orgId),
++						orgName: maskIdentity(redaction, identity.orgName),
++					}
++				: identity;
++			const label = formatActiveAccountLabel(maskedIdentity);
++			if (label) defaultAccountLabels.set(provider, label);
++		}
++		process.stdout.write(
++			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, defaultAccountLabels)}\n`,
++		);
+ 	} finally {
+ 		authStorage.close();
+ 	}
+diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
+index c01e225..36ad1da 100644
+--- a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
++++ b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
+@@ -2,7 +2,7 @@ import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+ import { sanitizeText } from "@oh-my-pi/pi-utils";
+ import type { OAuthAccountIdentity } from "../../session/auth-storage";
+ import type { SlashCommandRuntime } from "../types";
+-import { reportMatchesActiveAccount } from "./active-oauth-account";
++import { formatActiveAccountLabel, reportMatchesActiveAccount } from "./active-oauth-account";
+ import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
+ 
+ function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
+@@ -56,6 +56,7 @@ function renderUsageReports(
+ 	reports: UsageReport[],
+ 	nowMs: number,
+ 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
++	resolveDefaultAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+ 	usageModelSelectors: readonly string[] = [],
+ ): string {
+ 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
+@@ -77,6 +78,10 @@ ): string {
+ 			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
+ 		}
+ 		const activeAccount = resolveActiveAccount?.(provider);
++		const defaultAccountLabel = formatActiveAccountLabel(resolveDefaultAccount?.(provider));
++		if (defaultAccountLabel && defaultAccountLabel !== formatActiveAccountLabel(activeAccount)) {
++			lines.push(`  default account: ${defaultAccountLabel}`);
++		}
+ 		// Provider-wide disclaimers render once per provider, not per limit.
+ 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+ 		for (const note of providerNotes)
+@@ -170,6 +175,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+ 				reports,
+ 				Date.now(),
+ 				providerId => (providerId === currentProvider ? activeAccount : undefined),
++				providerId => runtime.session.modelRegistry.authStorage.getDefaultAccountIdentity(providerId),
+ 				usageModelSelectors,
+ 			);
+ 		}
+diff --git a/packages/coding-agent/src/utils/usage-format.ts b/packages/coding-agent/src/utils/usage-format.ts
+new file mode 100644
+index 0000000..4260b98
+--- /dev/null
++++ b/packages/coding-agent/src/utils/usage-format.ts
+@@ -0,0 +1,609 @@
++import { ANTHROPIC_OAUTH_GRANT_TTL_MS, type DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
++import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
++import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
++import chalk from "@oh-my-pi/pi-utils/chalk";
++
++const BAR_WIDTH = 28;
++
++function sanitizeUsageText(value: string): string {
++	return sanitizeText(value.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "));
++}
++
++/** Identity slice of a stored credential, for "every account" coverage. */
++export interface UsageAccountIdentity {
++	provider: string;
++	type: "api_key" | "oauth";
++	email?: string;
++	accountId?: string;
++	projectId?: string;
++	enterpriseUrl?: string;
++	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
++	orgId?: string;
++	orgName?: string;
++	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
++	authorizedAt?: number;
++}
++
++export type LimitStatus = NonNullable<UsageLimit["status"]>;
++
++function resolveStatus(limit: UsageLimit): LimitStatus {
++	if (limit.status && limit.status !== "unknown") return limit.status;
++	const fraction = resolveUsedFraction(limit);
++	if (fraction === undefined) return "unknown";
++	if (fraction >= 1) return "exhausted";
++	if (fraction >= 0.8) return "warning";
++	return "ok";
++}
++
++export const STATUS_COLOR: Record<LimitStatus, (text: string) => string> = {
++	exhausted: chalk.red,
++	warning: chalk.yellow,
++	ok: chalk.green,
++	unknown: chalk.dim,
++};
++
++/** Worst-of aggregation: exhausted > warning > ok > unknown. */
++function aggregateStatus(limits: UsageLimit[]): LimitStatus {
++	const statuses = limits.map(resolveStatus);
++	if (statuses.includes("exhausted")) return "exhausted";
++	if (statuses.includes("warning")) return "warning";
++	if (statuses.includes("ok")) return "ok";
++	return "unknown";
++}
++
++export function formatProviderName(provider: string): string {
++	return sanitizeUsageText(
++		provider
++			.split(/[-_]/g)
++			.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
++			.join(" "),
++	);
++}
++
++function formatUnitValue(value: number, unit: UsageUnit): string {
++	if (unit === "usd") return `$${value.toFixed(2)}`;
++	return formatNumber(value);
++}
++
++const UNIT_SUFFIX: Record<UsageUnit, string> = {
++	tokens: " tokens",
++	requests: " requests",
++	credits: " credits",
++	minutes: " min",
++	bytes: " bytes",
++	percent: "",
++	usd: "",
++	unknown: "",
++};
++
++function describeAmount(limit: UsageLimit): string {
++	const amount = limit.amount;
++	const parts: string[] = [];
++	const absoluteUnit = amount.unit !== "percent" && amount.unit !== "unknown";
++	const fraction = resolveUsedFraction(limit);
++	if (absoluteUnit && amount.used !== undefined && amount.limit !== undefined) {
++		parts.push(
++			`${formatUnitValue(amount.used, amount.unit)} / ${formatUnitValue(amount.limit, amount.unit)}${UNIT_SUFFIX[amount.unit]}`,
++		);
++	} else if (absoluteUnit && amount.remaining !== undefined) {
++		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
++	} else if (
++		absoluteUnit &&
++		amount.used !== undefined &&
++		Number.isFinite(amount.used) &&
++		amount.limit === undefined &&
++		amount.remaining === undefined &&
++		fraction === undefined
++	) {
++		parts.push(`${formatUnitValue(amount.used, amount.unit)}${UNIT_SUFFIX[amount.unit]} used`);
++	}
++	if (fraction !== undefined) {
++		parts.push(`${(fraction * 100).toFixed(1)}% used`);
++	} else if (amount.remainingFraction !== undefined) {
++		parts.push(`${(amount.remainingFraction * 100).toFixed(1)}% left`);
++	}
++	if (parts.length === 0) parts.push("no data");
++	return parts.join(" · ");
++}
++
++function renderBar(limit: UsageLimit): string {
++	const fraction = resolveUsedFraction(limit);
++	if (fraction === undefined) return chalk.dim("·".repeat(BAR_WIDTH));
++	const clamped = Math.min(Math.max(fraction, 0), 1);
++	const filled = Math.round(clamped * BAR_WIDTH);
++	const color = STATUS_COLOR[resolveStatus(limit)];
++	return color("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
++}
++
++/** Append the window label when the limit label doesn't already carry it. */
++function limitTitle(limit: UsageLimit): string {
++	let label = limit.label;
++	const tier = limit.scope.tier;
++	if (tier && !label.toLowerCase().includes(tier.toLowerCase())) label = `${label} (${tier})`;
++	const windowLabel = limit.window?.label ?? limit.scope.windowId;
++	if (!windowLabel) return label;
++	if (windowLabel.toLowerCase() === "quota window") return label;
++	if (label.toLowerCase().includes(windowLabel.toLowerCase())) return label;
++	return `${label} (${windowLabel})`;
++}
++
++function reportAccountLabel(report: UsageReport, index: number): string {
++	const meta = report.metadata ?? {};
++	for (const key of ["email", "accountId", "projectId"] as const) {
++		const value = meta[key];
++		if (typeof value === "string" && value) return value;
++	}
++	for (const limit of report.limits) {
++		const scoped = limit.scope.accountId ?? limit.scope.projectId;
++		if (scoped) return scoped;
++	}
++	return `account ${index + 1}`;
++}
++
++/** Lowercased identity strings a report can be attributed to. */
++function reportIdentifiers(report: UsageReport): Set<string> {
++	const ids = new Set<string>();
++	const add = (value: unknown): void => {
++		if (typeof value === "string" && value) ids.add(value.toLowerCase());
++	};
++	const meta = report.metadata ?? {};
++	add(meta.email);
++	add(meta.accountId);
++	add(meta.projectId);
++	add(meta.orgId);
++	for (const limit of report.limits) {
++		add(limit.scope.accountId);
++		add(limit.scope.projectId);
++		add(limit.scope.orgId);
++	}
++	return ids;
++}
++
++/**
++ * Stored credentials that no usage report could be attributed to.
++ *
++ * Conservative on purpose: when a provider's reports carry no identity at
++ * all (or the credential is an API key alongside existing reports), we
++ * can't attribute, so we don't claim the account is missing.
++ */
++export function collectUnreportedAccounts(
++	reports: UsageReport[],
++	accounts: UsageAccountIdentity[],
++): UsageAccountIdentity[] {
++	const byProvider = new Map<string, UsageReport[]>();
++	for (const report of reports) {
++		const list = byProvider.get(report.provider) ?? [];
++		list.push(report);
++		byProvider.set(report.provider, list);
++	}
++	return accounts.filter(account => {
++		const providerReports = byProvider.get(account.provider) ?? [];
++		if (providerReports.length === 0) return true;
++		if (account.type === "api_key") return false;
++		const accountOrg = account.orgId?.toLowerCase();
++		const ids = [account.email, account.accountId, account.projectId]
++			.filter((value): value is string => typeof value === "string" && value.length > 0)
++			.map(value => value.toLowerCase());
++		const sameOrgReports: UsageReport[] = [];
++		let sawReportOrg = false;
++		for (const report of providerReports) {
++			const metaOrg = report.metadata?.orgId;
++			if (typeof metaOrg === "string" && metaOrg) {
++				sawReportOrg = true;
++				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
++			}
++		}
++		if (accountOrg || sawReportOrg) {
++			const candidates = accountOrg
++				? sameOrgReports
++				: providerReports.filter(report => {
++						const metaOrg = report.metadata?.orgId;
++						return !(typeof metaOrg === "string" && metaOrg);
++					});
++			if (candidates.length === 0) return true;
++			if (ids.length === 0) return false;
++			return !candidates.some(report => {
++				const identifiers = reportIdentifiers(report);
++				return ids.some(id => identifiers.has(id));
++			});
++		}
++		if (ids.length === 0) return false;
++		const reported = new Set<string>();
++		let anyIdentified = false;
++		for (const report of providerReports) {
++			const identifiers = reportIdentifiers(report);
++			if (identifiers.size > 0) anyIdentified = true;
++			for (const id of identifiers) reported.add(id);
++		}
++		if (!anyIdentified) return false;
++		return !ids.some(id => reported.has(id));
++	});
++}
++
++function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
++	if (account.type === "api_key") return "API key";
++	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
++	const masked = redaction?.get(base) ?? sanitizeUsageText(base);
++	const org = account.orgName ?? account.orgId;
++	if (!org || org === base) return masked;
++	return `${masked} · ${redaction?.get(org) ?? sanitizeUsageText(org)}`;
++}
++
++function formatAccountHeader(
++	report: UsageReport,
++	index: number,
++	nowMs: number,
++	redaction?: Map<string, string>,
++): string {
++	const status = aggregateStatus(report.limits);
++	const icon = STATUS_COLOR[status]("●");
++	const rawLabel = reportAccountLabel(report, index);
++	const label = redaction?.get(rawLabel) ?? sanitizeUsageText(rawLabel);
++	let header = `${icon} ${chalk.bold(label)}`;
++	const metaOrgName = report.metadata?.orgName;
++	const metaOrgId = report.metadata?.orgId;
++	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
++	if (typeof org === "string" && org && org !== rawLabel) {
++		header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
++	}
++	const planType = report.metadata?.planType;
++	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
++	const savedResets = report.resetCredits?.availableCount ?? 0;
++	if (savedResets > 0) {
++		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
++		const credits = report.resetCredits?.credits;
++		if (credits) {
++			const expiries = credits
++				.filter(c => c.expiresAt)
++				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
++				.filter(c => !Number.isNaN(c.ms))
++				.sort((a, b) => a.ms - b.ms);
++			const upcoming = expiries.find(c => c.ms > nowMs);
++			if (upcoming) {
++				header += chalk.dim(
++					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
++				);
++			} else {
++				const lastExpired = expiries.at(-1);
++				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
++			}
++		}
++	}
++	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
++		header += chalk.dim(` · fetched ${formatDuration(nowMs - report.fetchedAt)} ago`);
++	}
++	return header;
++}
++
++function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): string[] {
++	const status = resolveStatus(limit);
++	const title = sanitizeUsageText(limitTitle(limit));
++	const padded = title.padEnd(labelWidth);
++	const details: string[] = [describeAmount(limit)];
++	const resetsAt = limit.window?.resetsAt;
++	if (resetsAt !== undefined && resetsAt > nowMs) {
++		details.push(`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`);
++	}
++	const lines = [
++		`      ${STATUS_COLOR[status]("●")} ${padded}  ${renderBar(limit)}  ${chalk.dim(details.join(" · "))}`,
++	];
++	if (limit.notes && limit.notes.length > 0) {
++		lines.push(`        ${chalk.dim(limit.notes.map(sanitizeUsageText).join(" · "))}`);
++	}
++	return lines;
++}
++
++interface ProviderLimitTemplate {
++	id: string;
++	title: string;
++}
++
++function collectProviderLimitTemplates(reports: UsageReport[]): ProviderLimitTemplate[] {
++	const seen = new Set<string>();
++	const templates: ProviderLimitTemplate[] = [];
++	for (const report of reports) {
++		for (const limit of report.limits) {
++			if (seen.has(limit.id)) continue;
++			seen.add(limit.id);
++			templates.push({ id: limit.id, title: sanitizeUsageText(limitTitle(limit)) });
++		}
++	}
++	return templates;
++}
++
++function formatMissingLimitLine(template: ProviderLimitTemplate, labelWidth: number): string {
++	const padded = template.title.padEnd(labelWidth);
++	return `      ${chalk.dim("○")} ${padded}  ${chalk.dim("·".repeat(BAR_WIDTH))}  ${chalk.dim("not reported")}`;
++}
++
++export interface FormatUsageReportLinesOptions {
++	reports?: UsageReport[];
++	index?: number;
++	nowMs?: number;
++	redaction?: Map<string, string>;
++	includeNotes?: boolean;
++}
++
++export function formatUsageReportLines(report: UsageReport, options: FormatUsageReportLinesOptions = {}): string[] {
++	const nowMs = options.nowMs ?? Date.now();
++	const providerReports = options.reports ?? [report];
++	const templates = collectProviderLimitTemplates(providerReports);
++	const labelWidth = templates.reduce((max, template) => Math.max(max, template.title.length), 0);
++	const lines: string[] = [];
++	if (options.includeNotes !== false) {
++		for (const note of report.notes ?? []) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
++	}
++	lines.push(`  ${formatAccountHeader(report, options.index ?? 0, nowMs, options.redaction)}`);
++	if (report.limits.length === 0) {
++		lines.push(`      ${chalk.dim("no limits reported")}`);
++		return lines;
++	}
++	const limitsById = new Map<string, UsageLimit>();
++	for (const limit of report.limits) limitsById.set(limit.id, limit);
++	for (const template of templates) {
++		const limit = limitsById.get(template.id);
++		if (limit) {
++			lines.push(...formatLimitLine(limit, labelWidth, nowMs));
++		} else {
++			lines.push(formatMissingLimitLine(template, labelWidth));
++		}
++	}
++	return lines;
++}
++
++/** Per-window capacity stat: how much account quota is burned and left. */
++export interface ProviderWindowStat {
++	/** Compact window label, e.g. "5h", "7d". */
++	window: string;
++	durationMs?: number;
++	/** Meter identity when a provider keeps independent meters in one window. */
++	meter?: string;
++	/** Accounts reporting a limit in this window. */
++	accounts: number;
++	/** Sum of each account's binding used fraction - accounts' worth of quota burned. */
++	usedAccounts: number;
++	/** Accounts' worth of quota still available across reporting accounts. */
++	remainingAccounts: number;
++}
++
++function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
++	if (report.provider !== "openai-codex") return undefined;
++	const tier = limit.scope.tier?.trim().toLowerCase();
++	if (tier) return tier;
++	const slug = limit.id.toLowerCase().split(":")[1];
++	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
++}
++
++/**
++ * Aggregate one provider's reports into per-window quota capacity stats.
++ *
++ * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
++ * account contributes its single highest used fraction. Codex keeps each meter
++ * in its own bucket because chat and Spark can share a window duration.
++ */
++export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
++	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
++	for (const report of reports) {
++		const accountMax = new Map<string, number>();
++		for (const limit of report.limits) {
++			const fraction = resolveUsedFraction(limit);
++			if (fraction === undefined) continue;
++			const durationMs = limit.window?.durationMs;
++			const windowKey =
++				durationMs !== undefined ? `d:${durationMs}` : (limit.scope.windowId ?? limit.window?.label ?? limit.label);
++			const meter = meterForLimit(report, limit);
++			const key = meter === undefined ? windowKey : `m:${meter}\0${windowKey}`;
++			const previous = accountMax.get(key);
++			if (previous === undefined || fraction > previous) accountMax.set(key, fraction);
++			if (!buckets.has(key)) {
++				const window =
++					durationMs !== undefined
++						? formatDuration(durationMs)
++						: (limit.window?.label ?? limit.scope.windowId ?? limit.label);
++				buckets.set(key, { window, durationMs, meter, fractions: [] });
++			}
++		}
++		for (const [key, fraction] of accountMax) buckets.get(key)!.fractions.push(fraction);
++	}
++	return [...buckets.values()]
++		.sort((a, b) => {
++			const duration = (a.durationMs ?? Number.POSITIVE_INFINITY) - (b.durationMs ?? Number.POSITIVE_INFINITY);
++			return duration !== 0 ? duration : (a.meter ?? "").localeCompare(b.meter ?? "");
++		})
++		.map(bucket => {
++			const usedAccounts = bucket.fractions.reduce((sum, fraction) => sum + fraction, 0);
++			return {
++				window: bucket.window,
++				durationMs: bucket.durationMs,
++				...(bucket.meter === undefined ? {} : { meter: bucket.meter }),
++				accounts: bucket.fractions.length,
++				usedAccounts,
++				remainingAccounts: Math.max(0, bucket.fractions.length - usedAccounts),
++			};
++		});
++}
++
++/** Re-login warnings render once remaining grant life drops below this. */
++const RELOGIN_WARN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
++
++/**
++ * Re-login deadline line for providers whose OAuth grants expire a fixed
++ * period after the interactive login (today: Anthropic, ~30 days regardless
++ * of refresh rotation). Silent until the deadline is under a week out — a
++ * nudge before the broker auto-disables the row, not a permanent countdown.
++ */
++function formatReloginDeadline(
++	account: UsageAccountIdentity,
++	nowMs: number,
++	redaction?: Map<string, string>,
++): string | undefined {
++	if (account.provider !== "anthropic" || account.type !== "oauth" || !account.authorizedAt) return undefined;
++	const remaining = account.authorizedAt + ANTHROPIC_OAUTH_GRANT_TTL_MS - nowMs;
++	if (remaining > RELOGIN_WARN_WINDOW_MS) return undefined;
++	const label = accountIdentityLabel(account, redaction);
++	if (remaining <= 0) {
++		return `  ${chalk.red(`⚠ ${label} — grant is past Anthropic's ~30d lifetime; re-login now`)}`;
++	}
++	return `  ${chalk.yellow(`⚠ ${label} — re-login within ${formatDuration(remaining)} (Anthropic expires OAuth grants ~30d after login)`)}`;
++}
++
++/**
++ * Tombstones worth a row in `omp usage`: OAuth credentials torn down
++ * automatically (refresh failure, upstream invalidation). Rows the user
++ * replaced or deleted deliberately are lifecycle noise, not lost capacity.
++ */
++export function isActionableDisable(
++	summary: DisabledCredentialSummary,
++	activeAccounts: UsageAccountIdentity[] = [],
++): boolean {
++	if (summary.type !== "oauth") return false;
++	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
++
++	// Hide the tombstone only when a live credential for the same provider IS the
++	// same identity — a re-login the broker recorded as a new row. Matching email
++	// or accountId proves that; a shared organization alone does not, since two
++	// Team members share `orgId` while drawing on separate pools, and hiding a
++	// disabled teammate behind an active sibling is exactly the lost capacity
++	// these rows exist to surface. So the org-only fallback applies just when no
++	// base identifier contradicts it.
++	const summaryEmail = summary.email?.toLowerCase();
++	const summaryAccountId = summary.accountId?.toLowerCase();
++	const summaryOrgId = summary.orgId?.toLowerCase();
++
++	const matchesActive = activeAccounts.some(account => {
++		if (account.provider !== summary.provider) return false;
++
++		const accountEmail = account.email?.toLowerCase();
++		const accountAccountId = account.accountId?.toLowerCase();
++		const accountOrgId = account.orgId?.toLowerCase();
++
++		if (summaryEmail && accountEmail && summaryEmail === accountEmail) return true;
++		if (summaryAccountId && accountAccountId && summaryAccountId === accountAccountId) return true;
++
++		if (summaryEmail && accountEmail) return false;
++		if (summaryAccountId && accountAccountId) return false;
++
++		return Boolean(summaryOrgId && accountOrgId && summaryOrgId === accountOrgId);
++	});
++
++	return !matchesActive;
++}
++
++/** Human-sized disable cause: the upstream `error_description` when embedded, else the first clause. */
++function shortDisableCause(cause: string): string {
++	const description = cause.match(/\\?"error_description\\?"\s*:\s*\\?"([^"\\]+)/)?.[1];
++	if (description) return description;
++	const stripped = cause.replace(/^oauth refresh failed:\s*/i, "");
++	const clause = stripped.split(/[;\n]/, 1)[0] ?? stripped;
++	return clause.length > 80 ? `${clause.slice(0, 77)}…` : clause;
++}
++
++/** Label for a disabled tombstone, masking each identity part under `--redact`. */
++function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: Map<string, string>): string {
++	const base = summary.email ?? summary.accountId ?? "OAuth account";
++	const masked = redaction?.get(base) ?? base;
++	const org = summary.orgName ?? summary.orgId;
++	if (!org || org === base) return masked;
++	return `${masked} · ${redaction?.get(org) ?? org}`;
++}
++
++/**
++ * Render the full text breakdown: per provider, per account, every limit
++ * with a bar, amounts, and reset times; unattributed credentials trail
++ * each provider section as "no usage data" rows.
++ */
++export function formatUsageBreakdown(
++	reports: UsageReport[],
++	accounts: UsageAccountIdentity[],
++	nowMs: number,
++	redaction?: Map<string, string>,
++	disabled: DisabledCredentialSummary[] = [],
++	defaultAccounts?: ReadonlyMap<string, string>,
++): string {
++	const reportsByProvider = new Map<string, UsageReport[]>();
++	for (const report of reports) {
++		const list = reportsByProvider.get(report.provider) ?? [];
++		list.push(report);
++		reportsByProvider.set(report.provider, list);
++	}
++	const unreported = collectUnreportedAccounts(reports, accounts);
++	const unreportedByProvider = new Map<string, UsageAccountIdentity[]>();
++	for (const account of unreported) {
++		const list = unreportedByProvider.get(account.provider) ?? [];
++		list.push(account);
++		unreportedByProvider.set(account.provider, list);
++	}
++	const disabledByProvider = new Map<string, DisabledCredentialSummary[]>();
++	for (const summary of disabled) {
++		if (!isActionableDisable(summary, accounts)) continue;
++		const list = disabledByProvider.get(summary.provider) ?? [];
++		list.push(summary);
++		disabledByProvider.set(summary.provider, list);
++	}
++
++	const providers = [
++		...new Set([...reportsByProvider.keys(), ...unreportedByProvider.keys(), ...disabledByProvider.keys()]),
++	].sort((a, b) => a.localeCompare(b));
++
++	const lines: string[] = [];
++	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
++	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
++	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
++
++	for (const provider of providers) {
++		const providerReports = reportsByProvider.get(provider) ?? [];
++		const providerUnreported = unreportedByProvider.get(provider) ?? [];
++		const accountCount = providerReports.length + providerUnreported.length;
++		lines.push("");
++		lines.push(
++			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}`,
++		);
++		const defaultAccountLabel = defaultAccounts?.get(provider);
++		if (defaultAccountLabel) lines.push(`  ${chalk.dim(`default account: ${defaultAccountLabel}`)}`);
++		// Provider-wide disclaimers render once per provider, not per limit.
++		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
++		for (const note of providerNotes) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
++
++		providerReports.forEach((report, index) => {
++			lines.push(
++				...formatUsageReportLines(report, {
++					reports: providerReports,
++					index,
++					nowMs,
++					redaction,
++					includeNotes: false,
++				}),
++			);
++		});
++
++		for (const account of providerUnreported) {
++			const label = accountIdentityLabel(account, redaction);
++			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
++		}
++
++		for (const summary of disabledByProvider.get(provider) ?? []) {
++			const label = disabledIdentityLabel(summary, redaction);
++			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
++			lines.push(
++				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeText(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
++			);
++		}
++
++		for (const account of accounts) {
++			if (account.provider !== provider) continue;
++			const warning = formatReloginDeadline(account, nowMs, redaction);
++			if (warning) lines.push(warning);
++		}
++
++		const stats = computeProviderWindowStats(providerReports);
++		if (stats.length > 0) {
++			const parts = stats.map(stat => {
++				const meterLabel = stat.meter ? ` (${stat.meter.charAt(0).toUpperCase()}${stat.meter.slice(1)})` : "";
++				return `${stat.window}${meterLabel} → ${stat.usedAccounts.toFixed(2)}/${stat.accounts} ${stat.accounts === 1 ? "account" : "accounts"} used (${stat.remainingAccounts.toFixed(2)}× quota left)`;
++			});
++			lines.push(`  ${chalk.dim(`capacity: ${parts.join(" · ")}`)}`);
++		}
++	}
++
++	return lines.join("\n");
++}
+diff --git a/packages/coding-agent/test/modes/controllers/usage-command.test.ts b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
+index d8b068a..865b01e 100644
+--- a/packages/coding-agent/test/modes/controllers/usage-command.test.ts
++++ b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
+@@ -1,10 +1,27 @@
+-import { beforeAll, describe, expect, it } from "bun:test";
++import { beforeAll, describe, expect, it, vi } from "bun:test";
+ import { stripVTControlCharacters } from "node:util";
+ import type { UsageReport } from "@oh-my-pi/pi-ai";
+-import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
++import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+ import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
++import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+ 
+-describe("renderUsageReports content", () => {
++interface RenderableBlock {
++	render(width: number): string[];
++}
++
++function isRenderableBlock(value: unknown): value is RenderableBlock {
++	return value !== null && typeof value === "object" && "render" in value && typeof value.render === "function";
++}
++
++function renderPresentedBlocks(value: unknown): string {
++	const blocks = Array.isArray(value) ? value : [value];
++	return blocks
++		.filter(isRenderableBlock)
++		.flatMap(block => block.render(120))
++		.join("\n");
++}
++
++describe("CommandController /usage", () => {
+ 	beforeAll(async () => {
+ 		const darkTheme = await getThemeByName("dark");
+ 		if (!darkTheme) throw new Error("Expected dark theme");
+@@ -95,4 +112,489 @@ describe("renderUsageReports content", () => {
+ 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
+ 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
+ 	});
++
++	it("falls back to auth-gateway user usage when provider reports are empty", async () => {
++		const present = vi.fn();
++		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(
++				JSON.stringify({
++					usage: {
++						userId: 3,
++						since: 0,
++						generatedAt: 1_700_000_000_000,
++						totals: {
++							requests: 3,
++							inputTokens: 24_804,
++							outputTokens: 102,
++							cacheReadTokens: 0,
++							cacheWriteTokens: 40_434,
++							totalTokens: 65_340,
++							costUsd: 0.227159,
++						},
++						byProviderModel: [
++							{
++								provider: "openai-codex",
++								model: "gpt-5.6-sol",
++								requests: 2,
++								totalTokens: 24_854,
++								costUsd: 0.12557,
++							},
++						],
++					},
++					principal: {
++						kind: "managed",
++						userId: 3,
++						name: "alice",
++						role: "user",
++						tokenId: 11,
++					},
++				}),
++				{ status: 200, headers: { "Content-Type": "application/json" } },
++			),
++		);
++		const getApiKey = vi.fn().mockResolvedValue("managed-token");
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "gpt-5.6-sol",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				fetchUsageReports: vi.fn().mockResolvedValue([]),
++				modelRegistry: {
++					authStorage: { getApiKey },
++				},
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
++				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
++			});
++			expect(present).toHaveBeenCalledTimes(1);
++			const firstCall = present.mock.calls[0];
++			expect(firstCall).toBeDefined();
++			const output = renderPresentedBlocks(firstCall?.[0]);
++			expect(output).toContain("Gateway Usage");
++			expect(output).toContain("User: alice (user #3)");
++			expect(output).toContain("Requests: 3");
++			expect(output).toContain("65,340 tokens");
++			expect(output).toContain("openai-codex/gpt-5.6-sol");
++			expect(ctx.showWarning).not.toHaveBeenCalled();
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
++
++	it("renders legacy auth-gateway usage totals when principal metadata is omitted", async () => {
++		const present = vi.fn();
++		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(
++				JSON.stringify({
++					usage: {
++						userId: 3,
++						since: 0,
++						generatedAt: 1700000000000,
++						totals: {
++							requests: 10,
++							inputTokens: 200000,
++							outputTokens: 35000,
++							cacheReadTokens: 5000,
++							cacheWriteTokens: 336,
++							totalTokens: 240336,
++							costUsd: 0.7162528,
++						},
++						byProviderModel: [
++							{
++								provider: "anthropic",
++								model: "claude-sonnet-5",
++								requests: 2,
++								totalTokens: 12345,
++								costUsd: 0.12,
++							},
++						],
++					},
++				}),
++				{ status: 200, headers: { "Content-Type": "application/json" } },
++			),
++		);
++		const getApiKey = vi.fn().mockResolvedValue("managed-token");
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "anthropic/claude-sonnet-5",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				fetchUsageReports: vi.fn().mockResolvedValue([]),
++				modelRegistry: { authStorage: { getApiKey } },
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
++				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
++			});
++			expect(present).toHaveBeenCalledTimes(1);
++			const firstCall = present.mock.calls[0];
++			expect(firstCall).toBeDefined();
++			const output = renderPresentedBlocks(firstCall?.[0]);
++			expect(output).toContain("Gateway Usage");
++			expect(output).toContain("Requests: 10");
++			expect(output).toContain("240,336 tokens");
++			expect(output).toContain("$0.72");
++			expect(output).toContain("anthropic/claude-sonnet-5");
++			expect(output).toContain("User ID: #3");
++			expect(ctx.showWarning).not.toHaveBeenCalled();
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
++
++	it("enriches legacy auth-gateway usage totals with a matching admin-status principal", async () => {
++		const present = vi.fn();
++		const usageResponse = {
++			usage: {
++				userId: 3,
++				since: 0,
++				generatedAt: 1700000000000,
++				totals: {
++					requests: 1,
++					inputTokens: 10,
++					outputTokens: 20,
++					cacheReadTokens: 0,
++					cacheWriteTokens: 0,
++					totalTokens: 30,
++					costUsd: 0.01,
++				},
++				byProviderModel: [],
++			},
++		};
++		const fetchSpy = vi
++			.spyOn(globalThis, "fetch")
++			.mockResolvedValueOnce(new Response(JSON.stringify(usageResponse), { status: 200 }))
++			.mockResolvedValueOnce(
++				new Response(
++					JSON.stringify({
++						status: {
++							ok: true,
++							version: "test",
++							serverTime: 1700000000001,
++							principal: { kind: "managed", userId: 3, name: "alice", role: "admin", tokenId: 9 },
++							counts: { users: 1, activeTokens: 1, credentials: 0, pools: 0 },
++						},
++					}),
++					{ status: 200 },
++				),
++			);
++		const getApiKey = vi.fn().mockResolvedValue("managed-token");
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "anthropic/claude-sonnet-5",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				fetchUsageReports: vi.fn().mockResolvedValue([]),
++				modelRegistry: { authStorage: { getApiKey } },
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/admin/status", {
++				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
++			});
++			const firstCall = present.mock.calls[0];
++			expect(firstCall).toBeDefined();
++			const output = renderPresentedBlocks(firstCall?.[0]);
++			expect(output).toContain("User: alice (admin #3)");
++			expect(output).not.toContain("User ID: #3");
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
++
++	it("does not enrich legacy usage totals with a mismatched admin-status principal", async () => {
++		const present = vi.fn();
++		const usageResponse = {
++			usage: {
++				userId: 3,
++				since: 0,
++				generatedAt: 1700000000000,
++				totals: {
++					requests: 1,
++					inputTokens: 10,
++					outputTokens: 20,
++					cacheReadTokens: 0,
++					cacheWriteTokens: 0,
++					totalTokens: 30,
++					costUsd: 0.01,
++				},
++				byProviderModel: [],
++			},
++		};
++		const fetchSpy = vi
++			.spyOn(globalThis, "fetch")
++			.mockResolvedValueOnce(new Response(JSON.stringify(usageResponse), { status: 200 }))
++			.mockResolvedValueOnce(
++				new Response(
++					JSON.stringify({
++						status: {
++							ok: true,
++							version: "test",
++							serverTime: 1700000000001,
++							principal: { kind: "managed", userId: 4, name: "bob", role: "admin", tokenId: 9 },
++							counts: { users: 2, activeTokens: 2, credentials: 0, pools: 0 },
++						},
++					}),
++					{ status: 200 },
++				),
++			);
++		const getApiKey = vi.fn().mockResolvedValue("managed-token");
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "anthropic/claude-sonnet-5",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				fetchUsageReports: vi.fn().mockResolvedValue([]),
++				modelRegistry: { authStorage: { getApiKey } },
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			const firstCall = present.mock.calls[0];
++			expect(firstCall).toBeDefined();
++			const output = renderPresentedBlocks(firstCall?.[0]);
++			expect(output).toContain("User ID: #3");
++			expect(output).not.toContain("bob");
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
++
++	it("renders auth-gateway self usage alongside connected-account reports", async () => {
++		const present = vi.fn();
++		const showUsageDashboard = vi.fn();
++		const fetchedAt = Date.now();
++		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(
++				JSON.stringify({
++					usage: {
++						userId: 3,
++						since: 0,
++						generatedAt: fetchedAt,
++						totals: {
++							requests: 3,
++							inputTokens: 24_804,
++							outputTokens: 102,
++							cacheReadTokens: 0,
++							cacheWriteTokens: 40_434,
++							totalTokens: 65_340,
++							costUsd: 0.227159,
++						},
++						byProviderModel: [
++							{
++								provider: "openai-codex",
++								model: "gpt-5.6-sol",
++								requests: 2,
++								totalTokens: 24_854,
++								costUsd: 0.12557,
++							},
++						],
++					},
++					principal: {
++						kind: "managed",
++						userId: 3,
++						name: "alice",
++						role: "user",
++						tokenId: 11,
++					},
++				}),
++				{ status: 200, headers: { "Content-Type": "application/json" } },
++			),
++		);
++		const getApiKey = vi.fn().mockResolvedValue("managed-token");
++		const getOAuthAccountIdentity = vi.fn();
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "gpt-5.6-sol",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				getUsageReportingModelSelectors: () => [],
++				fetchUsageReports: vi.fn().mockResolvedValue([
++					{
++						provider: "openai-codex",
++						fetchedAt,
++						limits: [
++							{
++								id: "codex-weekly",
++								label: "Weekly",
++								scope: { provider: "openai-codex", accountId: "acct-1" },
++								window: { id: "weekly", label: "weekly" },
++								amount: { used: 75, limit: 100, unit: "requests" },
++								status: "ok",
++							},
++						],
++						metadata: { email: "connected@example.com" },
++					},
++				] satisfies UsageReport[]),
++				modelRegistry: {
++					authStorage: { getApiKey, getOAuthAccountIdentity, getDefaultAccountIdentity: vi.fn() },
++				},
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showUsageDashboard,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
++				headers: { Accept: "application/json", Authorization: "Bearer managed-token" },
++			});
++			expect(showUsageDashboard).toHaveBeenCalledTimes(1);
++			const [reportsArg, userArg, summaryArg] = showUsageDashboard.mock.calls[0] as [
++				UsageReport[],
++				string | undefined,
++				string | undefined,
++			];
++			expect(reportsArg).toHaveLength(1);
++			expect(reportsArg[0]).toMatchObject({
++				provider: "openai-codex",
++				metadata: { email: "connected@example.com" },
++			});
++			expect(userArg).toBeUndefined();
++			expect(summaryArg).toContain("Gateway Usage");
++			expect(summaryArg).toContain("User: alice (user #3)");
++			expect(summaryArg).toContain("Requests: 3");
++			expect(summaryArg).toContain("65,340 tokens");
++			expect(summaryArg).toContain("openai-codex/gpt-5.6-sol");
++			expect(ctx.showWarning).not.toHaveBeenCalled();
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
++
++	it("renders auth-gateway provider reports when the gateway token is admin-scoped", async () => {
++		const present = vi.fn();
++		const showUsageDashboard = vi.fn();
++		const fetchedAt = Date.now();
++		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
++			new Response(
++				JSON.stringify({
++					generatedAt: fetchedAt,
++					principal: { kind: "managed", userId: 3, name: "alice", role: "admin", tokenId: 9 },
++					reports: [
++						{
++							provider: "openai-codex",
++							fetchedAt,
++							limits: [
++								{
++									id: "codex-weekly",
++									label: "Weekly",
++									scope: { provider: "openai-codex", accountId: "acct-1" },
++									window: { id: "weekly", label: "weekly" },
++									amount: { used: 75, limit: 100, unit: "requests" },
++									status: "ok",
++								},
++							],
++							metadata: { email: "admin@example.com" },
++						},
++					],
++				}),
++				{ status: 200, headers: { "Content-Type": "application/json" } },
++			),
++		);
++		const getApiKey = vi.fn().mockResolvedValue("admin-token");
++		const getOAuthAccountIdentity = vi.fn();
++		const ctx = {
++			session: {
++				model: {
++					provider: "xllm-gateway",
++					id: "openai-codex/gpt-5.5",
++					baseUrl: "http://127.0.0.1:4000",
++					transport: "pi-native",
++				},
++				sessionId: "session-1",
++				getUsageReportingModelSelectors: () => [],
++				fetchUsageReports: vi.fn().mockResolvedValue([]),
++				modelRegistry: {
++					authStorage: { getApiKey, getOAuthAccountIdentity, getDefaultAccountIdentity: vi.fn() },
++				},
++			},
++			ui: { terminal: { columns: 100 } },
++			present,
++			presentCommandOutput: present,
++			showUsageDashboard,
++			showWarning: vi.fn(),
++			showError: vi.fn(),
++		} as unknown as InteractiveModeContext;
++		const controller = new CommandController(ctx);
++		try {
++			await controller.handleUsageCommand();
++
++			expect(fetchSpy).toHaveBeenCalledWith("http://127.0.0.1:4000/v1/usage", {
++				headers: { Accept: "application/json", Authorization: "Bearer admin-token" },
++			});
++			expect(showUsageDashboard).toHaveBeenCalledTimes(1);
++			const [reportsArg, userArg, summaryArg] = showUsageDashboard.mock.calls[0] as [
++				UsageReport[],
++				string | undefined,
++				string | undefined,
++			];
++			expect(reportsArg).toHaveLength(1);
++			expect(reportsArg[0]).toMatchObject({ provider: "openai-codex", metadata: { email: "admin@example.com" } });
++			expect(userArg).toBe("User: alice (admin #3)");
++			expect(summaryArg).toBeUndefined();
++			expect(ctx.showWarning).not.toHaveBeenCalled();
++		} finally {
++			fetchSpy.mockRestore();
++		}
++	});
+ });
+diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
+index 25d065c..74d4a9e 100644
+--- a/packages/coding-agent/test/usage-cli.test.ts
++++ b/packages/coding-agent/test/usage-cli.test.ts
+@@ -458,6 +458,33 @@ describe("formatUsageBreakdown", () => {
+ 		expect(text).toContain("✗ truly-dead@example.test — disabled");
+ 	});
+ 
++	it("keeps a disabled teammate's tombstone when an active sibling only shares the organization", () => {
++		const activeAccounts: UsageAccountIdentity[] = [
++			{
++				provider: "anthropic",
++				type: "oauth",
++				email: "teammate-a@example.test",
++				accountId: "acct-a",
++				orgId: "org-shared",
++			},
++		];
++		const disabled = [
++			{
++				id: 40,
++				provider: "anthropic",
++				type: "oauth" as const,
++				email: "teammate-b@example.test",
++				accountId: "acct-b",
++				orgId: "org-shared",
++				cause: "oauth refresh failed: Refresh token expired",
++			},
++		];
++		// Two Team seats share `orgId` but draw on separate pools, so the active
++		// sibling must not hide the dead seat's lost capacity.
++		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, Date.now(), undefined, disabled));
++		expect(text).toContain("✗ teammate-b@example.test · org-shared — disabled");
++	});
++
+ 	it("renders a tombstone-only provider section even when no active credential remains", () => {
+ 		const disabled = [
+ 			{
+diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
+index 607cc28..c825ccd 100644
+--- a/packages/stats/CHANGELOG.md
++++ b/packages/stats/CHANGELOG.md
+@@ -2,6 +2,13 @@ # Changelog
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- Fixed `omp stats` aborting the whole sync with `ENOMEM: not enough memory, read` on multi-gigabyte session transcripts. Session files are now parsed through a bounded positional scanner in 256 MiB chunks instead of being slurped whole, each chunk commits its offset so an interrupted sync resumes instead of restarting, the active service tier is persisted alongside the offset (`file_offsets.service_tier`) so resumed parses keep crediting priority requests without replaying the prefix, and a single unreadable transcript is now skipped with a warning rather than killing the run. `getSessionEntry` uses the same scanner, so the dashboard's request-details route no longer reads an entire transcript into memory.
++
++### Changed
++
++- Sync progress events now carry `fileOffset`/`fileBytes`, and the progress bar shows intra-file byte progress while a large transcript is being ingested.
+ ## [18.1.3] - 2026-09-02
+ 
+ ### Changed
+diff --git a/packages/stats/src/aggregator.ts b/packages/stats/src/aggregator.ts
+index 203c48f..ae0ba50 100644
+--- a/packages/stats/src/aggregator.ts
++++ b/packages/stats/src/aggregator.ts
+@@ -1,6 +1,7 @@
+ import * as fs from "node:fs";
+ import * as path from "node:path";
+-import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
++import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
++import { getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
+ import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+ import {
+ 	getRecentErrors as dbGetRecentErrors,
+@@ -79,12 +80,13 @@ function applyParseResult(sessionFile: string, lastModified: number, result: ParseSessionResult): number {
+ 	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
+ 	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+ 	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
+-	setFileOffset(sessionFile, result.newOffset, lastModified);
++	setFileOffset(sessionFile, result.newOffset, lastModified, result.serviceTier);
+ 	return result.stats.length + result.userStats.length;
+ }
+ 
+ /**
+- * Progress event emitted after each session file is fully processed.
++ * Progress event emitted after each session file is fully processed, and after
++ * each committed chunk of a file large enough to be parsed in several passes.
+  * `current` is the number of files completed (skipped + parsed),
+  * `total` is the size of the work set. `processed` is the running total
+  * of inserted rows.
+@@ -94,6 +96,10 @@ export interface SyncProgress {
+ 	total: number;
+ 	processed: number;
+ 	sessionFile: string;
++	/** Bytes of `sessionFile` committed so far; equals `fileBytes` once the file completes. */
++	fileOffset: number;
++	/** Size of `sessionFile` observed when this file started; 0 when it could not be stat'd. */
++	fileBytes: number;
+ }
+ 
+ export interface SyncOptions {
+@@ -256,48 +262,90 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
+ 	};
+ 	if (files.length === 0) return finish();
+ 
+-	const report = (sessionFile: string) => {
++	const report = (sessionFile: string, fileBytes: number) => {
+ 		completed++;
+ 		opts?.onProgress?.({
+ 			current: completed,
+ 			total: files.length,
+ 			processed: totalProcessed,
+ 			sessionFile,
++			fileOffset: fileBytes,
++			fileBytes,
++		});
++	};
++
++	// Intra-file movement: emitted between chunks of a multi-gigabyte
++	// transcript so the bar does not look frozen. Does not advance `completed`.
++	const reportChunk = (sessionFile: string, fileOffset: number, fileBytes: number) => {
++		opts?.onProgress?.({
++			current: completed,
++			total: files.length,
++			processed: totalProcessed,
++			sessionFile,
++			fileOffset,
++			fileBytes,
+ 		});
+ 	};
+ 
+ 	const processFile = async (
+ 		sessionFile: string,
+-		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
++		parse: (
++			sessionFile: string,
++			fromOffset: number,
++			serviceTier: ServiceTierByFamily | null | undefined,
++		) => Promise<ParseSessionResult>,
+ 	): Promise<void> => {
+ 		let fileStats: fs.Stats;
+ 		try {
+ 			fileStats = await fs.promises.stat(sessionFile);
+ 		} catch {
+-			report(sessionFile);
++			report(sessionFile, 0);
+ 			return;
+ 		}
+ 		const lastModified = fileStats.mtimeMs;
+ 		const stored = getFileOffset(sessionFile);
+ 		if (stored && stored.lastModified >= lastModified) {
+-			report(sessionFile);
++			report(sessionFile, fileStats.size);
+ 			return;
+ 		}
+ 
+-		const fromOffset = stored?.offset ?? 0;
+-		const result = await parse(sessionFile, fromOffset);
+-		const inserted = applyParseResult(sessionFile, lastModified, result);
+-		if (inserted > 0) {
+-			totalProcessed += inserted;
+-			filesProcessed++;
++		try {
++			let offset = stored?.offset ?? 0;
++			let tier: ServiceTierByFamily | null | undefined = stored ? stored.serviceTier : null;
++			let countedFile = false;
++			while (true) {
++				const result = await parse(sessionFile, offset, tier);
++				// Intermediate chunks store mtime 0 so an interrupted sync resumes from
++				// the committed offset instead of being skipped by the mtime guard above.
++				const inserted = applyParseResult(sessionFile, result.done ? lastModified : 0, result);
++				if (inserted > 0) {
++					totalProcessed += inserted;
++					countedFile = true;
++				}
++				const advanced = result.newOffset > offset;
++				offset = result.newOffset;
++				tier = result.serviceTier;
++				if (result.done) break;
++				if (!advanced) {
++					logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset });
++					break;
++				}
++				reportChunk(sessionFile, offset, fileStats.size);
++			}
++			if (countedFile) filesProcessed++;
++		} catch (err) {
++			// One unreadable or corrupt transcript must not abort the whole sync.
++			logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
+ 		}
+-		report(sessionFile);
++		report(sessionFile, fileStats.size);
+ 	};
+ 
+ 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
+ 	if (requestedWorkers === 1) {
+ 		for (const sessionFile of files) {
+-			await processFile(sessionFile, parseSessionFile);
++			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
++				parseSessionFile(file, { fromOffset, serviceTier }),
++			);
+ 		}
+ 		return finish();
+ 	}
+@@ -312,7 +360,9 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
+ 			const idx = cursor++;
+ 			if (idx >= files.length) return;
+ 			const sessionFile = files[idx];
+-			await processFile(sessionFile, (file, fromOffset) => dispatch(handle, { sessionFile: file, fromOffset }));
++			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
++				dispatch(handle, { sessionFile: file, fromOffset, serviceTier }),
++			);
+ 		}
+ 	}
+ 
+diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
+index 60ea696..95dd1b3 100644
+--- a/packages/stats/src/db.ts
++++ b/packages/stats/src/db.ts
+@@ -1,6 +1,6 @@
+ import { Database } from "bun:sqlite";
+ import * as fs from "node:fs/promises";
+-import type { Usage } from "@oh-my-pi/pi-ai";
++import type { ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+ import {
+ 	calculateUncachedInputCost,
+ 	calculateUsageCost,
+@@ -192,7 +192,8 @@ export async function initDb(): Promise<Database> {
+ 		CREATE TABLE IF NOT EXISTS file_offsets (
+ 			session_file TEXT PRIMARY KEY,
+ 			offset INTEGER NOT NULL,
+-			last_modified INTEGER NOT NULL
++			last_modified INTEGER NOT NULL,
++			service_tier TEXT
+ 		);
+ 
+ 		CREATE TABLE IF NOT EXISTS user_messages (
+@@ -244,6 +245,15 @@ export async function initDb(): Promise<Database> {
+ 		);
+ 	`);
+ 
++	// Service tier active at `offset`, so an incremental sync of a huge
++	// transcript does not have to replay the prefix to recover it. Rows written
++	// before this column exists stay SQL NULL, which `getFileOffset` reports as
++	// "unknown" (one prefix replay) rather than "no tier active".
++	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
++	if (!offsetColumns.some(column => column.name === "service_tier")) {
++		db.run("ALTER TABLE file_offsets ADD COLUMN service_tier TEXT");
++	}
++
+ 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+ 	if (!messageColumns.some(column => column.name === "premium_requests")) {
+ 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+@@ -483,27 +493,52 @@ function backfillNoCacheInputCosts(database: Database): void {
+ 
+ /**
+  * Get the stored offset for a session file.
++ *
++ * `serviceTier` is three-state: `undefined` means unknown (a row that predates
++ * tier persistence, or unparseable JSON) and makes the parser replay the
++ * prefix once to recover the tier; `null` is a recorded absence of any active
++ * tier; an object is the recorded tier at `offset`.
+  */
+-export function getFileOffset(sessionFile: string): { offset: number; lastModified: number } | null {
++export function getFileOffset(
++	sessionFile: string,
++): { offset: number; lastModified: number; serviceTier: ServiceTierByFamily | null | undefined } | null {
+ 	if (!db) return null;
+ 
+-	const stmt = db.prepare("SELECT offset, last_modified FROM file_offsets WHERE session_file = ?");
+-	const row = stmt.get(sessionFile) as { offset: number; last_modified: number } | undefined;
+-
+-	return row ? { offset: row.offset, lastModified: row.last_modified } : null;
++	const stmt = db.prepare("SELECT offset, last_modified, service_tier FROM file_offsets WHERE session_file = ?");
++	const row = stmt.get(sessionFile) as
++		| { offset: number; last_modified: number; service_tier: string | null }
++		| undefined;
++	if (!row) return null;
++
++	let serviceTier: ServiceTierByFamily | null | undefined;
++	if (row.service_tier !== null) {
++		try {
++			serviceTier = JSON.parse(row.service_tier) as ServiceTierByFamily | null;
++		} catch {
++			serviceTier = undefined;
++		}
++	}
++	return { offset: row.offset, lastModified: row.last_modified, serviceTier };
+ }
+ 
+ /**
+- * Update the stored offset for a session file.
++ * Update the stored offset for a session file. A `null` tier is persisted as
++ * the JSON literal `'null'`, which is what distinguishes a recorded absence
++ * from a legacy SQL `NULL`.
+  */
+-export function setFileOffset(sessionFile: string, offset: number, lastModified: number): void {
++export function setFileOffset(
++	sessionFile: string,
++	offset: number,
++	lastModified: number,
++	serviceTier: ServiceTierByFamily | null,
++): void {
+ 	if (!db) return;
+ 
+ 	const stmt = db.prepare(`
+-		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified)
+-		VALUES (?, ?, ?)
++		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified, service_tier)
++		VALUES (?, ?, ?, ?)
+ 	`);
+-	stmt.run(sessionFile, offset, lastModified);
++	stmt.run(sessionFile, offset, lastModified, JSON.stringify(serviceTier));
+ }
+ 
+ /**
+diff --git a/packages/stats/src/index.ts b/packages/stats/src/index.ts
+index f47c0e8..8e72854 100755
+--- a/packages/stats/src/index.ts
++++ b/packages/stats/src/index.ts
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env bun
+ 
+ import { parseArgs } from "node:util";
+-import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
++import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+ import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
+ import { closeDb } from "./db";
+ import { formatStatsDashboardUrl, startServer } from "./server";
+@@ -168,7 +168,11 @@ `);
+ 				const idx = event.sessionFile.indexOf(marker);
+ 				const short = idx >= 0 ? event.sessionFile.slice(idx + marker.length) : event.sessionFile;
+ 				const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
+-				const line = `[${event.current}/${event.total}] ${pct}%  ${short}`;
++				const bytes =
++					event.fileBytes > 0 && event.fileOffset < event.fileBytes
++						? ` ${formatBytes(event.fileOffset)}/${formatBytes(event.fileBytes)}`
++						: "";
++				const line = `[${event.current}/${event.total}] ${pct}%  ${short}${bytes}`;
+ 				const columns = process.stderr.columns ?? 120;
+ 				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
+ 				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
+diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
+index 54fd352..497129d 100644
+--- a/packages/stats/src/parser.ts
++++ b/packages/stats/src/parser.ts
+@@ -11,7 +11,7 @@ import {
+ 	type Usage,
+ } from "@oh-my-pi/pi-ai";
+ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
++import { getSessionsDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+ import type {
+ 	AgentType,
+ 	MessageStats,
+@@ -342,72 +342,162 @@ const LF = 0x0a;
+ const CR = 0x0d;
+ const jsonLineDecoder = new TextDecoder();
+ 
+-function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEntry | null {
+-	while (end > start && bytes[end - 1] === CR) end--;
+-	if (end <= start) return null;
++/** Positional read granularity. Verified flat-RSS on a 6.3 GB transcript. */
++const READ_CHUNK_BYTES = 4 * 1024 * 1024;
++/** Bytes of a transcript one `parseSessionFile` call consumes before yielding. */
++export const PARSE_CHUNK_BYTES = 256 * 1024 * 1024;
++/** A single JSONL line longer than this is discarded rather than buffered. */
++const MAX_LINE_BYTES = 64 * 1024 * 1024;
++
++function parseJsonLine(line: Uint8Array): SessionEntry | null {
++	let end = line.length;
++	while (end > 0 && line[end - 1] === CR) end--;
++	if (end === 0) return null;
+ 	try {
+-		return JSON.parse(jsonLineDecoder.decode(bytes.subarray(start, end))) as SessionEntry;
++		return JSON.parse(jsonLineDecoder.decode(line.subarray(0, end))) as SessionEntry;
+ 	} catch {
+ 		return null;
+ 	}
+ }
+ 
+-function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
+-	let cursor = 0;
+-	let read = 0;
+-
+-	while (cursor < bytes.length) {
+-		const newline = bytes.indexOf(LF, cursor);
+-		const hasNewline = newline !== -1;
+-		const lineEnd = hasNewline ? newline : bytes.length;
+-		const entry = parseJsonLine(bytes, cursor, lineEnd);
+-		if (entry) {
+-			visit(entry);
+-			read = hasNewline ? newline + 1 : lineEnd;
+-		} else if (hasNewline) {
+-			read = newline + 1;
+-		} else {
+-			break;
++/**
++ * Walk the JSONL lines of `sessionPath` starting at byte `start`, reading at
++ * most {@link READ_CHUNK_BYTES} per positional read so peak memory stays flat
++ * regardless of file size (advisor transcripts on real machines reach 13 GB,
++ * which no single allocation can serve).
++ *
++ * `visit` receives a view into the read buffer and must not retain it past the
++ * call; returning `false` stops the scan without committing that line.
++ *
++ * Returns the absolute offset just past the last committed line terminator —
++ * always a line boundary, so it is safe to persist and resume from — and
++ * whether the scan reached end of file. The scan also stops once `maxBytes`
++ * have been committed since `start`.
++ */
++async function scanSessionLines(
++	sessionPath: string,
++	start: number,
++	maxBytes: number,
++	visit: (line: Uint8Array) => boolean,
++): Promise<{ read: number; done: boolean }> {
++	const file = Bun.file(sessionPath);
++	const size = file.size;
++	let pos = Math.min(Math.max(0, start), size);
++	const begin = pos;
++	let read = pos;
++	if (pos >= size) return { read, done: true };
++
++	let carry: Uint8Array | null = null;
++	let discarding = false;
++
++	while (pos < size) {
++		const chunk = await file.slice(pos, Math.min(size, pos + READ_CHUNK_BYTES)).bytes();
++		// File shrank mid-scan (rotation/truncation); commit what we have.
++		if (chunk.length === 0) return { read, done: true };
++		const chunkBase = pos;
++		pos += chunk.length;
++
++		let c = 0;
++		while (c < chunk.length) {
++			const nl = chunk.indexOf(LF, c);
++			if (nl === -1) {
++				if (!discarding) {
++					const rest = chunk.subarray(c);
++					const carried: number = carry?.length ?? 0;
++					if (carried + rest.length > MAX_LINE_BYTES) {
++						carry = null;
++						discarding = true;
++						logger.warn("stats: skipping oversized session line", { sessionPath, offset: read });
++					} else {
++						// Copy: `rest` views the chunk buffer, which the next read replaces.
++						const merged = new Uint8Array(carried + rest.length);
++						if (carry) merged.set(carry, 0);
++						merged.set(rest, carried);
++						carry = merged;
++					}
++				}
++				break;
++			}
++			if (discarding) {
++				discarding = false;
++			} else {
++				let line: Uint8Array;
++				if (carry) {
++					const merged = new Uint8Array(carry.length + (nl - c));
++					merged.set(carry, 0);
++					merged.set(chunk.subarray(c, nl), carry.length);
++					line = merged;
++					carry = null;
++				} else {
++					line = chunk.subarray(c, nl);
++				}
++				if (!visit(line)) return { read, done: false };
++			}
++			read = chunkBase + nl + 1;
++			c = nl + 1;
++			// Budget exhausted. If it ran out exactly at EOF the caller has the
++			// whole file, so report `done` and save it a no-op round trip.
++			if (read - begin >= maxBytes) return { read, done: read >= size };
+ 		}
+-		cursor = hasNewline ? newline + 1 : lineEnd;
+ 	}
+ 
+-	return read;
++	// Final line without a trailing newline: surface it, but leave its bytes
++	// uncommitted so a later append completes the line. Every insert path is an
++	// idempotent upsert, so re-visiting it on the next sync is harmless.
++	if (carry && !discarding && carry.length > 0) visit(carry);
++	return { read, done: true };
+ }
+ 
+-function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
+-	const entries: SessionEntry[] = [];
+-	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+-	return { entries, read };
+-}
++const SERVICE_TIER_NEEDLE = Buffer.from('"service_tier_change"');
++
+ /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
+ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
+-	return parseSessionEntriesLenient(bytes).entries;
++	const entries: SessionEntry[] = [];
++	let cursor = 0;
++	while (cursor < bytes.length) {
++		const newline = bytes.indexOf(LF, cursor);
++		const hasNewline = newline !== -1;
++		const lineEnd = hasNewline ? newline : bytes.length;
++		const entry = parseJsonLine(bytes.subarray(cursor, lineEnd));
++		if (entry) entries.push(entry);
++		if (!hasNewline) break;
++		cursor = newline + 1;
++	}
++	return entries;
+ }
+ 
+-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+-	let currentServiceTier: ServiceTierByFamily | undefined;
+-	visitSessionEntriesLenient(bytes, entry => {
+-		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+-	});
+-	return currentServiceTier;
+-}
+ /**
+- * Parse a session file and extract all assistant message stats.
+- * Uses incremental reading with offset tracking.
+- *
+- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
+- * state derived from `service_tier_change` entries that affects whether
+- * subsequent OpenAI assistant replies count as premium requests. Incremental
+- * syncs that resume past the most-recent tier change would otherwise lose
+- * that state and silently record `premiumRequests = 0` for priority traffic
+- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
+- * after 13f59162e — the parser is now the sole source of truth). When
+- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
+- * for the latest service-tier value before parsing the unprocessed tail.
+- * The scan only keeps the current tier and does not materialize prefix
+- * entries, preserving offset-based memory behavior for large sessions.
++ * Recover the service tier active at `endOffset` by replaying the preceding
++ * bytes without materializing them. `endOffset` always comes from a previous
++ * `newOffset` and is therefore a line boundary, so passing it as the byte
++ * budget stops the scan exactly there. Lines are prefiltered with a raw byte
++ * search, keeping the pass memory-scan bound rather than JSON bound.
+  */
++async function scanServiceTierPrefix(sessionPath: string, endOffset: number): Promise<ServiceTierByFamily | null> {
++	let tier: ServiceTierByFamily | undefined;
++	await scanSessionLines(sessionPath, 0, endOffset, line => {
++		const view = Buffer.from(line.buffer as ArrayBuffer, line.byteOffset, line.length);
++		if (!view.includes(SERVICE_TIER_NEEDLE)) return true;
++		const entry = parseJsonLine(line);
++		if (entry && isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
++		return true;
++	});
++	return tier ?? null;
++}
++
++export interface ParseSessionOptions {
++	/** Resume offset; must be a line boundary from a previous `newOffset`. Default 0. */
++	fromOffset?: number;
++	/**
++	 * Active service tier at `fromOffset`. `null` = none active (fresh file, or a
++	 * recorded absence). `undefined` = unknown, which makes this call replay the
++	 * prefix with {@link scanServiceTierPrefix} to recover it.
++	 */
++	serviceTier?: ServiceTierByFamily | null;
++	/** Soft byte budget for this call; the scan stops at the next line boundary past it. */
++	maxBytes?: number;
++}
++
+ export interface ParseSessionResult {
+ 	stats: MessageStats[];
+ 	userStats: UserMessageStats[];
+@@ -415,16 +505,36 @@ export interface ParseSessionResult {
+ 	toolCalls: ToolCallStats[];
+ 	toolResults: ToolResultLink[];
+ 	newOffset: number;
++	/** Active tier at `newOffset`; feed back into the next call for this file. */
++	serviceTier: ServiceTierByFamily | null;
++	/** True when `newOffset` reached end of file as observed by this pass. */
++	done: boolean;
+ }
+-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
+-	let bytes: Uint8Array;
+-	try {
+-		bytes = await Bun.file(sessionPath).bytes();
+-	} catch (err) {
+-		if (isEnoent(err))
+-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+-		throw err;
+-	}
++
++/**
++ * Parse a slice of a session file and extract assistant/user/tool stats.
++ *
++ * Reading is incremental in two dimensions: `fromOffset` skips bytes already
++ * committed by an earlier sync, and `maxBytes` caps how much this call
++ * consumes so multi-gigabyte transcripts are ingested in bounded-memory
++ * chunks. Callers loop until `done`, feeding `newOffset`/`serviceTier` back in.
++ *
++ * Service-tier carry-over: `serviceTier` is session-scoped state derived from
++ * `service_tier_change` entries that decides whether subsequent OpenAI
++ * assistant replies count as premium requests. Incremental syncs that resume
++ * past the most-recent tier change would otherwise lose it and silently record
++ * `premiumRequests = 0` for priority traffic (the coding-agent stopped folding
++ * the tier into `usage.premiumRequests` after 13f59162e — the parser is now the
++ * sole source of truth). Callers persist the returned tier; when they cannot
++ * (rows predating tier persistence) they pass `undefined` and this call
++ * replays the prefix to recover it.
++ */
++export async function parseSessionFile(
++	sessionPath: string,
++	options: ParseSessionOptions = {},
++): Promise<ParseSessionResult> {
++	const fromOffset = Math.max(0, options.fromOffset ?? 0);
++	const maxBytes = options.maxBytes ?? PARSE_CHUNK_BYTES;
+ 
+ 	const folder = extractFolderFromPath(sessionPath);
+ 	const agentType = classifyAgentType(sessionPath);
+@@ -433,64 +543,90 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
+ 	const userLinks: UserMessageLink[] = [];
+ 	const toolCalls: ToolCallStats[] = [];
+ 	const toolResults: ToolResultLink[] = [];
+-	const userByEntryId = new Map<string, UserMessageStats>();
+-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
+-	const unprocessed = bytes.subarray(start);
+-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
+-	let currentServiceTier: ServiceTierByFamily | undefined;
+-	if (start > 0) {
+-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
+-	}
+-	for (const entry of entries) {
+-		if (isServiceTierChange(entry)) {
+-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+-			continue;
+-		}
+-		if (isUserMessage(entry)) {
+-			const userMsg = extractUserStats(sessionPath, folder, entry);
+-			if (userMsg) {
+-				userStats.push(userMsg);
+-				userByEntryId.set(entry.id, userMsg);
++	let currentServiceTier: ServiceTierByFamily | null | undefined;
++
++	try {
++		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
++		currentServiceTier =
++			fromOffset === 0
++				? null
++				: options.serviceTier !== undefined
++					? options.serviceTier
++					: await scanServiceTierPrefix(sessionPath, fromOffset);
++
++		const { read, done } = await scanSessionLines(sessionPath, fromOffset, maxBytes, line => {
++			const entry = parseJsonLine(line);
++			if (!entry) return true;
++			if (isServiceTierChange(entry)) {
++				currentServiceTier = coerceServiceTierByFamily(entry.serviceTier) ?? null;
++				return true;
+ 			}
+-			continue;
+-		}
+-		if (isToolResultMessage(entry)) {
+-			const link = extractToolResultLink(sessionPath, entry);
+-			if (link) toolResults.push(link);
+-			continue;
+-		}
+-		if (isModelUsage(entry)) {
+-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+-			if (modelUsageStats) stats.push(modelUsageStats);
+-			continue;
+-		}
+-		if (isAssistantMessage(entry)) {
+-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+-			if (msgStats) stats.push(msgStats);
+-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+-			// Link assistant's responding model back to the user message it answered.
+-			const parentId = (entry as SessionMessageEntry).parentId;
+-			if (parentId) {
+-				const msg = entry.message as AssistantMessage;
+-				if (msg.model && msg.provider) {
+-					// Emit unconditionally. The aggregator's UPDATE is guarded by
+-					// `model IS NULL` so this is idempotent: a no-op for already
+-					// linked rows, a fix-up for fresh inserts (which start NULL
+-					// because the user row is recorded before its reply lands) and
+-					// for cross-pass orphans whose parent was committed by an
+-					// earlier incremental sync.
+-					userLinks.push({
+-						sessionFile: sessionPath,
+-						entryId: parentId,
+-						model: msg.model,
+-						provider: msg.provider,
+-					});
++			if (isUserMessage(entry)) {
++				const userMsg = extractUserStats(sessionPath, folder, entry);
++				if (userMsg) userStats.push(userMsg);
++				return true;
++			}
++			if (isToolResultMessage(entry)) {
++				const link = extractToolResultLink(sessionPath, entry);
++				if (link) toolResults.push(link);
++				return true;
++			}
++			if (isModelUsage(entry)) {
++				const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
++				if (modelUsageStats) stats.push(modelUsageStats);
++				return true;
++			}
++			if (isAssistantMessage(entry)) {
++				const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier ?? undefined, agentType);
++				if (msgStats) stats.push(msgStats);
++				toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
++				// Link assistant's responding model back to the user message it answered.
++				const parentId = (entry as SessionMessageEntry).parentId;
++				if (parentId) {
++					const msg = entry.message as AssistantMessage;
++					if (msg.model && msg.provider) {
++						// Emit unconditionally. The aggregator's UPDATE is guarded by
++						// `model IS NULL` so this is idempotent: a no-op for already
++						// linked rows, a fix-up for fresh inserts (which start NULL
++						// because the user row is recorded before its reply lands) and
++						// for cross-pass orphans whose parent was committed by an
++						// earlier incremental sync.
++						userLinks.push({
++							sessionFile: sessionPath,
++							entryId: parentId,
++							model: msg.model,
++							provider: msg.provider,
++						});
++					}
+ 				}
+ 			}
+-		}
+-	}
++			return true;
++		});
+ 
+-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
++		return {
++			stats,
++			userStats,
++			userLinks,
++			toolCalls,
++			toolResults,
++			newOffset: read,
++			serviceTier: currentServiceTier ?? null,
++			done,
++		};
++	} catch (err) {
++		if (isEnoent(err))
++			return {
++				stats: [],
++				userStats: [],
++				userLinks: [],
++				toolCalls: [],
++				toolResults: [],
++				newOffset: fromOffset,
++				serviceTier: currentServiceTier ?? null,
++				done: true,
++			};
++		throw err;
++	}
+ }
+ 
+ /**
+@@ -534,19 +670,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+ }
+ 
+ /**
+- * Find a specific entry in a session file.
++ * Find a specific entry in a session file. Uses the bounded scanner rather
++ * than streaming the whole file, so looking up an entry in a multi-gigabyte
++ * transcript costs one chunk of memory instead of the file's size.
+  */
+ export async function getSessionEntry(sessionPath: string, entryId: string): Promise<SessionEntry | null> {
++	let found: SessionEntry | null = null;
+ 	try {
+-		for await (const line of readLines(Bun.file(sessionPath).stream())) {
+-			const entry = parseJsonLine(line, 0, line.length);
++		await scanSessionLines(sessionPath, 0, Number.POSITIVE_INFINITY, line => {
++			const entry = parseJsonLine(line);
+ 			if (entry && "id" in entry && entry.id === entryId) {
+-				return entry;
++				found = entry;
++				return false;
+ 			}
+-		}
++			return true;
++		});
+ 	} catch (err) {
+ 		if (isEnoent(err)) return null;
+ 		throw err;
+ 	}
+-	return null;
++	return found;
+ }
+diff --git a/packages/stats/src/sync-worker.ts b/packages/stats/src/sync-worker.ts
+index a8247fe..81a5de0 100644
+--- a/packages/stats/src/sync-worker.ts
++++ b/packages/stats/src/sync-worker.ts
+@@ -1,19 +1,33 @@
+ /**
+  * Stateless parse worker for `syncAllSessions`. The main thread owns the
+- * SQLite handle; workers receive `{ sessionFile, fromOffset }`, run
+- * `parseSessionFile` (which is pure I/O + CPU, no DB), and post the
++ * SQLite handle; workers receive `{ sessionFile, fromOffset, serviceTier }`,
++ * run `parseSessionFile` (which is pure I/O + CPU, no DB), and post the
+  * structured-clone-safe result back. One in-flight request per worker so
+  * the main thread can fan jobs out 1:1 with the pool size.
+  *
++ * Each request parses at most one chunk (`PARSE_CHUNK_BYTES`); the main thread
++ * loops on `result.done`, so a multi-gigabyte transcript crosses the wire as a
++ * sequence of bounded results instead of one unbounded allocation. `maxBytes`
++ * is deliberately not part of the protocol — both the serial and worker paths
++ * take the parser default.
++ *
+  * A `{ kind: "ping" }` request is also accepted and replies with
+  * `{ ok: true, kind: "pong" }` — used by `smokeTestSyncWorker` to prove the
+  * worker actually spawns and runs in compiled binaries (regression coverage
+  * for issue #1011 / PR #1027, where the worker silently failed to load).
+  */
+ 
++import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import { type ParseSessionResult, parseSessionFile } from "./parser";
+ 
+-export type SyncWorkerRequest = { kind?: "parse"; sessionFile: string; fromOffset: number } | { kind: "ping" };
++export type SyncWorkerRequest =
++	| {
++			kind?: "parse";
++			sessionFile: string;
++			fromOffset: number;
++			serviceTier?: ServiceTierByFamily | null;
++	  }
++	| { kind: "ping" };
+ 
+ export type SyncWorkerResponse =
+ 	| { ok: true; kind?: "parse"; result: ParseSessionResult }
+@@ -31,7 +45,10 @@ self.onmessage = async event => {
+ 			self.postMessage({ ok: true, kind: "pong" } satisfies SyncWorkerResponse);
+ 			return;
+ 		}
+-		const result = await parseSessionFile(request.sessionFile, request.fromOffset);
++		const result = await parseSessionFile(request.sessionFile, {
++			fromOffset: request.fromOffset,
++			serviceTier: request.serviceTier,
++		});
+ 		self.postMessage({ ok: true, result } satisfies SyncWorkerResponse);
+ 	} catch (err) {
+ 		const error = err instanceof Error ? (err.stack ?? err.message) : String(err);
+diff --git a/packages/stats/test/parser-large-session.test.ts b/packages/stats/test/parser-large-session.test.ts
+index 0c43576..0c50852 100644
+--- a/packages/stats/test/parser-large-session.test.ts
++++ b/packages/stats/test/parser-large-session.test.ts
+@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
+ import * as fs from "node:fs/promises";
+ import * as path from "node:path";
+ import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
++import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+ import { getSessionsDir } from "@oh-my-pi/pi-utils";
+ import { installStatsTestIsolation } from "./helpers/temp-agent";
+ 
+@@ -81,4 +82,29 @@ describe("large session parsing", () => {
+ 		expect(result.stats).toHaveLength(256);
+ 		expect(result.newOffset).toBeGreaterThan(4 * 1024 * 1024);
+ 	});
++
++	it("resumes across byte-budgeted chunks without dropping or duplicating entries", async () => {
++		const sessionFile = await writeLargeSessionFile();
++		const size = (await fs.stat(sessionFile)).size;
++		const seen: string[] = [];
++		let offset = 0;
++		let tier: ServiceTierByFamily | null = null;
++		let calls = 0;
++		for (;;) {
++			const chunk = await parseSessionFile(sessionFile, {
++				fromOffset: offset,
++				serviceTier: tier,
++				maxBytes: 512 * 1024,
++			});
++			calls++;
++			seen.push(...chunk.stats.map(s => s.entryId));
++			expect(chunk.newOffset).toBeGreaterThan(offset);
++			offset = chunk.newOffset;
++			tier = chunk.serviceTier;
++			if (chunk.done) break;
++		}
++		expect(calls).toBeGreaterThan(1);
++		expect(offset).toBe(size);
++		expect(seen).toEqual(Array.from({ length: 256 }, (_, i) => `assistant-${i}`));
++	});
+ });
+diff --git a/packages/stats/test/priority-premium-requests.test.ts b/packages/stats/test/priority-premium-requests.test.ts
+index bf77453..58d3356 100644
+--- a/packages/stats/test/priority-premium-requests.test.ts
++++ b/packages/stats/test/priority-premium-requests.test.ts
+@@ -187,9 +187,37 @@ describe("priority service-tier premium-request backfill", () => {
+ 		const tierLineEnd = bytes.indexOf(0x0a, bytes.indexOf(Buffer.from("service_tier_change"))) + 1;
+ 		expect(tierLineEnd).toBeGreaterThan(0);
+ 
+-		const second = await parseSessionFile(sessionFile, tierLineEnd);
++		const second = await parseSessionFile(sessionFile, { fromOffset: tierLineEnd });
+ 		expect(second.stats).toHaveLength(1);
+ 		expect(second.stats[0]?.entryId).toBe("d1");
+ 		expect(second.stats[0]?.usage.premiumRequests).toBe(1);
+ 	});
++
++	it("resumes a second sync with the persisted service tier instead of losing it", async () => {
++		const sessionFile = await writeSession("--tmp--proj", "05.jsonl", {
++			lines: [
++				{ type: "session", version: 1, id: "s5", timestamp: new Date().toISOString(), cwd: "/tmp/proj" },
++				{ type: "service_tier_change", id: "stc", timestamp: new Date().toISOString(), serviceTier: "priority" },
++				assistantEntry({ id: "e1", provider: "openai" }),
++			],
++		});
++
++		await syncAllSessions({ workers: 1 });
++
++		await fs.appendFile(sessionFile, `${JSON.stringify(assistantEntry({ id: "e2", provider: "openai" }))}\n`);
++		// Both writes can land in the same millisecond, which the mtime guard
++		// would read as "nothing new".
++		const future = new Date(Date.now() + 1000);
++		await fs.utimes(sessionFile, future, future);
++
++		await syncAllSessions({ workers: 1 });
++
++		// The second sync starts past the tier line, so crediting `e2` proves the
++		// tier came back from `file_offsets.service_tier`.
++		const requests = getRecentRequests(50)
++			.filter(r => r.sessionFile === sessionFile)
++			.sort((a, b) => a.entryId.localeCompare(b.entryId));
++		expect(requests.map(r => r.entryId)).toEqual(["e1", "e2"]);
++		expect(requests.map(r => r.usage.premiumRequests)).toEqual([1, 1]);
++	});
+ });
