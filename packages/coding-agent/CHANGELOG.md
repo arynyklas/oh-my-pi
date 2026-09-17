@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/gateway` no longer crashes with `[Unhandled Rejection] AbortError` when moving the selection quickly or leaving a tab while a row's details are still loading; detail, audit-paging, and usage-window load failures now show an error banner instead of killing the session.
+
 ## [18.1.16-fork.3] - 2026-09-15
 
 ### Added

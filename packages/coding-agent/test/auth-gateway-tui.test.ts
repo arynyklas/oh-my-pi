@@ -292,6 +292,7 @@ class FakeGatewayClient {
 	nextRemovePoolCredentialError: Error | null = null;
 	nextCredentialRemoveError: Error | null = null;
 	nextCredentialRefreshError: Error | null = null;
+	nextUserUsageError: Error | null = null;
 	abortedSignals: AbortSignal[] = [];
 	nextCredentialUploadError: Error | null = null;
 
@@ -342,6 +343,11 @@ class FakeGatewayClient {
 	async getUserUsage(userId: number, since?: number, signal?: AbortSignal): Promise<AuthGatewayUsageSummary> {
 		this.usageCalls.push({ userId, since });
 		if (signal) this.abortedSignals.push(signal);
+		if (this.nextUserUsageError) {
+			const error = this.nextUserUsageError;
+			this.nextUserUsageError = null;
+			throw error;
+		}
 		return { ...USAGE, userId, since: since ?? USAGE.since };
 	}
 
@@ -1005,6 +1011,66 @@ describe("AuthGatewayConsoleController", () => {
 		pendingDetail.resolve({ user: user(2, "bob"), tokens: [], acl: [], poolBindings: [] });
 		await flushAsync();
 		expect(ctl.state.userDetails[2]).toBeUndefined();
+		ctl.close();
+	});
+
+	it("surfaces selection detail failures as a transient banner instead of rejecting", async () => {
+		const failingDetail = deferred<AuthGatewayUserDetails>();
+		fake.userDetailQueue.set(2, failingDetail);
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("users");
+		ctl.selectNext();
+		await flushAsync();
+		failingDetail.reject(new Error("detail fetch exploded"));
+		await flushAsync();
+		expect(ctl.state.errorBanner).toContain("detail fetch exploded");
+		expect(ctl.state.errorBannerSource).toBe("transient");
+		expect(ctl.state.userDetails[2]).toBeUndefined();
+		ctl.close();
+	});
+
+	it("drops detail failures from aborted selections without banner noise", async () => {
+		const abortedDetail = deferred<AuthGatewayUserDetails>();
+		fake.userDetailQueue.set(2, abortedDetail);
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("users");
+		ctl.selectNext();
+		await flushAsync();
+		await ctl.switchTab("accounts");
+		abortedDetail.reject(new Error("The operation was aborted."));
+		await flushAsync();
+		expect(ctl.state.errorBanner).toBeNull();
+		expect(ctl.state.errorBannerSource).toBeNull();
+		ctl.close();
+	});
+
+	it("marks the audit tab errored when paging to the next page fails", async () => {
+		const pendingPage = deferred<{ events: AuthGatewayAuditEvent[]; nextBefore: number | null }>();
+		fake.auditQueue.set(50, pendingPage);
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("audit");
+		const paging = ctl.nextAuditPage();
+		await flushAsync();
+		pendingPage.reject(new Error("audit page outage"));
+		await paging;
+		expect(ctl.state.audit.status).toBe("error");
+		expect(ctl.state.audit.error).toContain("audit page outage");
+		expect(ctl.state.errorBanner).toContain("audit page outage");
+		expect(ctl.state.errorBannerSource).toBe("visible-load");
+		ctl.close();
+	});
+
+	it("reports usage-window reload failures as a transient banner", async () => {
+		const ctl = controller();
+		await ctl.start();
+		await ctl.switchTab("users");
+		fake.nextUserUsageError = new Error("usage window outage");
+		expect(await ctl.reloadSelectedUserUsage(1_700_000_000)).toBe(false);
+		expect(ctl.state.errorBanner).toContain("usage window outage");
+		expect(ctl.state.errorBannerSource).toBe("transient");
 		ctl.close();
 	});
 

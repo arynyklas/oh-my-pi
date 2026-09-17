@@ -1586,7 +1586,12 @@ export class AuthGatewayConsole implements Component, Focusable {
 			const ok = await this.controller.reloadSelectedUserUsage(since);
 			if (this.#prompt !== prompt) return;
 			if (!ok) {
-				prompt.error = "Invalid usage timestamp";
+				const state = this.controller.state;
+				prompt.error =
+					state.errorBannerSource === "transient"
+						? (state.errorBanner ?? "Invalid usage timestamp")
+						: "Invalid usage timestamp";
+				this.controller.clearTransientBanner();
 				return;
 			}
 			this.#clearPrompt();

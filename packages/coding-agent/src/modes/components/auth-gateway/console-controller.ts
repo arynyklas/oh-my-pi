@@ -331,6 +331,10 @@ export class AuthGatewayConsoleController {
 			this.#state.userUsage[selected.id] = usage;
 			this.#requestRender();
 			return true;
+		} catch (error) {
+			if (!this.#isCurrent(generation, abort.signal)) return false;
+			this.setTransientBanner(this.#formatMutationError(error));
+			return false;
 		} finally {
 			if (this.#detailAbort === abort) this.#detailAbort = null;
 		}
@@ -359,6 +363,8 @@ export class AuthGatewayConsoleController {
 		const generation = this.#generation;
 		try {
 			await this.#loadAuditPage(nextBefore, "manual", abort.signal, generation);
+		} catch (error) {
+			if (this.#isCurrent(generation, abort.signal)) this.#markVisibleError(this.#formatMutationError(error));
 		} finally {
 			if (this.#auditPageAbort === abort) this.#auditPageAbort = null;
 			if (this.#isCurrent(generation, abort.signal)) this.#requestRender();
@@ -1120,6 +1126,8 @@ export class AuthGatewayConsoleController {
 		try {
 			if (tab === "users") await this.#loadSelectedUserDetail(abort.signal, generation);
 			if (tab === "pools") await this.#loadSelectedPoolUsers(abort.signal, generation);
+		} catch (error) {
+			if (this.#isCurrent(generation, abort.signal)) this.setTransientBanner(this.#formatMutationError(error));
 		} finally {
 			if (this.#detailAbort === abort) this.#detailAbort = null;
 			if (this.#isCurrent(generation, abort.signal)) this.#requestRender();
