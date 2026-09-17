@@ -1,5 +1,5 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -9,6 +9,7 @@ import {
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import type { SymbolKey } from "../modes/theme/symbols";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
@@ -63,6 +64,7 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	type ServiceTierInheritSettingValue,
 } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -166,7 +168,7 @@ export type SettingTab =
 	| "providers";
 
 /** Tab display metadata - icon is resolved via theme.symbol() */
-export type TabMetadata = { label: string; icon: `tab.${string}` };
+export type TabMetadata = { label: string; icon: Extract<SymbolKey, `tab.${string}`> };
 
 /** Ordered list of tabs for UI rendering */
 export const SETTING_TABS: SettingTab[] = [
@@ -183,7 +185,7 @@ export const SETTING_TABS: SettingTab[] = [
 ];
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${string}` }> = {
+export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
 	appearance: { label: "Appearance", icon: "tab.appearance" },
 	model: { label: "Model", icon: "tab.model" },
 	interaction: { label: "Interaction", icon: "tab.interaction" },
@@ -236,33 +238,47 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
-/** Status line segment identifiers */
-export type StatusLineSegmentId =
-	| "pi"
-	| "status"
-	| "model"
-	| "mode"
-	| "path"
-	| "git"
-	| "pr"
-	| "subagents"
-	| "token_in"
-	| "token_out"
-	| "token_total"
-	| "token_rate"
-	| "cost"
-	| "context_pct"
-	| "context_total"
-	| "time_spent"
-	| "time"
-	| "session"
-	| "hostname"
-	| "cache_read"
-	| "cache_write"
-	| "cache_hit"
-	| "session_name"
-	| "usage"
-	| "collab";
+/** Status line segment identifiers accepted by custom status-line settings. */
+export const STATUS_LINE_SEGMENT_IDS = [
+	"pi",
+	"status",
+	"model",
+	"mode",
+	"path",
+	"git",
+	"pr",
+	"subagents",
+	"token_in",
+	"token_out",
+	"token_total",
+	"token_rate",
+	"cost",
+	"context_pct",
+	"context_total",
+	"time_spent",
+	"time",
+	"session",
+	"hostname",
+	"cache_read",
+	"cache_write",
+	"cache_hit",
+	"session_name",
+	"usage",
+	"collab",
+	"vim",
+] as const;
+
+/** One identifier from the supported status-line segment catalog. */
+export type StatusLineSegmentId = (typeof STATUS_LINE_SEGMENT_IDS)[number];
+
+/** Baseline segments used when Custom is selected without segment overrides. */
+export const CUSTOM_STATUS_LINE_DEFAULTS: {
+	readonly left: StatusLineSegmentId[];
+	readonly right: StatusLineSegmentId[];
+} = {
+	left: ["vim", "model", "mode", "path", "git", "pr"],
+	right: ["session_name", "token_total", "cost", "context_pct"],
+};
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -402,6 +418,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -789,6 +806,17 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"composer.tokenRate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Generation Rate",
+			description:
+				"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
@@ -1013,9 +1041,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.left },
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.rightSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.right },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -1284,7 +1312,25 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Terminal Title Run State",
 			description:
-				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you",
+				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' under WSL), '>' when it's your turn, '!' when the agent is waiting on you",
+		},
+	},
+	"tui.titleSpinner": {
+		type: "enum",
+		values: ["braille", "pulse", "dots", "line"] as const,
+		default: "braille",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Terminal Title Spinner",
+			description:
+				"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
+			options: [
+				{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+				{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
+				{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
+				{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
+			],
 		},
 	},
 
@@ -1298,6 +1344,17 @@ export const SETTINGS_SCHEMA = {
 			label: "Terminal Hyperlinks",
 			description:
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
+		},
+	},
+	"tui.mouse": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Mouse Click-to-Focus",
+			description:
+				"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
 		},
 	},
 	"tui.tight": {
@@ -1324,6 +1381,23 @@ export const SETTINGS_SCHEMA = {
 				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
 				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
+			],
+		},
+	},
+	"display.pinnedAgents": {
+		type: "enum",
+		values: ["off", "collapsed", "full"] as const,
+		default: "collapsed",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Pinned Agents",
+			description:
+				"Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)",
+			options: [
+				{ value: "off", label: "Off", description: "Hide the pinned jump list" },
+				{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
+				{ value: "full", label: "Full", description: "Always list every live agent" },
 			],
 		},
 	},
@@ -1969,7 +2043,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Retry Fallback Chains",
 			description:
-				'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix.',
+				'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
 		},
 	},
 	"retry.fallbackRevertPolicy": {
@@ -2045,6 +2119,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.vimMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Editing Mode",
+			description:
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		},
+	},
+
+	"tui.vimModeDisplay": {
+		type: "enum",
+		values: ["text", "icon", "none"] as const,
+		default: "text",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Vim Mode Indicator",
+			description: "How the current Vim mode appears in the status line",
+			condition: "vimModeEnabled",
+			options: [
+				{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE" },
+				{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
+				{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			],
+		},
+	},
+
 	"loop.mode": {
 		type: "enum",
 		values: ["prompt", "compact", "reset"] as const,
@@ -2089,6 +2193,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Input and startup
+	"composer.recallClearedDrafts": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Recall Cleared Drafts",
+			description:
+				"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		},
+	},
+
 	doubleEscapeAction: {
 		type: "enum",
 		values: ["rewind", "tree", "none"] as const,
@@ -2465,6 +2581,32 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Display Name",
 			description: "Name shown to other collab participants (default: OS username)",
+		},
+	},
+
+	"collab.autoStart": {
+		type: "enum",
+		values: ["off", "view", "control"] as const,
+		default: "off",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Auto Start",
+			description:
+				"Host every interactive session via collab.relayUrl as it starts and publish it to the local registry (omp collab list); rooms rotate on session switch",
+			options: [
+				{ value: "off", label: "Off", description: "Share only when /collab is run" },
+				{
+					value: "view",
+					label: "View",
+					description: "Auto-host; the registry hands out view-only links (omp collab link --view)",
+				},
+				{
+					value: "control",
+					label: "Control",
+					description: "Auto-host; the registry hands out control links that can prompt the session",
+				},
+			],
 		},
 	},
 
@@ -3530,7 +3672,6 @@ export const SETTINGS_SCHEMA = {
 			condition: "hindsightActive",
 		},
 	},
-	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
 	// TTSR
@@ -4704,6 +4845,35 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.speculativeExecution.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Experimental Speculative Execution",
+			description:
+				"Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.",
+		},
+	},
+
+	"tools.speculativeExecution.maxInFlight": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Speculative Execution Concurrency",
+			description: "Maximum number of validated local reads allowed to run before normal dispatch.",
+			options: [
+				{ value: "1", label: "1 operation" },
+				{ value: "2", label: "2 operations" },
+				{ value: "3", label: "3 operations" },
+				{ value: "4", label: "4 operations" },
+			],
+		},
+	},
+
 	"tools.maxTimeout": {
 		type: "number",
 		default: 0,
@@ -4740,27 +4910,6 @@ export const SETTINGS_SCHEMA = {
 		default: 100,
 	},
 
-	"async.pollWaitDuration": {
-		type: "enum",
-		values: ["5s", "10s", "30s", "1m", "5m", "smart"] as const,
-		default: "smart",
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Max Poll Time",
-			description:
-				"How long a `hub` wait watches background jobs before returning the current state. A fixed value waits that exact duration every time. `smart` adapts: it starts at 5s and lengthens with each back-to-back wait (up to 5m), then resets to 5s after about a minute without waiting.",
-			options: [
-				{ value: "5s", label: "5 seconds" },
-				{ value: "10s", label: "10 seconds" },
-				{ value: "30s", label: "30 seconds" },
-				{ value: "1m", label: "1 minute" },
-				{ value: "5m", label: "5 minutes" },
-				{ value: "smart", label: "Smart", description: "Default — adaptive 5s→5m, resets when you stop polling" },
-			],
-		},
-	},
-
 	"irc.timeoutMs": {
 		type: "number",
 		default: 120_000,
@@ -4768,8 +4917,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Execution",
 			label: "IRC Timeout",
-			description:
-				"Default timeout for hub message waits (and send await:true) in milliseconds; 0 disables the timeout",
+			description: "Timeout for hub send await:true in milliseconds; 0 disables the timeout",
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "30000", label: "30 seconds" },
@@ -4902,6 +5050,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Start in Plan Mode",
 			description: "Automatically enter plan mode at the start of every new session",
 			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Plans",
+			description: "Automatically save approved plans to disk when plan mode completes",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.autosaveDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Autosave Directory",
+			description:
+				"Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.",
+			condition: "planAutosaveEnabled",
 		},
 	},
 
@@ -5255,6 +5428,10 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
+	},
+	"task.agentServiceTierOverrides": {
+		type: "record",
+		default: EMPTY_AGENT_SERVICE_TIER_OVERRIDES,
 	},
 	"task.agentPrewalk": {
 		type: "record",
@@ -5642,6 +5819,31 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
+	"providers.judgmentProvider": {
+		type: "enum",
+		values: ["auto", "typesafe", "llm"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Judgment Provider",
+			description:
+				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
+			options: [
+				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
+				{
+					value: "typesafe",
+					label: "TypeSafe",
+					description: "Prefer TypeSafe; fall back through the online model roles on failure",
+				},
+				{
+					value: "llm",
+					label: "LLM",
+					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
+				},
+			],
+		},
+	},
 	"providers.tinyModel": {
 		type: "enum",
 		values: TINY_TITLE_MODEL_VALUES,
@@ -5816,7 +6018,7 @@ export const SETTINGS_SCHEMA = {
 					value: "auto",
 					label: "Auto",
 					description:
-						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+						"Provider default — Anthropic OAuth subscriber sessions default to 1h, API keys use 5m kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
 				},
 				{
 					value: "short",
@@ -6193,7 +6395,11 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
-	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
+	const definition = SETTINGS_SCHEMA[path];
+	if (definition.type === "array" || definition.type === "record") {
+		return structuredClone(definition.default) as SettingValue<P>;
+	}
+	return definition.default as SettingValue<P>;
 }
 
 /** Check if a path has UI metadata (should appear in settings panel) */

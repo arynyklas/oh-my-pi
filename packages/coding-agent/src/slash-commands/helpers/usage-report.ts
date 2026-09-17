@@ -1,6 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { collapseSharedUsageReports } from "../../utils/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatActiveAccountLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
@@ -59,10 +60,11 @@ function renderUsageReports(
 	resolveDefaultAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 ): string {
-	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
+	const displayReports = collapseSharedUsageReports(reports);
+	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of reports) {
+	for (const report of displayReports) {
 		const providerReports = grouped.get(report.provider) ?? [];
 		providerReports.push(report);
 		grouped.set(report.provider, providerReports);

@@ -1,7 +1,7 @@
 /**
  * Stateless parse worker for `syncAllSessions`. The main thread owns the
- * SQLite handle; workers receive `{ sessionFile, fromOffset, serviceTier }`,
- * run `parseSessionFile` (which is pure I/O + CPU, no DB), and post the
+ * SQLite handle; workers receive a session path, offset, and parser state, run
+ * `parseSessionFile` (which is pure I/O + CPU, no DB), and post the
  * structured-clone-safe result back. One in-flight request per worker so
  * the main thread can fan jobs out 1:1 with the pool size.
  *
@@ -17,16 +17,10 @@
  * for issue #1011 / PR #1027, where the worker silently failed to load).
  */
 
-import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
-import { type ParseSessionResult, parseSessionFile } from "./parser";
+import { type ParseSessionResult, parseSessionFile, type SessionParserState } from "./parser";
 
 export type SyncWorkerRequest =
-	| {
-			kind?: "parse";
-			sessionFile: string;
-			fromOffset: number;
-			serviceTier?: ServiceTierByFamily | null;
-	  }
+	| { kind?: "parse"; sessionFile: string; fromOffset: number; parserState?: SessionParserState; replay?: boolean }
 	| { kind: "ping" };
 
 export type SyncWorkerResponse =
@@ -47,7 +41,8 @@ self.onmessage = async event => {
 		}
 		const result = await parseSessionFile(request.sessionFile, {
 			fromOffset: request.fromOffset,
-			serviceTier: request.serviceTier,
+			state: request.parserState,
+			replay: request.replay,
 		});
 		self.postMessage({ ok: true, result } satisfies SyncWorkerResponse);
 	} catch (err) {

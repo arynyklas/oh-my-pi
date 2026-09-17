@@ -803,14 +803,16 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				onPrompt: async () => "",
 			});
 
+			// `login()` stamps the interactive-login instant, so the hook and the
+			// stored row both carry it; the value is a clock read, not a contract.
 			expect(remoteCalls).toEqual([
 				{
 					provider: "unit-remote-oauth-storage",
-					credential: { type: "oauth", ...credentials },
+					credential: { type: "oauth", ...credentials, authorizedAt: expect.any(Number) },
 				},
 			]);
 			expect(authStorage.listStoredCredentials("unit-remote-oauth-storage").map(row => row.credential)).toEqual([
-				{ type: "oauth", ...credentials },
+				{ type: "oauth", ...credentials, authorizedAt: expect.any(Number) },
 			]);
 		} finally {
 			authStorage.close();

@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
+	applySessionParseResult,
+	completeSessionSync,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	getBehaviorByModel,
@@ -27,15 +28,17 @@ import {
 	getToolStatsByModel,
 	getToolTimeSeries,
 	initDb,
-	insertMessageStats,
-	insertToolCalls,
-	insertUserMessageStats,
 	markSessionBackfillsComplete,
-	setFileOffset,
-	updateToolResults,
-	updateUserMessageLinks,
+	prepareSessionSync,
 } from "./db";
-import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
+import {
+	getSessionEntry,
+	listAllSessionFiles,
+	matchesSessionFile,
+	type ParseSessionResult,
+	parseSessionFile,
+	type SessionParserState,
+} from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -68,20 +71,6 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
 		retryDelayMs: STATS_SYNC_LOCK_RETRY_MS,
 		retries: Math.ceil(STATS_SYNC_LOCK_WAIT_MS / STATS_SYNC_LOCK_RETRY_MS),
 	});
-}
-
-/**
- * Apply a freshly parsed result to the database. Runs entirely on the
- * main thread so the single SQLite handle owns every write.
- */
-function applyParseResult(sessionFile: string, lastModified: number, result: ParseSessionResult): number {
-	if (result.stats.length > 0) insertMessageStats(result.stats);
-	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
-	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
-	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-	setFileOffset(sessionFile, result.newOffset, lastModified, result.serviceTier);
-	return result.stats.length + result.userStats.length;
 }
 
 /**
@@ -245,20 +234,34 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  * bar walks at a steady rate).
  */
 export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
-	return withStatsSyncLock(getStatsDbPath(), () => syncAllSessionsLocked(opts));
+	return withStatsSyncLock(getStatsDbPath(), async () => {
+		let processed = 0;
+		let files = 0;
+		while (true) {
+			const result = await syncAllSessionsLocked(opts);
+			processed += result.processed;
+			files += result.files;
+			if (!result.reconcile) return { processed, files };
+		}
+	});
 }
 
-async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
+async function syncAllSessionsLocked(
+	opts?: SyncOptions,
+): Promise<{ processed: number; files: number; reconcile: boolean }> {
 	await initDb();
+	const replay = prepareSessionSync();
 
 	const files = await listAllSessionFiles();
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
+	let reconcile = false;
 	const finish = () => {
+		completeSessionSync(reconcile);
 		markSessionBackfillsComplete();
-		return { processed: totalProcessed, files: filesProcessed };
+		return { processed: totalProcessed, files: filesProcessed, reconcile };
 	};
 	if (files.length === 0) return finish();
 
@@ -292,7 +295,8 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		parse: (
 			sessionFile: string,
 			fromOffset: number,
-			serviceTier: ServiceTierByFamily | null | undefined,
+			state: SessionParserState | undefined,
+			replay: boolean,
 		) => Promise<ParseSessionResult>,
 	): Promise<void> => {
 		let fileStats: fs.Stats;
@@ -304,27 +308,40 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		}
 		const lastModified = fileStats.mtimeMs;
 		const stored = getFileOffset(sessionFile);
-		if (stored && stored.lastModified >= lastModified) {
+		if (
+			!replay &&
+			stored?.parserState &&
+			stored.lastModified === lastModified &&
+			stored.parserState.size === fileStats.size &&
+			matchesSessionFile(stored.parserState, fileStats)
+		) {
 			report(sessionFile, fileStats.size);
 			return;
 		}
 
 		try {
-			let offset = stored?.offset ?? 0;
-			let tier: ServiceTierByFamily | null | undefined = stored ? stored.serviceTier : null;
+			// A row without a cursor cannot prove its offset still points into this
+			// byte stream, so it is re-read from byte 0 and reconciled.
+			const unknownIdentity = stored !== null && !stored.parserState;
+			let offset = unknownIdentity ? 0 : (stored?.offset ?? 0);
+			let state = unknownIdentity ? undefined : stored?.parserState;
+			// Only the first pass may replay from byte 0 or rebuild the file's rows;
+			// a later chunk of the same file must append to what it just committed.
+			let firstPass = true;
 			let countedFile = false;
 			while (true) {
-				const result = await parse(sessionFile, offset, tier);
-				// Intermediate chunks store mtime 0 so an interrupted sync resumes from
-				// the committed offset instead of being skipped by the mtime guard above.
-				const inserted = applyParseResult(sessionFile, result.done ? lastModified : 0, result);
-				if (inserted > 0) {
-					totalProcessed += inserted;
+				const result = await parse(sessionFile, offset, state, replay && firstPass);
+				if (unknownIdentity && firstPass && result.parserState) result.reset = true;
+				const applied = applySessionParseResult(sessionFile, result, firstPass && (replay || !stored?.parserState));
+				if (applied.reconcile) reconcile = true;
+				if (applied.processed > 0) {
+					totalProcessed += applied.processed;
 					countedFile = true;
 				}
 				const advanced = result.newOffset > offset;
 				offset = result.newOffset;
-				tier = result.serviceTier;
+				state = result.parserState;
+				firstPass = false;
 				if (result.done) break;
 				if (!advanced) {
 					logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset });
@@ -343,8 +360,8 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
 	if (requestedWorkers === 1) {
 		for (const sessionFile of files) {
-			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
-				parseSessionFile(file, { fromOffset, serviceTier }),
+			await processFile(sessionFile, (file, fromOffset, state, replayFile) =>
+				parseSessionFile(file, { fromOffset, state, replay: replayFile }),
 			);
 		}
 		return finish();
@@ -360,8 +377,8 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 			const idx = cursor++;
 			if (idx >= files.length) return;
 			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset, serviceTier) =>
-				dispatch(handle, { sessionFile: file, fromOffset, serviceTier }),
+			await processFile(sessionFile, (file, fromOffset, parserState, replayFile) =>
+				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile }),
 			);
 		}
 	}

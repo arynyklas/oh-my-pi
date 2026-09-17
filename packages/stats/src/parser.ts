@@ -1,3 +1,4 @@
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -14,7 +15,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getSessionsDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
-	MessageStats,
+	MessageStatsInput,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionModelUsageEntry,
@@ -28,6 +29,9 @@ import { computeUserMessageMetrics } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
+
+/** Characters a persisted tool name may consist of without sanitization. */
+const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
 
 /**
  * Classify which agent produced a transcript from its path within the sessions
@@ -151,6 +155,61 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 }
 
 /**
+ * Session JSONL is written by older versions and foreign producers, so a token
+ * counter is whatever was persisted, not what `Usage` declares. A non-numeric
+ * bucket (`input: "10"`) must never be parsed and must never be summed: `+`
+ * would concatenate it into the derived total and SQLite would coerce the
+ * resulting string to a different, far larger number. A non-finite one
+ * (`input: 1e999` is legal JSON) must not reach a NOT NULL column either.
+ * Malformed input counts as absent.
+ */
+function isFiniteCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function finiteTokenCount(value: unknown): number {
+	return isFiniteCount(value) ? value : 0;
+}
+
+/**
+ * Token-bucket view for total derivation. Persisted session payloads are
+ * outside-controlled (old versions, foreign producers), so every counter is
+ * `unknown` and validated at read time.
+ */
+export interface UsageBucketView {
+	totalTokens?: unknown;
+	input?: unknown;
+	output?: unknown;
+	cacheRead?: unknown;
+	cacheWrite?: unknown;
+	orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
+}
+
+/**
+ * Total tokens for one usage payload, per the documented contract: the
+ * conversation buckets plus provider-reported orchestration tokens. A present
+ * finite provider total stays authoritative; a missing or malformed one
+ * (absent, string, NaN) is derived from the buckets, which would otherwise
+ * persist a zero total next to real token counts. Shared by ingest and the
+ * trace builder so stored and displayed totals cannot disagree.
+ */
+export function resolveUsageTotal(usage: UsageBucketView | null | undefined): number {
+	if (typeof usage?.totalTokens === "number" && Number.isFinite(usage.totalTokens)) return usage.totalTokens;
+	if (!usage || typeof usage !== "object") return 0;
+	const orchestration =
+		usage.orchestration && typeof usage.orchestration === "object" ? usage.orchestration : undefined;
+	return (
+		finiteTokenCount(usage.input) +
+		finiteTokenCount(usage.output) +
+		finiteTokenCount(usage.cacheRead) +
+		finiteTokenCount(usage.cacheWrite) +
+		finiteTokenCount(orchestration?.input) +
+		finiteTokenCount(orchestration?.output) +
+		finiteTokenCount(orchestration?.cacheRead)
+	);
+}
+
+/**
  * Extract stats from an assistant message entry.
  *
  * Session JSONL on disk is not guaranteed to match the current
@@ -167,7 +226,7 @@ function extractStats(
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
 	if (msg?.role !== "assistant") return null;
 	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
@@ -189,22 +248,27 @@ function extractStats(
 	const tier = resolveModelServiceTier(currentServiceTier, model);
 	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
 	const wellFormed =
-		typeof rawUsage.input === "number" &&
-		typeof rawUsage.output === "number" &&
-		typeof rawUsage.cacheRead === "number" &&
-		typeof rawUsage.cacheWrite === "number" &&
-		typeof rawUsage.totalTokens === "number";
-	const usage: Usage =
+		isFiniteCount(rawUsage.input) &&
+		isFiniteCount(rawUsage.output) &&
+		isFiniteCount(rawUsage.cacheRead) &&
+		isFiniteCount(rawUsage.cacheWrite) &&
+		isFiniteCount(rawUsage.totalTokens);
+	const usage: MessageStatsInput["usage"] =
 		wellFormed && derived === recorded
 			? (rawUsage as Usage)
 			: {
 					...rawUsage,
-					input: rawUsage.input ?? 0,
-					output: rawUsage.output ?? 0,
-					cacheRead: rawUsage.cacheRead ?? 0,
-					cacheWrite: rawUsage.cacheWrite ?? 0,
-					totalTokens: rawUsage.totalTokens ?? 0,
-					cost: rawUsage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					input: finiteTokenCount(rawUsage.input),
+					output: finiteTokenCount(rawUsage.output),
+					cacheRead: finiteTokenCount(rawUsage.cacheRead),
+					cacheWrite: finiteTokenCount(rawUsage.cacheWrite),
+					// A present finite provider total stays authoritative; a missing
+					// or malformed one (absent, string, NaN) is derived from the buckets.
+					totalTokens: resolveUsageTotal(rawUsage),
+					// An omitted `cost` must stay omitted: `resolveStoredCost` reads
+					// absence as "no recorded price" and estimates the request, while
+					// a zero would read as an explicitly free request.
+					cost: rawUsage.cost,
 					premiumRequests: derived,
 				};
 
@@ -232,7 +296,7 @@ function extractModelUsageStats(
 	folder: string,
 	entry: SessionModelUsageEntry,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
 	return extractStats(
 		sessionFile,
@@ -261,7 +325,9 @@ function extractModelUsageStats(
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
 function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessageEntry): number {
-	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+	// A stored zero is the "no timestamp" sentinel, not 1970: fall through to
+	// the entry envelope so a recoverable ISO time still selects its tariff.
+	if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0) return timestamp;
 	const ts = Date.parse(entry.timestamp);
 	return Number.isFinite(ts) ? ts : 0;
 }
@@ -292,27 +358,51 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
-	return blocks.map(block => {
+	const calls: ToolCallStats[] = [];
+	for (const block of blocks) {
+		// Names reduced to nothing by sanitization carry no tool identity:
+		// skip them rather than attributing usage to garbage (see
+		// sanitizeToolName). callsInTurn still counts the raw block total.
+		const toolName = sanitizeToolName(block.name);
+		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
 			argsChars = JSON.stringify(block.arguments ?? {}).length;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}
-		return {
+		calls.push({
 			sessionFile,
 			entryId: entry.id,
 			toolCallId: block.id,
 			folder,
-			toolName: block.name,
+			toolName,
 			model: msg.model,
 			provider: msg.provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
-		};
-	});
+		});
+	}
+	return calls;
+}
+
+/**
+ * Tool names as persisted can be polluted by provider-side parse garbage — a
+ * gateway may hand the model's whole invocation text back as the function
+ * name (e.g. `bash command="ls -la …"` with a stray in-band closer), which
+ * then shows up verbatim in every `GROUP BY tool_name` aggregate and the
+ * dashboard tool filter. Reduce such names to their leading identifier token;
+ * names that yield no identifier at all carry no tool identity and are
+ * returned as `null` so the row is skipped.
+ */
+function sanitizeToolName(name: string): string | null {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return null;
+	if (TOOL_NAME_PATTERN.test(trimmed)) return trimmed;
+	const candidate = trimmed.split(/[^\w.:-]/)[0] ?? "";
+	return candidate.length > 0 ? candidate : null;
 }
 
 /**
@@ -485,13 +575,40 @@ async function scanServiceTierPrefix(sessionPath: string, endOffset: number): Pr
 	return tier ?? null;
 }
 
+/**
+ * Persisted parse cursor for one transcript: where the last pass stopped, the
+ * file identity and tail hash that prove the cursor still points into the same
+ * byte stream, and the service tier active at `offset` (so an incremental sync
+ * of a huge transcript does not replay the prefix to recover it).
+ */
+export interface SessionParserState {
+	version: 1;
+	offset: number;
+	dev: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	checkpoint: string;
+	serviceTier: ServiceTierByFamily | null;
+}
+
 export interface ParseSessionOptions {
 	/** Resume offset; must be a line boundary from a previous `newOffset`. Default 0. */
 	fromOffset?: number;
 	/**
-	 * Active service tier at `fromOffset`. `null` = none active (fresh file, or a
-	 * recorded absence). `undefined` = unknown, which makes this call replay the
-	 * prefix with {@link scanServiceTierPrefix} to recover it.
+	 * Persisted cursor for `fromOffset`. When it still matches the file on disk
+	 * the appended tail is parsed directly and the recorded tier is reused;
+	 * otherwise the file is re-read from byte 0 and `reset` is reported.
+	 */
+	state?: SessionParserState;
+	/** Force a full re-parse from byte 0, ignoring `fromOffset` and `state`. */
+	replay?: boolean;
+	/**
+	 * Active service tier at `fromOffset` for callers that carry the tier
+	 * without a full cursor. `null` = none active; `undefined` = unknown, which
+	 * makes this call replay the prefix with {@link scanServiceTierPrefix} to
+	 * recover it. Ignored when `state` resumes.
 	 */
 	serviceTier?: ServiceTierByFamily | null;
 	/** Soft byte budget for this call; the scan stops at the next line boundary past it. */
@@ -499,35 +616,60 @@ export interface ParseSessionOptions {
 }
 
 export interface ParseSessionResult {
-	stats: MessageStats[];
+	stats: MessageStatsInput[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
+	/** Cursor to persist and feed back as `state` on the next pass for this file. */
+	parserState?: SessionParserState;
+	/** The file did not continue the persisted cursor, so it was re-read from byte 0. */
+	reset?: boolean;
 	/** Active tier at `newOffset`; feed back into the next call for this file. */
 	serviceTier: ServiceTierByFamily | null;
 	/** True when `newOffset` reached end of file as observed by this pass. */
 	done: boolean;
 }
 
+const CHECKPOINT_BYTES = 256;
+
+/**
+ * The {@link CHECKPOINT_BYTES} bytes ending at `end`. Hashing them proves a
+ * stored offset still points into the same byte stream, which catches a file
+ * rewritten in place at an identical size.
+ */
+async function readCheckpoint(sessionPath: string, end: number): Promise<Uint8Array> {
+	if (end <= 0) return new Uint8Array(0);
+	return await Bun.file(sessionPath)
+		.slice(Math.max(0, end - CHECKPOINT_BYTES), end)
+		.bytes();
+}
+
+export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
+	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
 /**
  * Parse a slice of a session file and extract assistant/user/tool stats.
  *
- * Reading is incremental in two dimensions: `fromOffset` skips bytes already
- * committed by an earlier sync, and `maxBytes` caps how much this call
- * consumes so multi-gigabyte transcripts are ingested in bounded-memory
- * chunks. Callers loop until `done`, feeding `newOffset`/`serviceTier` back in.
+ * Reading is incremental in two dimensions: `fromOffset` (validated against
+ * `state`) skips bytes already committed by an earlier sync, and `maxBytes`
+ * caps how much this call consumes so multi-gigabyte transcripts are ingested
+ * in bounded-memory chunks. Callers loop until `done`, feeding
+ * `newOffset`/`parserState` back in. A cursor that no longer matches the file
+ * on disk — different inode, shrunk, rewritten in place, or a mismatched tail
+ * hash — re-reads from byte 0 and reports `reset` so the caller can discard the
+ * rows it already stored for that file.
  *
- * Service-tier carry-over: `serviceTier` is session-scoped state derived from
+ * Service-tier carry-over: the tier is session-scoped state derived from
  * `service_tier_change` entries that decides whether subsequent OpenAI
  * assistant replies count as premium requests. Incremental syncs that resume
  * past the most-recent tier change would otherwise lose it and silently record
  * `premiumRequests = 0` for priority traffic (the coding-agent stopped folding
  * the tier into `usage.premiumRequests` after 13f59162e — the parser is now the
- * sole source of truth). Callers persist the returned tier; when they cannot
- * (rows predating tier persistence) they pass `undefined` and this call
- * replays the prefix to recover it.
+ * sole source of truth). A resumed `state` carries the tier; without one the
+ * prefix is replayed to recover it.
  */
 export async function parseSessionFile(
 	sessionPath: string,
@@ -535,26 +677,47 @@ export async function parseSessionFile(
 ): Promise<ParseSessionResult> {
 	const fromOffset = Math.max(0, options.fromOffset ?? 0);
 	const maxBytes = options.maxBytes ?? PARSE_CHUNK_BYTES;
+	const state = options.state;
+	const replay = options.replay === true;
 
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
-	const stats: MessageStats[] = [];
+	const stats: MessageStatsInput[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	let currentServiceTier: ServiceTierByFamily | null | undefined;
+	let reset = false;
 
 	try {
+		const info = await fs.stat(sessionPath);
+		let resume = !replay && state?.version === 1 && state.offset === fromOffset;
+		if (resume && state) {
+			reset =
+				!matchesSessionFile(state, info) ||
+				info.size < state.size ||
+				(info.size === state.size && info.mtimeMs !== state.mtimeMs);
+			if (!reset) {
+				const previous = await readCheckpoint(sessionPath, fromOffset);
+				reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+			}
+			resume = !reset;
+		}
+		if (fromOffset > info.size) reset = true;
+		const start = reset || replay ? 0 : fromOffset;
+
 		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
 		currentServiceTier =
-			fromOffset === 0
+			start === 0
 				? null
-				: options.serviceTier !== undefined
-					? options.serviceTier
-					: await scanServiceTierPrefix(sessionPath, fromOffset);
+				: resume
+					? (state?.serviceTier ?? null)
+					: options.serviceTier !== undefined
+						? options.serviceTier
+						: await scanServiceTierPrefix(sessionPath, start);
 
-		const { read, done } = await scanSessionLines(sessionPath, fromOffset, maxBytes, line => {
+		const { read, done } = await scanSessionLines(sessionPath, start, maxBytes, line => {
 			const entry = parseJsonLine(line);
 			if (!entry) return true;
 			if (isServiceTierChange(entry)) {
@@ -603,6 +766,7 @@ export async function parseSessionFile(
 			return true;
 		});
 
+		const checkpoint = Bun.hash(await readCheckpoint(sessionPath, read)).toString(16);
 		return {
 			stats,
 			userStats,
@@ -612,6 +776,18 @@ export async function parseSessionFile(
 			newOffset: read,
 			serviceTier: currentServiceTier ?? null,
 			done,
+			reset,
+			parserState: {
+				version: 1,
+				offset: read,
+				dev: info.dev,
+				ino: info.ino,
+				birthtimeMs: info.birthtimeMs,
+				size: info.size,
+				mtimeMs: info.mtimeMs,
+				checkpoint,
+				serviceTier: currentServiceTier ?? null,
+			},
 		};
 	} catch (err) {
 		if (isEnoent(err))
