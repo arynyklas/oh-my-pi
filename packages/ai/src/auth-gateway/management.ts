@@ -138,8 +138,7 @@ async function handleAdmin(
 		}
 		try {
 			const outcome = await storage.redeemResetCredit({
-				target: { credentialId },
-				provider: row.provider,
+				target: { provider: row.provider, credentialId },
 				signal: req.signal,
 			});
 			return json(200, { outcome });

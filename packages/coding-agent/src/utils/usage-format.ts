@@ -2,7 +2,7 @@ import { ANTHROPIC_OAUTH_GRANT_TTL_MS, type DisabledCredentialSummary } from "@o
 import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { collapseSharedUsageReports } from "./usage-display";
+import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 
 const BAR_WIDTH = 28;
 
@@ -249,25 +249,24 @@ function formatAccountHeader(
 	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
-	const savedResets = report.resetCredits?.availableCount ?? 0;
-	if (savedResets > 0) {
-		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
-		const credits = report.resetCredits?.credits;
-		if (credits) {
-			const expiries = credits
-				.filter(c => c.expiresAt)
-				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
-				.filter(c => !Number.isNaN(c.ms))
-				.sort((a, b) => a.ms - b.ms);
-			const upcoming = expiries.find(c => c.ms > nowMs);
-			if (upcoming) {
+	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+	if (resets && resets.bankedCount > 0) {
+		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);
+		if (resets.redeemableCount !== resets.bankedCount) {
+			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
+		}
+		if (resets.soonestExpiry) {
+			const expiryMs = Date.parse(resets.soonestExpiry);
+			if (expiryMs > nowMs) {
 				header += chalk.dim(
-					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
+					` · soonest expires in ${formatDuration(expiryMs - nowMs)} (${resets.soonestExpiry.slice(0, 10)})`,
 				);
 			} else {
-				const lastExpired = expiries.at(-1);
-				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
+				header += chalk.dim(` · expired (${resets.soonestExpiry.slice(0, 10)})`);
 			}
+		}
+		if (resets.redeemableCount === 0 && resets.unavailableReason) {
+			header += chalk.dim(` · unavailable: ${sanitizeUsageText(resets.unavailableReason)}`);
 		}
 	}
 	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {

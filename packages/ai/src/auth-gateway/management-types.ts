@@ -1,3 +1,4 @@
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 import type { Api } from "../types";
 import type { UsageReport } from "../usage";
@@ -119,6 +120,12 @@ export interface AuthGatewayModelListRow {
 	object: "model";
 	owned_by: string;
 	api: Api;
+	/**
+	 * Catalog kind for non-chat rows (`judge`, `image`, `tts`, `stt`,
+	 * `embedding`, `rerank`, `video`), so clients keep them off chat routes;
+	 * absent means chat.
+	 */
+	kind?: ModelKind;
 	display_name: string;
 	context_length?: number;
 	max_output_tokens?: number;

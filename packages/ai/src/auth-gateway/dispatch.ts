@@ -1,0 +1,357 @@
+/**
+ * Per-request plumbing shared by every auth-gateway route.
+ *
+ * A route module (`server.ts` chat/pi-native handlers, `routes/*.ts` for
+ * judgments, images, speech, transcription, …) owns only its wire format:
+ * parse the body, pick a model, call the pi-ai client, encode the reply.
+ * Everything credential-shaped lives here so each route drives the same
+ * broker-backed rotation policy and the same usage ledger.
+ */
+import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
+import type { ApiKeyResolver } from "../auth-retry";
+import type { AuthCredentialSelectionPolicy, AuthStorage } from "../auth-storage";
+import * as AIError from "../error";
+import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
+import { isUsageLimitOutcome } from "../error/rate-limit";
+import type { Api, FetchImpl, Model, Usage } from "../types";
+import type { ClientUsageIdentity } from "../usage";
+import { extractProviderRetryHint } from "../utils/retry-after";
+import type { AuthGatewayServerOptions } from "./types";
+
+export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+
+export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
+	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
+	storage: AuthStorage;
+	/**
+	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
+	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
+	 * dependency in `pi-ai`).
+	 */
+	resolveModel: ModelResolver;
+	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
+	listModels?: () => Iterable<Model<Api>>;
+	/**
+	 * True when the resolved model is explicitly configured to run without
+	 * provider credentials (for example a self-hosted vLLM endpoint). Managed
+	 * users still need route/provider/model ACLs, but no pool credential.
+	 */
+	isKeylessModel?: (model: Model<Api>) => boolean;
+	/**
+	 * Per-request credential policy for the authenticated principal, installed
+	 * by the router on a request-scoped clone of these options. Absent on an
+	 * unmanaged gateway, where every request uses the full credential set.
+	 */
+	credentialScope?: GatewayCredentialScope;
+	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
+	fetch?: FetchImpl;
+}
+
+/** Placeholder bearer for models configured to run without provider credentials. */
+export const GATEWAY_KEYLESS_API_KEY = "N/A";
+
+/** Credential policy a principal gets for one model: a pool grant, or a denial. */
+export interface GatewayCredentialGrant {
+	/** Account pool the principal may draw on; absent means the full credential set. */
+	selection?: AuthCredentialSelectionPolicy;
+	/** Session-key namespace, so two pools never share a sticky credential. */
+	sessionScope?: string;
+	/** Model needs no provider credential; the sentinel bearer is used instead. */
+	keyless?: boolean;
+}
+
+export type GatewayCredentialScope = (model: Model<Api>) => GatewayCredentialGrant | GatewayErrorClassification;
+
+function isCredentialDenial(value: object): value is GatewayErrorClassification {
+	return "status" in value;
+}
+
+/**
+ * Resolve the principal's grant for `model` and namespace `sessionId` under it.
+ * Without a scope (unmanaged gateway) the request keeps its bare session id and
+ * the full credential set.
+ */
+function scopeGatewaySession(
+	bootOpts: AuthGatewayBootOptions,
+	model: Model<Api>,
+	sessionId: string,
+): { grant: GatewayCredentialGrant; sessionId: string } | GatewayErrorClassification {
+	const grant = bootOpts.credentialScope?.(model) ?? {};
+	if (isCredentialDenial(grant)) return grant;
+	return {
+		grant,
+		sessionId: grant.sessionScope ? `${grant.sessionScope}\u0000${sessionId}` : sessionId,
+	};
+}
+
+/**
+ * The client's own session key, or `undefined` when it sent none. A blank key
+ * counts as none: honouring it would collapse every caller that sends an empty
+ * key into one shared credential-sticky, prefix-cache and provider-session
+ * bucket.
+ */
+export function normalizeClientSessionKey(clientKey: string | undefined): string | undefined {
+	return clientKey !== undefined && clientKey.trim().length > 0 ? clientKey : undefined;
+}
+
+/**
+ * Stable identity of the account a request's credential belongs to.
+ *
+ * `markUsageLimitReached` and the auth-retry resolver switch a session to a
+ * sibling credential, so the provider state retained for that session can
+ * outlive the account that taught it. OAuth rows expose an account id / email
+ * that survives token refresh — fingerprinting the bearer instead would look
+ * like a rotation every time a token refreshes and discard the retained
+ * lessons for nothing. Key-based rows fall back to a hash of the key, never
+ * the key itself: this value is held for the lifetime of the entry.
+ */
+export function resolveGatewayAccount(
+	storage: AuthStorage,
+	provider: string,
+	sessionId: string,
+	apiKey: string,
+): string {
+	const identity = storage.getOAuthAccountIdentity(provider, sessionId);
+	if (identity) {
+		return `oauth:${JSON.stringify([
+			identity.accountId ?? "",
+			identity.email ?? "",
+			identity.projectId ?? "",
+			identity.orgId ?? "",
+		])}`;
+	}
+	return `key:${Bun.hash(apiKey).toString(36)}`;
+}
+
+/**
+ * Resolve the credential for one request from broker-backed storage.
+ *
+ * pi-ai clients never consult `AuthStorage`; the gateway resolves the bearer
+ * (an OAuth access token refreshed through the broker when needed) and hands
+ * it to the client. When the router installed a {@link GatewayCredentialScope}
+ * the principal's pool policy applies: the grant may deny the request outright,
+ * mark the model keyless, or restrict selection to the pool's accounts.
+ * Returns the key, or the error classification the route should encode in its
+ * own envelope: storage failures map through {@link classifyGatewayError}, a
+ * provider without any usable credential is a 401.
+ */
+export async function resolveGatewayApiKey(
+	bootOpts: AuthGatewayBootOptions,
+	model: Model<Api>,
+	sessionId: string,
+	signal: AbortSignal,
+	peer: string,
+): Promise<string | GatewayErrorClassification> {
+	const scoped = scopeGatewaySession(bootOpts, model, sessionId);
+	if (isCredentialDenial(scoped)) return scoped;
+	if (scoped.grant.keyless) return GATEWAY_KEYLESS_API_KEY;
+	try {
+		const resolved = await bootOpts.storage.resolveApiKeySelection(model.provider, scoped.sessionId, {
+			modelId: model.id,
+			signal,
+			selection: scoped.grant.selection,
+		});
+		if (resolved.ok) return resolved.credential.apiKey;
+		if (resolved.reason === "all_eligible_blocked") {
+			return {
+				status: 429,
+				type: "rate_limit_error",
+				message: "No eligible credential is available for this request",
+			};
+		}
+	} catch (error) {
+		const classified = classifyGatewayError(error);
+		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+		return classified;
+	}
+	return {
+		status: 401,
+		type: "authentication_error",
+		message: `No credential available for provider ${model.provider}`,
+	};
+}
+
+/**
+ * Hook fired by a pi-ai client when the upstream request fails in a way
+ * that's rotatable — today that's HTTP 401 (credential is bad) and
+ * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
+ * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
+ * `resource_exhausted`, …). The two cases need different storage actions:
+ *
+ * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
+ *   the current session's credential as temporarily blocked (honouring
+ *   `retry-after` / `resets_at` hints when present) and returns `true` only
+ *   when a sibling credential is still available. Burning the credential
+ *   with `invalidateCredentialMatching` here would orphan accounts whose
+ *   reset window is several hours away — exactly the bug this helper exists
+ *   to avoid.
+ * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
+ *   Suspect/delete the row so it doesn't get re-picked next request.
+ *
+ * In both branches we return the next `getApiKey` result (sticky on the
+ * same `sessionId`) so the client can transparently retry the pre-emit
+ * failure with a fresh credential. Returning `undefined` aborts the retry
+ * and surfaces the original error to the caller.
+ */
+async function refreshGatewayApiKeyAfterAuthError(
+	storage: AuthStorage,
+	model: Model<Api>,
+	sessionId: string,
+	provider: string,
+	oldKey: string,
+	error: unknown,
+	signal: AbortSignal,
+	format: string,
+	peer: string,
+	selection: AuthCredentialSelectionPolicy | undefined,
+): Promise<string | undefined> {
+	const message = error instanceof Error ? error.message : String(error);
+	const status = extractHttpStatusFromError(error);
+	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+		const retryAfterMs = extractProviderRetryHint(provider, message);
+		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			apiKey: oldKey,
+			signal,
+			selection,
+		});
+		logger.debug("auth-gateway retrying provider request after usage-limit block", {
+			format,
+			provider,
+			peer,
+			switched,
+			retryAfterMs,
+			retryAtMs,
+			error: message,
+		});
+		if (!switched) return undefined;
+		const rotated = await storage.resolveApiKeySelection(provider, sessionId, {
+			modelId: model.id,
+			signal,
+			selection,
+		});
+		return rotated.ok ? rotated.credential.apiKey : undefined;
+	}
+	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal, selection });
+	logger.debug("auth-gateway retrying provider request after credential invalidation", {
+		format,
+		provider,
+		peer,
+		error: message,
+	});
+	const rotated = await storage.resolveApiKeySelection(provider, sessionId, { modelId: model.id, signal, selection });
+	return rotated.ok ? rotated.credential.apiKey : undefined;
+}
+
+/**
+ * Build the {@link ApiKeyResolver} handed to a pi-ai client for a gateway
+ * request. Drives the central a/b/c auth-retry policy server-side:
+ *
+ * - initial resolve → the credential already resolved for this request.
+ * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
+ *   (a peer/broker may have rotated its token out from under our cached copy).
+ * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
+ *   to a sibling (usage-limit block vs credential invalidation by error class).
+ *
+ * `lastKey` tracks the most recent bearer so the switch step invalidates the
+ * credential that actually failed. `onResolvedKey` observes every rotation;
+ * routes that retain provider session state use it to re-key the account
+ * lease, one-shot routes pass `undefined`. Rotation stays inside the
+ * principal's pool grant, so a managed user never fails over onto an account
+ * their ACL does not reach.
+ */
+export function buildGatewayApiKeyResolver(
+	bootOpts: AuthGatewayBootOptions,
+	model: Model<Api>,
+	sessionId: string,
+	initialKey: string,
+	requestSignal: AbortSignal,
+	format: string,
+	peer: string,
+	onResolvedKey?: (apiKey: string) => void,
+): ApiKeyResolver {
+	const storage = bootOpts.storage;
+	const scoped = scopeGatewaySession(bootOpts, model, sessionId);
+	const grant = isCredentialDenial(scoped) ? undefined : scoped.grant;
+	const scopedSessionId = isCredentialDenial(scoped) ? sessionId : scoped.sessionId;
+	let lastKey = initialKey;
+	return async ({ lastChance, error, signal }) => {
+		const sig = signal ?? requestSignal;
+		if (error === undefined) {
+			lastKey = initialKey;
+			return initialKey;
+		}
+		// A denied or keyless grant has no credential to rotate onto.
+		if (grant === undefined || grant.keyless) return undefined;
+		if (!lastChance) {
+			const refreshed = await storage.resolveApiKeySelection(model.provider, scopedSessionId, {
+				modelId: model.id,
+				signal: sig,
+				forceRefresh: true,
+				selection: grant.selection,
+			});
+			if (!refreshed.ok) return undefined;
+			lastKey = refreshed.credential.apiKey;
+			onResolvedKey?.(lastKey);
+			return lastKey;
+		}
+		const next = await refreshGatewayApiKeyAfterAuthError(
+			storage,
+			model,
+			scopedSessionId,
+			model.provider,
+			lastKey,
+			error,
+			sig,
+			format,
+			peer,
+			grant.selection,
+		);
+		lastKey = next ?? lastKey;
+		if (next) onResolvedKey?.(next);
+		return next;
+	};
+}
+
+/**
+ * Attribute one settled upstream request to the originating client via the
+ * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
+ * by the remote store). Error/aborted turns still record — the provider
+ * billed whatever tokens the partial turn consumed; zero-usage results
+ * (pre-flight failures) are skipped. `at` defaults to now.
+ */
+export function recordGatewayUsage(
+	storage: AuthStorage,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	usage: Usage,
+	at?: number,
+): void {
+	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
+	storage.recordObservedUsage({
+		provider: model.provider,
+		model: model.id,
+		at,
+		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
+		costUsd: usage.cost.total,
+		client,
+	});
+}
+
+/**
+ * An `AbortController` that follows the inbound request's abort signal. Routes
+ * abort it themselves when the response body is cancelled mid-stream, which
+ * `req.signal` alone does not observe.
+ */
+export function mirrorRequestAbort(req: Request): AbortController {
+	const controller = new AbortController();
+	if (req.signal.aborted) {
+		controller.abort(req.signal.reason);
+	} else {
+		req.signal.addEventListener("abort", () => controller.abort(req.signal.reason), { once: true });
+	}
+	return controller;
+}

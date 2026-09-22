@@ -11,7 +11,7 @@ export const authGatewayAuditOutcomeSchema = type(
 	"'success' | 'unauthorized' | 'denied_by_acl' | 'invalid_request' | 'unknown_model' | 'no_eligible_credential' | 'usage_limit' | 'upstream_error' | 'request_aborted' | 'not_found' | 'internal_error'",
 );
 export const authGatewayRouteFamilySchema = type(
-	"'chat' | 'messages' | 'responses' | 'pi-native' | 'models' | 'usage' | 'check' | 'management' | 'unknown'",
+	"'chat' | 'messages' | 'responses' | 'pi-native' | 'models' | 'usage' | 'check' | 'systemone' | 'images' | 'speech' | 'transcriptions' | 'embeddings' | 'rerank' | 'video' | 'management' | 'unknown'",
 );
 
 export const authGatewayUserSchema = type({

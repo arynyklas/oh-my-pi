@@ -5,11 +5,9 @@ import {
 	type AccountManagerOptions,
 	AccountManagerSelectorComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/account-manager-selector";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import {
-	type SessionPinAccount,
-	toSessionPinAccounts,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
+import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 
 beforeAll(async () => {
 	await initTheme();

@@ -6,12 +6,15 @@ import type { AuthGatewayAdminClient, AuthGatewayAdminStatus } from "@oh-my-pi/p
 import { AuthGatewayAdminClientError } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import {
+	createGatewaySettingsHost,
 	GatewayProfileSettingsComponent,
 	type GatewayProfileSettingsContext,
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/profile-settings";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const CURSOR_MARKER = "\x1b_pi:c\x07";
@@ -580,8 +583,9 @@ describe("SettingsSelectorComponent gateway tab", () => {
 				thinkingLevel: undefined,
 				availableThemes: ["dark"],
 				providers: [],
-				cwd: process.cwd(),
-				gatewayProfiles: context(),
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+				gatewayProfiles: createGatewaySettingsHost(context()),
 			},
 			{ onChange: () => {}, onCancel: () => {} },
 		);
@@ -610,8 +614,9 @@ describe("SettingsSelectorComponent gateway tab", () => {
 				thinkingLevel: undefined,
 				availableThemes: ["dark"],
 				providers: [],
-				cwd: process.cwd(),
-				gatewayProfiles: context(store),
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+				gatewayProfiles: createGatewaySettingsHost(context(store)),
 			},
 			{ onChange: () => {}, onCancel: () => cancels++ },
 		);
@@ -638,8 +643,9 @@ describe("SettingsSelectorComponent gateway tab", () => {
 				thinkingLevel: undefined,
 				availableThemes: ["dark"],
 				providers: [],
-				cwd: process.cwd(),
-				gatewayProfiles: context(store),
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+				gatewayProfiles: createGatewaySettingsHost(context(store)),
 			},
 			{ onChange: () => {}, onCancel: () => cancels++ },
 		);
@@ -679,8 +685,9 @@ describe("SettingsSelectorComponent gateway tab", () => {
 				thinkingLevel: undefined,
 				availableThemes: ["dark"],
 				providers: [],
-				cwd: process.cwd(),
-				gatewayProfiles: context(store),
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+				gatewayProfiles: createGatewaySettingsHost(context(store)),
 			},
 			{ onChange: () => {}, onCancel: () => {} },
 		);

@@ -176,8 +176,8 @@ function usageOverlayKey(
 	const accountId = ids.accountId?.trim().toLowerCase();
 	const email = ids.email?.trim().toLowerCase();
 	const projectId = ids.projectId?.trim().toLowerCase();
-	if (accountId) base = `account:${accountId}`;
-	else if (email) base = `email:${email}`;
+	if (email) base = `email:${email}`;
+	else if (accountId) base = `account:${accountId}`;
 	else if (projectId) base = `project:${projectId}`;
 	const orgId = ids.orgId?.trim().toLowerCase();
 	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;

@@ -7,7 +7,7 @@ import {
 	type SgrMouseEvent,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import { getSelectListTheme, theme } from "../../theme/theme";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 export type AuthGatewayFlowStep =
 	| {

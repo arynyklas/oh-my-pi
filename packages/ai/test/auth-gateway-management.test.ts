@@ -586,7 +586,7 @@ describe("auth-gateway management HTTP", () => {
 			{},
 		);
 		expect(response.status).toBe(200);
-		expect(redeemedTarget).toEqual({ credentialId: credential.id });
+		expect(redeemedTarget).toEqual({ provider: "openai-codex", credentialId: credential.id });
 		expect(await readJson(response)).toEqual({ outcome });
 
 		outcome = { ok: false, code: "nothing_to_reset", accountId: "acct-codex", email: "codex@example.com" };

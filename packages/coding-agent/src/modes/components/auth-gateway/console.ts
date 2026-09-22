@@ -35,11 +35,11 @@ import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../
 import { describeRedeemOutcome } from "../../../slash-commands/helpers/reset-usage";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { formatUsageReportLines } from "../../../utils/usage-format";
-import { getTabBarTheme } from "../../shared";
-import { theme } from "../../theme/theme";
+import { getTabBarTheme } from "@oh-my-pi/pi-tui/chrome/shared";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { renderOAuthAuthorizationLink } from "../oauth-authorization-link";
-import { OAuthSelectorComponent } from "../oauth-selector";
-import { bottomBorder, divider, row, topBorder } from "../overlay-box";
+import { OAuthSelectorComponent, type OAuthSelectorAuthSource } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
+import { bottomBorder, divider, row, topBorder } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 import {
 	AuthGatewayAccountLoginController,
 	type AuthGatewayAccountLoginPromptState,
@@ -107,6 +107,16 @@ const TABS: Array<{ id: AuthGatewayConsoleTab; label: string; short: string }> =
 
 const FOOTER_PREFIX = "1-5 tabs · ↑/↓ select · / filter · r refresh · ? help";
 const LEADING_SGR_MOUSE_EVENT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]/;
+/**
+ * The console logs into accounts held by the remote gateway, so the local
+ * credential store says nothing about them: every provider is offered, none is
+ * reported as already authenticated.
+ */
+const NO_LOCAL_AUTH: OAuthSelectorAuthSource = {
+	has: () => false,
+	hasAuth: () => false,
+	getCredentialOrigin: () => undefined,
+};
 const NAME_HELP = "Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.";
 const DESCRIPTION_HELP = "Human-readable purpose; blank leaves it unset.";
 const OWNER_HELP = "Operator or team responsible for this user; blank leaves it unset.";
@@ -612,7 +622,7 @@ export class AuthGatewayConsole implements Component, Focusable {
 		this.#loginProviderSelector?.stopValidation();
 		this.#loginProviderSelector = new OAuthSelectorComponent(
 			"login",
-			undefined,
+			NO_LOCAL_AUTH,
 			providerId => {
 				this.#loginProviderSelector?.stopValidation();
 				this.#loginProviderSelector = null;

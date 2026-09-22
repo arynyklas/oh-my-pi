@@ -8,14 +8,15 @@ import {
 	type SgrMouseEvent,
 } from "@oh-my-pi/pi-tui";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/utils";
+import type { GatewaySettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import type {
 	AuthGatewayConnectionProfile,
 	AuthGatewayProfileStore,
 	AuthGatewayTokenSource,
 	ResolvedAuthGatewayConnection,
 } from "../../../auth-gateway/profiles";
-import { getSelectListTheme, theme } from "../../theme/theme";
-import { routeSelectListMouseWithTopBorder } from "../select-list-mouse-routing";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { routeSelectListMouseWithTopBorder } from "@oh-my-pi/pi-tui/chrome/select-list-mouse-routing";
 
 export interface GatewayProfileSettingsContext {
 	profileStore: AuthGatewayProfileStore;
@@ -27,6 +28,17 @@ export interface GatewayProfileSettingsOptions {
 	onboarding?: boolean;
 	onConnectionReady?: (name: string) => void;
 	onCancel?: () => void;
+}
+
+/**
+ * Adapt the profile editor to the `GatewaySettingsHost` seam pi-tui's settings
+ * selector renders its Gateway tab through. The editor reads coding-agent's
+ * profile store, so pi-tui only ever sees the panel interface.
+ */
+export function createGatewaySettingsHost(context: GatewayProfileSettingsContext): GatewaySettingsHost {
+	return {
+		createPanel: options => new GatewayProfileSettingsComponent(context, options),
+	};
 }
 
 type TokenSourceMode = "file" | "env" | "command";

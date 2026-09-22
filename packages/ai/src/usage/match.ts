@@ -111,14 +111,31 @@ function matchExactUsageReportCandidate(
 		);
 		if (match) return match;
 	}
+	// Email identifies the member inside a shared Team workspace, where several
+	// members report the same account (and org) id, so a differing email on an
+	// otherwise matching report is decisive — one member's pool must not stand
+	// in for another's. The exception is an email the reports show to be shared:
+	// when this identity's address also sits on a report belonging to a
+	// different account, the address cannot route anyone and the account id
+	// decides instead.
+	const emailIsShared =
+		email !== undefined &&
+		candidates.some(
+			report => normalizedReportEmails(report).includes(email) && reportHasAccountConflict(report, accountId),
+		);
+	const emailConflicts = (report: UsageReport): boolean => !emailIsShared && reportHasEmailConflict(report, email);
 	if (accountId) {
-		const match = candidates.find(report => normalizedReportAccountIds(report).includes(accountId));
+		const match = candidates.find(
+			report => normalizedReportAccountIds(report).includes(accountId) && !emailConflicts(report),
+		);
 		if (match) return match;
 	}
 	if (projectId) {
 		const match = candidates.find(
 			report =>
-				normalizedReportProjectIds(report).includes(projectId) && !reportHasAccountConflict(report, accountId),
+				normalizedReportProjectIds(report).includes(projectId) &&
+				!reportHasAccountConflict(report, accountId) &&
+				!emailConflicts(report),
 		);
 		if (match) return match;
 	}
@@ -177,6 +194,11 @@ function reportHasAccountConflict(report: UsageReport, accountId: string | undef
 function reportHasProjectConflict(report: UsageReport, projectId: string | undefined): boolean {
 	const projectIds = normalizedReportProjectIds(report);
 	return projectId !== undefined && projectIds.length > 0 && !projectIds.includes(projectId);
+}
+
+function reportHasEmailConflict(report: UsageReport, email: string | undefined): boolean {
+	const emails = normalizedReportEmails(report);
+	return email !== undefined && emails.length > 0 && !emails.includes(email);
 }
 
 function normalizedReportOrgIds(report: UsageReport): string[] {

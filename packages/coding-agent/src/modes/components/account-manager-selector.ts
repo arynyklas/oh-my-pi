@@ -1,10 +1,10 @@
 import type { AccountSelectionEvent } from "@oh-my-pi/pi-ai";
 import { extractPrintableText, matchesKey, Spacer, TruncatedText } from "@oh-my-pi/pi-tui";
-import type { SessionPinAccount } from "../../slash-commands/helpers/session-pin";
-import { sanitizeStatusText } from "../shared";
-import { theme } from "../theme/theme";
-import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
-import { OverlayPanel, PanelDivider } from "./overlay-box";
+import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { theme } from "@oh-my-pi/pi-tui/theme";
+import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
+import { OverlayPanel, PanelDivider } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 
 /** Accounts shown at once before the list windows around the cursor. */
 const ACCOUNT_WINDOW = 8;

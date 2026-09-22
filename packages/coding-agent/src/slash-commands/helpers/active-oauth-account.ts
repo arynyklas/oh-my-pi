@@ -1,7 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { DefaultAccountFallover, OAuthAccountIdentity, OAuthAccountSummary } from "../../session/auth-storage";
-import { formatDuration } from "./format";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 
 function normalizeIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;

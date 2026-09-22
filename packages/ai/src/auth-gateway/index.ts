@@ -2,6 +2,7 @@ export * from "./access-control";
 export * from "./access-store";
 export * from "./admin-url";
 export * from "./client";
+export * from "./dispatch";
 export * from "./http";
 export * from "./management-schemas";
 export * from "./management-types";

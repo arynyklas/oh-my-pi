@@ -12,7 +12,7 @@ import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
 import { formatUsageReportLines } from "../../../utils/usage-format";
-import { initTheme } from "../../theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AuthGatewayConsole } from "./console";
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;

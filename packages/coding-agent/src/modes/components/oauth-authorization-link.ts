@@ -1,6 +1,6 @@
 import { replaceTabs } from "@oh-my-pi/pi-tui";
-import { urlHyperlinkAlways } from "../../tui";
-import { theme } from "../theme/theme";
+import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 
 /**
  * Minimum column budget for URL wrapping. Below this the terminal is

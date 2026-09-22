@@ -6,6 +6,13 @@ export const AUTH_GATEWAY_ACL_ROUTES = [
 	"models",
 	"usage",
 	"check",
+	"systemone",
+	"images",
+	"speech",
+	"transcriptions",
+	"embeddings",
+	"rerank",
+	"video",
 ] as const;
 export const AUTH_GATEWAY_BASIC_ROUTES = [
 	"chat",
@@ -197,6 +204,13 @@ const ROUTES: Record<AuthGatewayAclRoute, true> = {
 	models: true,
 	usage: true,
 	check: true,
+	systemone: true,
+	images: true,
+	speech: true,
+	transcriptions: true,
+	embeddings: true,
+	rerank: true,
+	video: true,
 };
 
 const STRATEGIES: Record<AuthGatewayPoolStrategy, true> = {

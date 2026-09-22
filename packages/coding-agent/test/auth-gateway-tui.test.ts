@@ -56,7 +56,7 @@ import {
 	copyOneTimeTokenDialogValue,
 	createOneTimeTokenDialog,
 } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/dialogs";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -2517,7 +2517,14 @@ describe("AuthGatewayConsole", () => {
 		expect(rendered).toContain("Basic routes");
 		expect(rendered).toContain(AUTH_GATEWAY_BASIC_ROUTES.join(", "));
 		expect(rendered).toContain("All routes (*)");
-		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(rendered).toContain(route);
+		// The canonical list outgrew one popup window, so walking to the end is
+		// part of the contract: every family must be reachable, not merely the
+		// first screenful.
+		// Two entries (Basic routes, All routes) precede the families, so this
+		// lands exactly on the last one — the list wraps if over-pressed.
+		for (let i = 0; i <= AUTH_GATEWAY_ACL_ROUTES.length; i++) component.handleInput("\x1b[B");
+		const scrolled = `${rendered}\n${plain(component, 120)}`;
+		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(scrolled).toContain(route);
 		component.dispose?.();
 	});
 

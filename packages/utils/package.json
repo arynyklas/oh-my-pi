@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "18.2.4-fork.1",
+	"version": "18.2.9-fork.1",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
