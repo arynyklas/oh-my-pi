@@ -2,8 +2,8 @@
 	"base": "v18.3.0",
 	"baseCommit": "62bc57be1b03ef0802a33cf7f5f530e534527531",
 	"head": "HEAD",
-	"headCommit": "90baa72561fc9d33563b30c32a1da7f123be1d7f",
-	"generated": "2026-09-24T09:41:06.152Z",
+	"headCommit": "2cbea33ac50e90dd00df62cf434d022db4ae07dd",
+	"generated": "2026-09-24T10:29:12.978Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -226,6 +226,7 @@
 			"subject": "chore(fork): remaining fork deltas",
 			"files": [
 				".gitignore",
+				"docs/models.md",
 				"packages/ai/src/auth/affinity.ts",
 				"packages/ai/src/auth/blocks.ts",
 				"packages/ai/src/auth/cascade.ts",

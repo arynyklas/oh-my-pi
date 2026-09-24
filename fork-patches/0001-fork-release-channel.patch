@@ -254,7 +254,7 @@ index 0000000..9bf777b
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
 +connection profiles. Delete it separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index f7b0333..12ded88 100644
+index f7b0333..932ae00 100644
 --- a/package.json
 +++ b/package.json
 @@ -21,11 +21,11 @@ {
@@ -262,12 +262,12 @@ index f7b0333..12ded88 100644
  			"@oh-my-pi/pi-ai": "18.3.0",
  			"@oh-my-pi/pi-catalog": "18.3.0",
 -			"@oh-my-pi/pi-coding-agent": "18.3.0",
-+			"@oh-my-pi/pi-coding-agent": "18.3.0-fork.1",
++			"@oh-my-pi/pi-coding-agent": "18.3.0-fork.2",
  			"@oh-my-pi/pi-mnemopi": "18.3.0",
  			"@oh-my-pi/pi-natives": "18.3.0",
  			"@oh-my-pi/pi-tui": "18.3.0",
 -			"@oh-my-pi/pi-utils": "18.3.0",
-+			"@oh-my-pi/pi-utils": "18.3.0-fork.1",
++			"@oh-my-pi/pi-utils": "18.3.0-fork.2",
  			"@oh-my-pi/pi-wire": "18.3.0",
  			"@oh-my-pi/snapcompact": "18.3.0",
  			"@opentelemetry/api": "^1.9.1",
@@ -285,14 +285,14 @@ index 71d0690..febc589 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index a19549c..3adb89e 100644
+index a19549c..046407d 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
 -	"version": "18.3.0",
-+	"version": "18.3.0-fork.1",
++	"version": "18.3.0-fork.2",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -872,14 +872,14 @@ index c4c855b..5782d26 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 7c7e7ea..c198f8b 100644
+index 7c7e7ea..63dc6e1 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
 -	"version": "18.3.0",
-+	"version": "18.3.0-fork.1",
++	"version": "18.3.0-fork.2",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",

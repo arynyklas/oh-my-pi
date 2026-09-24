@@ -118,13 +118,19 @@ index c09c253..79075cd 100644
  ## [16.4.0] - 2026-07-10
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 43282df..a670a61 100644
+index 43282df..6149e11 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,26 @@ # Changelog
+@@ -2,6 +2,32 @@ # Changelog
  
  ## [Unreleased]
  
++## [18.3.0-fork.2] - 2026-09-24
++
++### Fixed
++
++- Image models from OpenAI-compatible gateways now appear in the `image` role instead of the chat picker: `openai-models-list` discovery reads Envoy AI Gateway (`aigw`) `metadata` modalities, `models.yml` accepts `api: openai-images`, and `discovery: proxy` maps omp auth-gateway `kind: image` rows to image models served through the gateway's `/v1/images/generations`.
++
 +## [18.3.0-fork.1] - 2026-09-24
 +
 +### Changed
@@ -148,7 +154,7 @@ index 43282df..a670a61 100644
  ## [18.3.0] - 2026-09-24
  
  ### Breaking Changes
-@@ -917,6 +937,100 @@ - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
+@@ -917,6 +943,100 @@ - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
  - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
  - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
  
@@ -249,7 +255,7 @@ index 43282df..a670a61 100644
  ## [18.1.16] - 2026-09-09
  
  ### Added
-@@ -1785,4 +1899,15433 @@ - Fixed `formatContent` reporting no-formatter as unchanged: when no configured server supports formatting, the result is now correctly classified as `FileFormatResult.UNSUPPORTED` ([#8388](https://github.com/can1357/oh-my-pi/issues/8388)).
+@@ -1785,4 +1905,15433 @@ - Fixed `formatContent` reporting no-formatter as unchanged: when no configured server supports formatting, the result is now correctly classified as `FileFormatResult.UNSUPPORTED` ([#8388](https://github.com/can1357/oh-my-pi/issues/8388)).
  - Fixed MCP request timeouts surfacing as `Unexpected end of JSON input` instead of `Request timeout after Nms` when the abort lands mid-JSON-body read.
  - Fixed CJS modules being misclassified as ESM when imported from an ESM parent module. The extension loader now identifies unshadowed CommonJS syntax from Babel's parsed AST before deferring to the importer's module kind. This resolves `SyntaxError: Missing 'default' export` for packages with conditional exports (e.g. playwright-core) where an ESM wrapper re-exports from a CJS entry, while ambiguous files continue to inherit their importer's classification.
  

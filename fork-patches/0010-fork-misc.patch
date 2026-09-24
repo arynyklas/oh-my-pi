@@ -10,6 +10,32 @@ index 131675a..092b52a 100644
  *.b64.js
  /result
  /result-*
+diff --git a/docs/models.md b/docs/models.md
+index 641a2f4..b3c585a 100644
+--- a/docs/models.md
++++ b/docs/models.md
+@@ -116,9 +116,12 @@ - `google-gemini-cli`
+ - `google-vertex`
+ - `typesafe`
+ - `openrouter-decisions`
++- `openai-images`
+ 
+ `typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+ 
++`openai-images` is an image-generation API: a model declared with it answers `{baseUrl}/images/generations` (and `/images/edits` for inputs), is catalogued as an `image` model, and is selected by the `image` model role instead of the chat picker. Under `transport: pi-native` it targets the gateway's `/v1` root.
++
+ ### Allowed auth/discovery values
+ 
+ - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
+@@ -348,6 +351,8 @@ - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
+ - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
+ - otherwise -> falls back to provider-level `api` if set, else dropped
+ 
++Rows an omp auth-gateway marks with a non-chat `kind` skip that routing: `kind: image` becomes an `openai-images` model in the `image` role (served by the gateway's `/v1/images/generations`); other runner kinds are not offered as chat models.
++
+ Provider-level `api` is **optional** with `discovery.type: proxy` because the
+ per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
+ from `baseUrl` before appending `/v1/messages`, so a single discovery `baseUrl`
 diff --git a/packages/ai/src/auth/affinity.ts b/packages/ai/src/auth/affinity.ts
 index 6c86d4e..c7087ed 100644
 --- a/packages/ai/src/auth/affinity.ts

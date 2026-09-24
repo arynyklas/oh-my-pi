@@ -32,7 +32,7 @@ index 9c1a170..8fb93d0 100644
  | `tts.localVoice`                    | enum    | `af_heart` | Voice used by the local Kokoro TTS runner. Available local voices remain configurable independently of `modelRoles.speech`.                                                                                                                                                                                                                                                                                                           |
  | `speech.voice`                      | enum    | `af_heart` | Kokoro voice used when assistant-output vocalization is enabled.                                                                                                                                                                                                                                                                                                                                                                     |
 diff --git a/packages/coding-agent/src/config/custom-models.ts b/packages/coding-agent/src/config/custom-models.ts
-index 79dd20c..b275e1e 100644
+index 79dd20c..fa75bb0 100644
 --- a/packages/coding-agent/src/config/custom-models.ts
 +++ b/packages/coding-agent/src/config/custom-models.ts
 @@ -44,8 +44,9 @@ export function mergeAuthHeaderSources(
@@ -54,16 +54,21 @@ index 79dd20c..b275e1e 100644
  		provider: providerName,
  		api,
  		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
-@@ -124,6 +126,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
+@@ -124,8 +126,12 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
  	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
  	const built = buildModel({
  		id: resolvedModel.id,
 +		requestModelId: resolvedModel.requestModelId,
  		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
  		api: resolvedModel.api,
++		// `openai-images` only generates images; a chat kind would hide the model
++		// from the image role and offer it to the chat picker instead.
++		...(resolvedModel.api === "openai-images" ? { kind: "image" as const } : {}),
  		provider: resolvedModel.provider,
+ 		baseUrl: resolvedModel.baseUrl,
+ 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
 diff --git a/packages/coding-agent/src/config/model-discovery.ts b/packages/coding-agent/src/config/model-discovery.ts
-index 8a5ccc7..0c33c04 100644
+index 8a5ccc7..5f413b5 100644
 --- a/packages/coding-agent/src/config/model-discovery.ts
 +++ b/packages/coding-agent/src/config/model-discovery.ts
 @@ -9,6 +9,7 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
@@ -74,7 +79,71 @@ index 8a5ccc7..0c33c04 100644
  import {
  	getBundledModelReferenceIndex,
  	inheritReferenceThinking,
-@@ -1098,7 +1099,14 @@ ): Promise<Model<Api>[]> {
+@@ -802,17 +803,25 @@ function collectModalities(values: readonly unknown[]): Set<string> {
+ 
+ /**
+  * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
+- * direct `input` arrays, Synthetic-style top-level `input_modalities`, and
+- * OpenRouter-style `architecture.input_modalities`; returns undefined when none
+- * is present so the bundled reference (or the `["text"]` default) can take over.
++ * direct `input` arrays, Synthetic-style top-level `input_modalities`,
++ * OpenRouter-style `architecture.input_modalities`, and Envoy AI Gateway-style
++ * `metadata.input_modalities`; returns undefined when none is present so the
++ * bundled reference (or the `["text"]` default) can take over.
+  */
+ function extractOpenAIModelsListInputCapabilities(item: {
+ 	input?: unknown;
+ 	input_modalities?: unknown;
+ 	architecture?: unknown;
++	metadata?: unknown;
+ }): ("text" | "image")[] | undefined {
+ 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
+-	const modalities = collectModalities([item.input, item.input_modalities, architecture?.input_modalities]);
++	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
++	const modalities = collectModalities([
++		item.input,
++		item.input_modalities,
++		architecture?.input_modalities,
++		metadata?.input_modalities,
++	]);
+ 	if (modalities.size === 0) return undefined;
+ 	return modalities.has("image") ? ["text", "image"] : ["text"];
+ }
+@@ -833,9 +842,16 @@ function extractOpenAIModelsListOutputTask(item: {
+ 	output?: unknown;
+ 	output_modalities?: unknown;
+ 	architecture?: unknown;
++	metadata?: unknown;
+ }): { kind: KindApiKind; api: Api } | undefined {
+ 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
+-	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
++	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
++	const modalities = collectModalities([
++		item.output,
++		item.output_modalities,
++		architecture?.output_modalities,
++		metadata?.output_modalities,
++	]);
+ 	if (modalities.size !== 1) return undefined;
+ 	const [modality] = modalities;
+ 	switch (modality) {
+@@ -895,6 +911,7 @@ ): Promise<Model<Api>[]> {
+ 						output?: unknown;
+ 						output_modalities?: unknown;
+ 						architecture?: unknown;
++						metadata?: unknown;
+ 						mode?: unknown;
+ 					}>;
+ 				};
+@@ -932,6 +949,7 @@ ): Promise<Model<Api>[]> {
+ 		const reportedContextWindow =
+ 			toPositiveNumberOrUndefined(item.max_model_len) ??
+ 			toPositiveNumberOrUndefined(item.context_length) ??
++			(isRecord(item.metadata) ? toPositiveNumberOrUndefined(item.metadata.context_length) : undefined) ??
+ 			nativeMetadataForModel?.contextWindow ??
+ 			reference?.contextWindow ??
+ 			null;
+@@ -1098,7 +1116,17 @@ ): Promise<Model<Api>[]> {
  			}
  			headers = h;
  			return (await res.json()) as {
@@ -86,11 +155,46 @@ index 8a5ccc7..0c33c04 100644
 +					context_length?: number;
 +					reasoning?: unknown;
 +					thinking_efforts?: unknown;
++					kind?: unknown;
++					display_name?: unknown;
++					input_modalities?: unknown;
 +				}>;
  			};
  		});
  	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
-@@ -1119,6 +1127,14 @@ ): Promise<Model<Api>[]> {
+@@ -1110,6 +1138,31 @@ ): Promise<Model<Api>[]> {
+ 	for (const item of items) {
+ 		const id = item.id;
+ 		if (!id) continue;
++		// An omp auth-gateway tags non-chat runners with `kind` and answers each
++		// on its own `/v1/<task>` route, never on chat. Image rows speak the
++		// OpenAI images wire there whatever upstream API the gateway uses; other
++		// runner kinds have no client mapping here and must not be offered as chat.
++		if (typeof item.kind === "string" && item.kind !== "chat") {
++			if (item.kind !== "image") continue;
++			discovered.push(
++				buildModel({
++					id,
++					name: typeof item.display_name === "string" && item.display_name ? item.display_name : id,
++					api: "openai-images",
++					kind: "image",
++					provider: providerConfig.provider,
++					baseUrl,
++					reasoning: false,
++					input: extractOpenAIModelsListInputCapabilities(item) ?? ["text"],
++					supportsTools: false,
++					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++					contextWindow: null,
++					maxTokens: null,
++					headers,
++				} as ModelSpec<Api>),
++			);
++			continue;
++		}
+ 		const endpoints = item.supported_endpoint_types ?? [];
+ 		const api: Api | undefined = endpoints.includes("anthropic")
+ 			? "anthropic-messages"
+@@ -1119,6 +1172,14 @@ ): Promise<Model<Api>[]> {
  		if (!api) continue;
  		const isAnthropic = api === "anthropic-messages";
  		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
@@ -105,7 +209,7 @@ index 8a5ccc7..0c33c04 100644
  		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
  		const displayName =
  			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??
-@@ -1132,8 +1148,10 @@ ): Promise<Model<Api>[]> {
+@@ -1132,8 +1193,10 @@ ): Promise<Model<Api>[]> {
  				api,
  				provider: providerConfig.provider,
  				baseUrl,
@@ -118,7 +222,7 @@ index 8a5ccc7..0c33c04 100644
  				input: reference?.input ?? ["text"],
  				// Proxy pricing is provider-specific and usually does not match
  				// upstream bundled catalogs, so keep costs local-unknown even when
-@@ -1165,6 +1183,13 @@ ): Promise<Model<Api>[]> {
+@@ -1165,6 +1228,13 @@ ): Promise<Model<Api>[]> {
  	return discovered;
  }
  
@@ -133,10 +237,35 @@ index 8a5ccc7..0c33c04 100644
  	const defaultBaseUrl = "http://127.0.0.1:8080";
  	const raw = baseUrl || defaultBaseUrl;
 diff --git a/packages/coding-agent/src/config/model-patch.ts b/packages/coding-agent/src/config/model-patch.ts
-index cec349b..e8a3260 100644
+index cec349b..5e130c3 100644
 --- a/packages/coding-agent/src/config/model-patch.ts
 +++ b/packages/coding-agent/src/config/model-patch.ts
-@@ -232,6 +232,7 @@ /**
+@@ -35,7 +35,9 @@ /**
+  * (docs/models.md): every model under the provider rides the auth-gateway,
+  * so the gateway `baseUrl` follows the transport regardless of the model's
+  * own API — a model must never end up pi-native on a catalog upstream host
+- * (#2555).
++ * (#2555). Image runners never stream over `/v1/pi/stream`; the gateway
++ * answers them on its OpenAI-compatible `/v1/images*` routes, so they get
++ * the gateway's `/v1` root instead.
+  */
+ export function resolveProviderBaseUrl<TApi extends Api>(
+ 	modelApi: TApi,
+@@ -43,7 +45,12 @@ export function resolveProviderBaseUrl<TApi extends Api>(
+ 	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
+ ): string | undefined {
+ 	if (override?.baseUrl === undefined) return modelBaseUrl;
+-	if (override.transport === "pi-native") return override.baseUrl;
++	if (override.transport === "pi-native") {
++		if (modelApi === "openai-images" || modelApi === "openrouter-images") {
++			return `${override.baseUrl.replace(/\/+$/, "")}/v1`;
++		}
++		return override.baseUrl;
++	}
+ 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+ 	return override.baseUrl;
+ }
+@@ -232,6 +239,7 @@ /**
   * always means "leave the base value alone".
   */
  export interface ModelPatch {
@@ -144,7 +273,7 @@ index cec349b..e8a3260 100644
  	name?: string;
  	reasoning?: boolean;
  	thinking?: ThinkingConfig;
-@@ -266,6 +267,7 @@ /**
+@@ -266,6 +274,7 @@ /**
  type ModelTransportPolicy = "merge" | "replace";
  export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
  	const result = { ...base };
@@ -268,9 +397,18 @@ index 8328db7..eb4cc3e 100644
  	 * Whether `providerId` is known to the registry: it has at least one live
  	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
 diff --git a/packages/coding-agent/src/config/models-config-schema-bundle.ts b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-index 2b5e87f..0b1cad5 100644
+index 2b5e87f..c202035 100644
 --- a/packages/coding-agent/src/config/models-config-schema-bundle.ts
 +++ b/packages/coding-agent/src/config/models-config-schema-bundle.ts
+@@ -102,7 +102,7 @@ export const getModelsConfigSchemaBundle = once(() => {
+ 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
+ 
+ 	const ApiSchema = type(
+-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
++		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe" | "openai-images"',
+ 	);
+ 
+ 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 @@ -189,6 +189,7 @@ export const getModelsConfigSchemaBundle = once(() => {
  
  	const ModelDefinitionSchema = type({
