@@ -254,22 +254,22 @@ index 0000000..9bf777b
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
 +connection profiles. Delete it separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index 87779d6..bed96c2 100644
+index f7b0333..12ded88 100644
 --- a/package.json
 +++ b/package.json
 @@ -21,11 +21,11 @@ {
- 			"@oh-my-pi/pi-agent-core": "18.2.4",
- 			"@oh-my-pi/pi-ai": "18.2.4",
- 			"@oh-my-pi/pi-catalog": "18.2.4",
--			"@oh-my-pi/pi-coding-agent": "18.2.4",
-+			"@oh-my-pi/pi-coding-agent": "18.2.4-fork.1",
- 			"@oh-my-pi/pi-mnemopi": "18.2.4",
- 			"@oh-my-pi/pi-natives": "18.2.4",
- 			"@oh-my-pi/pi-tui": "18.2.4",
--			"@oh-my-pi/pi-utils": "18.2.4",
-+			"@oh-my-pi/pi-utils": "18.2.4-fork.1",
- 			"@oh-my-pi/pi-wire": "18.2.4",
- 			"@oh-my-pi/snapcompact": "18.2.4",
+ 			"@oh-my-pi/pi-agent-core": "18.3.0",
+ 			"@oh-my-pi/pi-ai": "18.3.0",
+ 			"@oh-my-pi/pi-catalog": "18.3.0",
+-			"@oh-my-pi/pi-coding-agent": "18.3.0",
++			"@oh-my-pi/pi-coding-agent": "18.3.0-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.3.0",
+ 			"@oh-my-pi/pi-natives": "18.3.0",
+ 			"@oh-my-pi/pi-tui": "18.3.0",
+-			"@oh-my-pi/pi-utils": "18.3.0",
++			"@oh-my-pi/pi-utils": "18.3.0-fork.1",
+ 			"@oh-my-pi/pi-wire": "18.3.0",
+ 			"@oh-my-pi/snapcompact": "18.3.0",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
 index 71d0690..febc589 100644
@@ -285,18 +285,17 @@ index 71d0690..febc589 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index db08fc7..19d4925 100644
+index a19549c..3adb89e 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
-@@ -1,7 +1,7 @@
+@@ -1,6 +1,6 @@
  {
-   "type": "module",
-   "name": "@oh-my-pi/pi-coding-agent",
--  "version": "18.2.4",
-+  "version": "18.2.4-fork.1",
-   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
-   "homepage": "https://omp.sh",
-   "author": "Stencil Labs, Inc.",
+ 	"name": "@oh-my-pi/pi-coding-agent",
+-	"version": "18.3.0",
++	"version": "18.3.0-fork.1",
+ 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+ 	"keywords": [
+ 		"agent",
 diff --git a/packages/coding-agent/src/cli/release-info.ts b/packages/coding-agent/src/cli/release-info.ts
 new file mode 100644
 index 0000000..b935289
@@ -438,10 +437,10 @@ index 0000000..b935289
 +	return release;
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 20a8de6..46d5830 100644
+index 55caf0c..636e78e 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -10,7 +10,7 @@ import * as os from "node:os";
+@@ -9,7 +9,7 @@ import * as os from "node:os";
  import * as path from "node:path";
  import { Transform } from "node:stream";
  import { pipeline } from "node:stream/promises";
@@ -450,7 +449,7 @@ index 20a8de6..46d5830 100644
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import { $ } from "bun";
-@@ -22,8 +22,13 @@ import {
+@@ -21,8 +21,13 @@ import {
  	unsupportedProxyMessage,
  	withTimeoutSignal,
  } from "../utils/fetch-timeout";
@@ -465,7 +464,7 @@ index 20a8de6..46d5830 100644
  const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
  const MISE_TOOL = "github:can1357/oh-my-pi";
-@@ -91,6 +96,11 @@ export interface ReleaseRename {
+@@ -90,6 +95,11 @@ export interface ReleaseRename {
  const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
  
  export interface ReleaseInfo {
@@ -477,7 +476,7 @@ index 20a8de6..46d5830 100644
  	tag: string;
  	version: string;
  	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
-@@ -98,7 +108,6 @@ export interface ReleaseInfo {
+@@ -97,7 +107,6 @@ export interface ReleaseInfo {
  	/** npm names to install, resolved after following any `omp.rename` pointers. */
  	packages: ReleasePackages;
  }
@@ -485,7 +484,7 @@ index 20a8de6..46d5830 100644
  export interface ReleaseBinaryAsset {
  	url: string;
  	size: number;
-@@ -195,7 +204,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
+@@ -194,7 +203,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
  		natives: typeof natives === "string" && natives.length > 0 ? natives : undefined,
  	};
  }
@@ -493,7 +492,7 @@ index 20a8de6..46d5830 100644
  function majorVersion(version: string): number {
  	const major = Number.parseInt(version, 10);
  	return Number.isNaN(major) ? 0 : major;
-@@ -223,6 +231,10 @@ ): boolean {
+@@ -222,6 +230,10 @@ ): boolean {
  /**
   * Select and validate the binary asset from GitHub release metadata.
   *
@@ -504,7 +503,7 @@ index 20a8de6..46d5830 100644
   * Draft releases are always rejected. Prereleases are rejected unless
   * `options.allowPrerelease` is set, which the canary channel passes: canary
   * GitHub releases are published as prereleases, and the exact-tag match below
-@@ -232,8 +244,9 @@ export function resolveReleaseBinaryAsset(
+@@ -231,8 +243,9 @@ export function resolveReleaseBinaryAsset(
  	release: unknown,
  	expectedTag: string,
  	binaryName: string,
@@ -515,7 +514,7 @@ index 20a8de6..46d5830 100644
  	if (!isRecord(release)) {
  		throw new Error("Invalid GitHub release metadata");
  	}
-@@ -270,7 +283,7 @@ ): ReleaseBinaryAsset {
+@@ -269,7 +282,7 @@ ): ReleaseBinaryAsset {
  		throw new Error(`GitHub release asset ${binaryName} has an unsupported digest`);
  	}
  
@@ -524,7 +523,7 @@ index 20a8de6..46d5830 100644
  	if (asset.browser_download_url !== expectedUrl) {
  		throw new Error(`GitHub release asset ${binaryName} has an unexpected download URL`);
  	}
-@@ -283,13 +296,13 @@ ): ReleaseBinaryAsset {
+@@ -282,13 +295,13 @@ ): ReleaseBinaryAsset {
  }
  
  async function getReleaseBinaryAsset(
@@ -540,7 +539,7 @@ index 20a8de6..46d5830 100644
  	const resolvedGitHubToken = githubToken ?? (await resolveGitHubToken());
  	const headers: Record<string, string> = {
  		Accept: "application/vnd.github+json",
-@@ -299,7 +312,7 @@ ): Promise<ReleaseBinaryAsset> {
+@@ -298,7 +311,7 @@ ): Promise<ReleaseBinaryAsset> {
  
  	let response: Response;
  	try {
@@ -549,7 +548,7 @@ index 20a8de6..46d5830 100644
  			headers,
  			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
  		});
-@@ -319,7 +332,10 @@ ): Promise<ReleaseBinaryAsset> {
+@@ -318,7 +331,10 @@ ): Promise<ReleaseBinaryAsset> {
  		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
  	}
  
@@ -561,7 +560,7 @@ index 20a8de6..46d5830 100644
  }
  
  export interface VerifiedBinaryDownloadOptions {
-@@ -391,7 +407,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
+@@ -390,7 +406,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
  		throw err;
  	}
  }
@@ -569,7 +568,7 @@ index 20a8de6..46d5830 100644
  /** Result from running the installed binary and parsing its reported version. */
  export interface InstalledVersionVerification {
  	ok: boolean;
-@@ -802,6 +817,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
+@@ -801,6 +816,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
  	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
  }
  
@@ -582,7 +581,7 @@ index 20a8de6..46d5830 100644
  /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
  const MAX_RENAME_HOPS = 3;
  
-@@ -1172,7 +1193,7 @@ /**
+@@ -1171,7 +1192,7 @@ /**
   * Resolve the path that `omp` maps to in the user's PATH.
   */
  function resolveOmpPath(): string | undefined {
@@ -591,7 +590,7 @@ index 20a8de6..46d5830 100644
  }
  
  /**
-@@ -1820,6 +1841,7 @@ export async function updateViaBinaryAt(
+@@ -1819,6 +1840,7 @@ export async function updateViaBinaryAt(
  		binaryName?: string;
  		fetchImpl?: Fetch;
  		githubToken?: string;
@@ -599,7 +598,7 @@ index 20a8de6..46d5830 100644
  		allowPrerelease?: boolean;
  		/** Refuse replacement unless the existing path is a non-script OMP executable. */
  		validateExistingTarget?: boolean;
-@@ -1828,6 +1850,12 @@ export async function updateViaBinaryAt(
+@@ -1827,6 +1849,12 @@ export async function updateViaBinaryAt(
  ): Promise<void> {
  	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);
  	const binaryName = options.binaryName ?? getBinaryName();
@@ -612,7 +611,7 @@ index 20a8de6..46d5830 100644
  	// Unique per attempt so two overlapping `omp update` runs never share a temp
  	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
  	// pre-download unlink delete the first run's still-downloading temp file; the
-@@ -1841,7 +1869,7 @@ ): Promise<void> {
+@@ -1840,7 +1868,7 @@ ): Promise<void> {
  	const tempPath = `${targetPath}.${attempt}.new`;
  	const backupPath = `${targetPath}.${attempt}.bak`;
  	const asset = await getReleaseBinaryAsset(
@@ -621,7 +620,7 @@ index 20a8de6..46d5830 100644
  		binaryName,
  		options.fetchImpl,
  		options.githubToken,
-@@ -1924,17 +1952,24 @@ export async function updateViaShimTakeover(
+@@ -1923,17 +1951,24 @@ export async function updateViaShimTakeover(
  		binaryName?: string;
  		fetchImpl?: Fetch;
  		githubToken?: string;
@@ -647,7 +646,7 @@ index 20a8de6..46d5830 100644
  		binaryName,
  		options.fetchImpl,
  		options.githubToken,
-@@ -2065,6 +2100,7 @@ export async function runUpdateCommand(opts: {
+@@ -2064,6 +2099,7 @@ export async function runUpdateCommand(opts: {
  	check: boolean;
  	channel?: UpdateChannel;
  }): Promise<void> {
@@ -655,7 +654,7 @@ index 20a8de6..46d5830 100644
  	console.log(chalk.dim(`Current version: ${VERSION}`));
  	const persistedChannel = readPersistedChannel() ?? "stable";
  	const channel = opts.channel ?? persistedChannel;
-@@ -2074,7 +2110,9 @@ export async function runUpdateCommand(opts: {
+@@ -2073,7 +2109,9 @@ export async function runUpdateCommand(opts: {
  	// Check for updates
  	let release: ReleaseInfo;
  	try {
@@ -666,7 +665,7 @@ index 20a8de6..46d5830 100644
  	} catch (err) {
  		console.error(chalk.red(`Failed to check for updates: ${err}`));
  		process.exit(1);
-@@ -2108,6 +2146,16 @@ export async function runUpdateCommand(opts: {
+@@ -2107,6 +2145,16 @@ export async function runUpdateCommand(opts: {
  		return;
  	}
  
@@ -683,7 +682,7 @@ index 20a8de6..46d5830 100644
  	// Choose update method based on the prioritized omp binary in PATH. For
  	// binary-only releases the package managers are never consulted: a bun/npm
  	// symlink resolves to method "binary" and is replaced in place, keeping the
-@@ -2153,6 +2201,7 @@ export async function runUpdateCommand(opts: {
+@@ -2152,6 +2200,7 @@ export async function runUpdateCommand(opts: {
  				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
  			}
  			await updateViaBinaryAt(target.path, release.version, {
@@ -750,10 +749,10 @@ index 0000000..4d0e6f5
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index 847a103..83ed352 100644
+index c4c855b..5782d26 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -103,6 +103,118 @@ describe("update command plugin dispatch", () => {
+@@ -102,6 +102,118 @@ describe("update command plugin dispatch", () => {
  	});
  });
  
@@ -873,14 +872,14 @@ index 847a103..83ed352 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 1c028a8..4587230 100644
+index 7c7e7ea..c198f8b 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.2.4",
-+	"version": "18.2.4-fork.1",
+-	"version": "18.3.0",
++	"version": "18.3.0-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
@@ -898,13 +897,14 @@ index 9da54a9..ff645af 100644
  		try {
  			await Bun.write(
 diff --git a/scripts/ci-test-ts.test.ts b/scripts/ci-test-ts.test.ts
-index 6147544..37e0002 100644
+index 18504d6..77953bd 100644
 --- a/scripts/ci-test-ts.test.ts
 +++ b/scripts/ci-test-ts.test.ts
-@@ -1,6 +1,110 @@
+@@ -1,7 +1,111 @@
  import { describe, expect, test } from "bun:test";
 +import * as path from "node:path";
  import { ptree, TempDir } from "@oh-my-pi/pi-utils";
+ import { selectShard } from "./ci-test-ts";
  
 +async function runCiTestTs(args: string[]): Promise<{
 +	stdout: string;
@@ -1013,7 +1013,7 @@ index 6147544..37e0002 100644
  	// Parent fake timers cannot drive the real watchdog inside the isolated runner process.
  	test("kills a stalled chunk, reports failure, and continues the queue", async () => {
 diff --git a/scripts/ci-test-ts.ts b/scripts/ci-test-ts.ts
-index 54083d6..3627747 100755
+index 5d3b3b1..e8762da 100755
 --- a/scripts/ci-test-ts.ts
 +++ b/scripts/ci-test-ts.ts
 @@ -27,12 +27,21 @@ interface TestCommand {
@@ -1039,7 +1039,7 @@ index 54083d6..3627747 100755
  // `--only-failures` is Bun's output filter — it hides passing tests within each
  // chunk, keeping the log terse, and is the default here (CI and the root
  // `test:ts` aggregate append it). It does NOT skip tests or share any
-@@ -201,6 +210,24 @@ function shellQuote(value: string): string {
+@@ -200,6 +209,24 @@ function shellQuote(value: string): string {
  	return `'${value.replaceAll("'", `'\\''`)}'`;
  }
  
@@ -1064,7 +1064,7 @@ index 54083d6..3627747 100755
  function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
  	const { extraArgs = [] } = options;
  	return {
-@@ -300,10 +327,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> {
+@@ -299,10 +326,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> {
  	return codingAgentTestPartitionPromise;
  }
  
@@ -1085,7 +1085,7 @@ index 54083d6..3627747 100755
  		throw new Error(`No coding-agent ${bucket} tests matched`);
  	}
  	const plan = codingAgentBucketPlans[bucket];
-@@ -320,15 +355,15 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
+@@ -319,15 +354,15 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
  			parallel: plan.parallel,
  		});
  	}
@@ -1105,7 +1105,7 @@ index 54083d6..3627747 100755
  		case "coding-agent-singleton":
  			return await codingAgentTestCommands("singleton");
  		case "coding-agent-ui":
-@@ -338,35 +373,39 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
+@@ -337,35 +372,39 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
  		case "coding-agent-native":
  			return await codingAgentTestCommands("native");
  		case "coding-agent-heavy":
@@ -1163,11 +1163,11 @@ index 54083d6..3627747 100755
  	}
  }
  
-@@ -926,7 +965,14 @@ if (import.meta.main) {
+@@ -946,7 +985,14 @@ if (import.meta.main) {
  		);
  	}
  
--	const requestedCommands = await commandsForMode(requestedMode as Mode);
+-	const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
 +	const plan = await commandsForMode(requestedMode as Mode);
 +	const unmatchedCodingAgentTestFiles = requestedCodingAgentTestFiles.filter(
 +		requested => !plan.matchedCodingAgentTestFiles.includes(requested),
@@ -1175,7 +1175,7 @@ index 54083d6..3627747 100755
 +	if (unmatchedCodingAgentTestFiles.length > 0) {
 +		throw new Error(`No coding-agent tests matched requested filter(s): ${unmatchedCodingAgentTestFiles.join(", ")}`);
 +	}
-+	const requestedCommands = plan.commands;
++	const requestedCommands = selectShard(plan.commands, Bun.env.OMP_TEST_SHARD);
  	const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
  	// CI defaults to one process at a time, but memory-sized workflow buckets
  	// explicitly opt into bounded process concurrency. Local runs fan out by

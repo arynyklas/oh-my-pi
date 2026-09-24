@@ -1,17 +1,17 @@
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index a97c3a1..8d0bbac 100644
+index 997507c..fc79092 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -22,8 +22,6 @@ import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
- const DEFAULT_ENDPOINT = "https://api.anthropic.com/api/oauth";
+@@ -23,8 +23,6 @@ import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+ 
  const MAX_ATTEMPTS = 3;
  const BASE_RETRY_DELAY_MS = 500;
 -/** Shared windows that gate every Claude request, whatever the model. */
 -const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
  
- const CLAUDE_HEADERS = {
- 	accept: "application/json, text/plain, */*",
-@@ -926,33 +924,62 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+ const CLAUDE_USAGE_BETAS =
+ 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
+@@ -918,33 +916,62 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	/**
  	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
  	 * Anthropic can restore the tier earlier (plan change, corrected counter),
@@ -313,10 +313,10 @@ index 0000000..c8cc54a
 +});
 diff --git a/packages/ai/src/usage/match.ts b/packages/ai/src/usage/match.ts
 new file mode 100644
-index 0000000..6d2e036
+index 0000000..e368867
 --- /dev/null
 +++ b/packages/ai/src/usage/match.ts
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,274 @@
 +import type { UsageReport } from "../usage";
 +
 +const EMAIL_CANONICAL_PROVIDERS: Record<string, true> = { anthropic: true, "openai-codex": true };
@@ -430,14 +430,31 @@ index 0000000..6d2e036
 +		);
 +		if (match) return match;
 +	}
++	// Email identifies the member inside a shared Team workspace, where several
++	// members report the same account (and org) id, so a differing email on an
++	// otherwise matching report is decisive — one member's pool must not stand
++	// in for another's. The exception is an email the reports show to be shared:
++	// when this identity's address also sits on a report belonging to a
++	// different account, the address cannot route anyone and the account id
++	// decides instead.
++	const emailIsShared =
++		email !== undefined &&
++		candidates.some(
++			report => normalizedReportEmails(report).includes(email) && reportHasAccountConflict(report, accountId),
++		);
++	const emailConflicts = (report: UsageReport): boolean => !emailIsShared && reportHasEmailConflict(report, email);
 +	if (accountId) {
-+		const match = candidates.find(report => normalizedReportAccountIds(report).includes(accountId));
++		const match = candidates.find(
++			report => normalizedReportAccountIds(report).includes(accountId) && !emailConflicts(report),
++		);
 +		if (match) return match;
 +	}
 +	if (projectId) {
 +		const match = candidates.find(
 +			report =>
-+				normalizedReportProjectIds(report).includes(projectId) && !reportHasAccountConflict(report, accountId),
++				normalizedReportProjectIds(report).includes(projectId) &&
++				!reportHasAccountConflict(report, accountId) &&
++				!emailConflicts(report),
 +		);
 +		if (match) return match;
 +	}
@@ -496,6 +513,11 @@ index 0000000..6d2e036
 +function reportHasProjectConflict(report: UsageReport, projectId: string | undefined): boolean {
 +	const projectIds = normalizedReportProjectIds(report);
 +	return projectId !== undefined && projectIds.length > 0 && !projectIds.includes(projectId);
++}
++
++function reportHasEmailConflict(report: UsageReport, email: string | undefined): boolean {
++	const emails = normalizedReportEmails(report);
++	return email !== undefined && emails.length > 0 && !emails.includes(email);
 +}
 +
 +function normalizedReportOrgIds(report: UsageReport): string[] {
@@ -570,7 +592,7 @@ index 0000000..6d2e036
 +	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 +}
 diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/src/cli/stats-cli.ts
-index 7f99557..ab9c9e6 100644
+index 410e0ce..4d60432 100644
 --- a/packages/coding-agent/src/cli/stats-cli.ts
 +++ b/packages/coding-agent/src/cli/stats-cli.ts
 @@ -5,7 +5,7 @@ /**
@@ -580,9 +602,9 @@ index 7f99557..ab9c9e6 100644
 -import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 +import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
  import { openPath } from "../utils/open";
- 
-@@ -14,7 +14,13 @@ /**
+@@ -15,7 +15,13 @@ /**
   * the final "Synced ..." summary still prints either way.
   */
  function createSyncProgressReporter(): {
@@ -597,7 +619,7 @@ index 7f99557..ab9c9e6 100644
  	finish: () => void;
  } {
  	const stream = process.stderr;
-@@ -31,7 +37,13 @@ function createSyncProgressReporter(): {
+@@ -32,7 +38,13 @@ function createSyncProgressReporter(): {
  			const label = chalk.dim(shortenSessionFile(event.sessionFile));
  			const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
  			const counter = chalk.cyan(`[${event.current}/${event.total}]`);
@@ -613,17 +635,19 @@ index 7f99557..ab9c9e6 100644
  			const trimmed = truncateToWidth(line, columns - 1);
  			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
-index 49ca130..a21868d 100644
+index 0631002..ba24d03 100644
 --- a/packages/coding-agent/src/cli/usage-cli.ts
 +++ b/packages/coding-agent/src/cli/usage-cli.ts
-@@ -7,26 +7,34 @@ /**
+@@ -7,30 +7,36 @@ /**
   * credentials produced no usage report are listed too, so the output
   * always covers the full credential pool.
   */
 -import {
 -	ANTHROPIC_OAUTH_GRANT_TTL_MS,
+-	type AuthAccountPolicy,
 -	type AuthStorage,
 -	type DisabledCredentialSummary,
+-	type OAuthAccountIdentity,
 -	resolveUsedFraction,
 -	type UsageHistoryEntry,
 -	type UsageLimit,
@@ -638,14 +662,16 @@ index 49ca130..a21868d 100644
  } from "@oh-my-pi/pi-ai";
  import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
  import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
+-import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
 -import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 +import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { ModelRegistry } from "../config/model-registry";
+ import { Settings } from "../config/settings";
  import { discoverAuthStorage } from "../sdk";
 +import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
  import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
--import { collapseSharedUsageReports } from "../utils/usage-display";
+-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 -
 -const BAR_WIDTH = 28;
 +import {
@@ -658,13 +684,14 @@ index 49ca130..a21868d 100644
 +	type ProviderWindowStat,
 +	STATUS_COLOR,
 +	type UsageAccountIdentity,
++	type UsagePolicyDiagnosticsOptions,
 +} from "../utils/usage-format";
 +
 +export * from "../utils/usage-format";
  
  export interface UsageCommandArgs {
  	action?: string;
-@@ -35,25 +43,10 @@ export interface UsageCommandArgs {
+@@ -39,32 +45,10 @@ export interface UsageCommandArgs {
  	redact?: boolean;
  	/** Show recorded usage-limit history instead of a live snapshot. */
  	history?: boolean;
@@ -688,10 +715,17 @@ index 49ca130..a21868d 100644
 -	authorizedAt?: number;
 -}
 -
+-export interface UsagePolicyDiagnosticsOptions {
+-	/** Existing global fallback used when an account has no reserve override. */
+-	globalReservePct: number;
+-	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
+-	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
+-}
+-
  /**
   * Minimal-reveal masks for identity strings (`--redact`).
   *
-@@ -173,570 +166,6 @@ ): string[] {
+@@ -184,652 +168,6 @@ ): string[] {
  	return values;
  }
  
@@ -720,13 +754,6 @@ index 49ca130..a21868d 100644
 -	if (statuses.includes("warning")) return "warning";
 -	if (statuses.includes("ok")) return "ok";
 -	return "unknown";
--}
--
--function formatProviderName(provider: string): string {
--	return provider
--		.split(/[-_]/g)
--		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
--		.join(" ");
 -}
 -
 -function formatUnitValue(value: number, unit: UsageUnit): string {
@@ -933,25 +960,26 @@ index 49ca130..a21868d 100644
 -	}
 -	const planType = report.metadata?.planType;
 -	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
--	const savedResets = report.resetCredits?.availableCount ?? 0;
--	if (savedResets > 0) {
--		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
--		const credits = report.resetCredits?.credits;
--		if (credits) {
--			const expiries = credits
--				.filter(c => c.expiresAt)
--				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
--				.filter(c => !Number.isNaN(c.ms))
--				.sort((a, b) => a.ms - b.ms);
--			const upcoming = expiries.find(c => c.ms > nowMs);
--			if (upcoming) {
+-	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
+-	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+-	if (resets && resets.bankedCount > 0) {
+-		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);
+-		if (resets.redeemableCount !== resets.bankedCount) {
+-			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
+-		}
+-		if (resets.soonestExpiry) {
+-			const expiryMs = Date.parse(resets.soonestExpiry);
+-			if (expiryMs > nowMs) {
 -				header += chalk.dim(
--					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
+-					` · soonest expires in ${formatDuration(expiryMs - nowMs)} (${resets.soonestExpiry.slice(0, 10)})`,
 -				);
 -			} else {
--				const lastExpired = expiries.at(-1);
--				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
+-				header += chalk.dim(` · expired (${resets.soonestExpiry.slice(0, 10)})`);
 -			}
+-		}
+-		if (resets.redeemableCount === 0 && resets.unavailableReason) {
+-			const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
+-			header += chalk.dim(` · unavailable: ${reason}`);
 -		}
 -	}
 -	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
@@ -1150,6 +1178,82 @@ index 49ca130..a21868d 100644
 -	return `${masked} · ${redaction?.get(org) ?? org}`;
 -}
 -
+-function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
+-	const metadata = report.metadata ?? {};
+-	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
+-		const value = metadata[key];
+-		return typeof value === "string" && value.length > 0 ? value : undefined;
+-	};
+-	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
+-		for (const limit of report.limits) {
+-			const value = limit.scope[key];
+-			if (value) return value;
+-		}
+-		return undefined;
+-	};
+-	return {
+-		email: read("email"),
+-		accountId: read("accountId") ?? firstScoped("accountId"),
+-		projectId: read("projectId") ?? firstScoped("projectId"),
+-		orgId: read("orgId") ?? firstScoped("orgId"),
+-		orgName: read("orgName"),
+-	};
+-}
+-
+-function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
+-	return {
+-		email: account.email,
+-		accountId: account.accountId,
+-		projectId: account.projectId,
+-		orgId: account.orgId,
+-		orgName: account.orgName,
+-	};
+-}
+-
+-function policyEnabledProviders(
+-	reports: UsageReport[],
+-	accounts: UsageAccountIdentity[],
+-	options: UsagePolicyDiagnosticsOptions | undefined,
+-): Set<string> {
+-	const providers = new Set<string>();
+-	if (!options) return providers;
+-	for (const account of accounts) {
+-		if (account.type === "oauth" && options.getAccountPolicy(account.provider, accountOAuthIdentity(account))) {
+-			providers.add(account.provider);
+-		}
+-	}
+-	for (const report of reports) {
+-		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
+-	}
+-	return providers;
+-}
+-
+-function formatPolicyLine(
+-	provider: string,
+-	identity: OAuthAccountIdentity,
+-	limits: UsageLimit[] | undefined,
+-	options: UsagePolicyDiagnosticsOptions,
+-): string {
+-	const policy = options.getAccountPolicy(provider, identity);
+-	const priority = policy?.priority ?? 0;
+-	const configuredReservePct = policy?.reservePct;
+-	const inherited = configuredReservePct === undefined;
+-	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
+-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
+-	// `omp usage` has no model/session context, so report the conservative
+-	// account-wide state from the most-consumed visible window. Actual routing
+-	// still scopes limits and selection in AuthStorage.
+-	const usedFractions = (limits ?? [])
+-		.map(resolveUsedFraction)
+-		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
+-	if (usedFractions.length === 0) {
+-		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
+-	}
+-	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
+-	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
+-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
+-}
+-
 -/**
 - * Render the full text breakdown: per provider, per account, every limit
 - * with a bar, amounts, and reset times; unattributed credentials trail
@@ -1161,6 +1265,7 @@ index 49ca130..a21868d 100644
 -	nowMs: number,
 -	redaction?: Map<string, string>,
 -	disabled: DisabledCredentialSummary[] = [],
+-	policyOptions?: UsagePolicyDiagnosticsOptions,
 -): string {
 -	const displayReports = collapseSharedUsageReports(reports);
 -	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -1170,6 +1275,7 @@ index 49ca130..a21868d 100644
 -		reportsByProvider.set(report.provider, list);
 -	}
 -	const unreported = collectUnreportedAccounts(displayReports, accounts);
+-	const policyProviders = policyEnabledProviders(displayReports, accounts, policyOptions);
 -	const unreportedByProvider = new Map<string, UsageAccountIdentity[]>();
 -	for (const account of unreported) {
 -		const list = unreportedByProvider.get(account.provider) ?? [];
@@ -1211,6 +1317,11 @@ index 49ca130..a21868d 100644
 -
 -		providerReports.forEach((report, index) => {
 -			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+-			if (policyOptions && policyProviders.has(provider)) {
+-				lines.push(
+-					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
+-				);
+-			}
 -			if (report.limits.length === 0) {
 -				lines.push(`      ${chalk.dim("no limits reported")}`);
 -				return;
@@ -1230,6 +1341,11 @@ index 49ca130..a21868d 100644
 -		for (const account of providerUnreported) {
 -			const label = accountIdentityLabel(account, redaction);
 -			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
+-			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
+-				lines.push(
+-					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
+-				);
+-			}
 -		}
 -
 -		for (const summary of disabledByProvider.get(provider) ?? []) {
@@ -1262,11 +1378,10 @@ index 49ca130..a21868d 100644
  const HISTORY_SPARK_WIDTH = 48;
  const SPARK_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
  
-@@ -1200,7 +629,28 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+@@ -1298,8 +636,27 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
  			return;
  		}
  
--		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
 +		const defaultAccountLabels = new Map<string, string>();
 +		for (const provider of new Set([
 +			...filteredReports.map(report => report.provider),
@@ -1286,23 +1401,23 @@ index 49ca130..a21868d 100644
 +			const label = formatActiveAccountLabel(maskedIdentity);
 +			if (label) defaultAccountLabels.set(provider, label);
 +		}
-+		process.stdout.write(
-+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, defaultAccountLabels)}\n`,
-+		);
+ 		process.stdout.write(
+-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
++			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, defaultAccountLabels)}\n`,
+ 		);
  	} finally {
  		authStorage.close();
- 	}
 diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
-index 07a9cfd..4536bad 100644
+index 31b1167..23882cc 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
 @@ -3,7 +3,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
  import type { OAuthAccountIdentity } from "../../session/auth-storage";
- import { collapseSharedUsageReports } from "../../utils/usage-display";
+ import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
  import type { SlashCommandRuntime } from "../types";
 -import { reportMatchesActiveAccount } from "./active-oauth-account";
 +import { formatActiveAccountLabel, reportMatchesActiveAccount } from "./active-oauth-account";
- import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
+ import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
  
  function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 @@ -57,6 +57,7 @@ function renderUsageReports(
@@ -1324,7 +1439,7 @@ index 07a9cfd..4536bad 100644
  		// Provider-wide disclaimers render once per provider, not per limit.
  		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
  		for (const note of providerNotes)
-@@ -172,6 +177,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+@@ -179,6 +184,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
  				reports,
  				Date.now(),
  				providerId => (providerId === currentProvider ? activeAccount : undefined),
@@ -1334,15 +1449,20 @@ index 07a9cfd..4536bad 100644
  		}
 diff --git a/packages/coding-agent/src/utils/usage-format.ts b/packages/coding-agent/src/utils/usage-format.ts
 new file mode 100644
-index 0000000..b7ddbc5
+index 0000000..fa84a4e
 --- /dev/null
 +++ b/packages/coding-agent/src/utils/usage-format.ts
-@@ -0,0 +1,611 @@
-+import { ANTHROPIC_OAUTH_GRANT_TTL_MS, type DisabledCredentialSummary } from "@oh-my-pi/pi-ai";
+@@ -0,0 +1,713 @@
++import {
++	ANTHROPIC_OAUTH_GRANT_TTL_MS,
++	type AuthAccountPolicy,
++	type DisabledCredentialSummary,
++	type OAuthAccountIdentity,
++} from "@oh-my-pi/pi-ai";
 +import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
 +import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 +import chalk from "@oh-my-pi/pi-utils/chalk";
-+import { collapseSharedUsageReports } from "./usage-display";
++import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 +
 +const BAR_WIDTH = 28;
 +
@@ -1363,6 +1483,13 @@ index 0000000..b7ddbc5
 +	orgName?: string;
 +	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
 +	authorizedAt?: number;
++}
++
++export interface UsagePolicyDiagnosticsOptions {
++	/** Existing global fallback used when an account has no reserve override. */
++	globalReservePct: number;
++	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
++	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 +}
 +
 +export type LimitStatus = NonNullable<UsageLimit["status"]>;
@@ -1589,25 +1716,25 @@ index 0000000..b7ddbc5
 +	}
 +	const planType = report.metadata?.planType;
 +	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
-+	const savedResets = report.resetCredits?.availableCount ?? 0;
-+	if (savedResets > 0) {
-+		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
-+		const credits = report.resetCredits?.credits;
-+		if (credits) {
-+			const expiries = credits
-+				.filter(c => c.expiresAt)
-+				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
-+				.filter(c => !Number.isNaN(c.ms))
-+				.sort((a, b) => a.ms - b.ms);
-+			const upcoming = expiries.find(c => c.ms > nowMs);
-+			if (upcoming) {
++	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
++	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
++	if (resets && resets.bankedCount > 0) {
++		header += chalk.cyan(` · ✦ ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`);
++		if (resets.redeemableCount !== resets.bankedCount) {
++			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
++		}
++		if (resets.soonestExpiry) {
++			const expiryMs = Date.parse(resets.soonestExpiry);
++			if (expiryMs > nowMs) {
 +				header += chalk.dim(
-+					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
++					` · soonest expires in ${formatDuration(expiryMs - nowMs)} (${resets.soonestExpiry.slice(0, 10)})`,
 +				);
 +			} else {
-+				const lastExpired = expiries.at(-1);
-+				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
++				header += chalk.dim(` · expired (${resets.soonestExpiry.slice(0, 10)})`);
 +			}
++		}
++		if (resets.redeemableCount === 0 && resets.unavailableReason) {
++			header += chalk.dim(` · unavailable: ${sanitizeUsageText(resets.unavailableReason)}`);
 +		}
 +	}
 +	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
@@ -1663,6 +1790,8 @@ index 0000000..b7ddbc5
 +	nowMs?: number;
 +	redaction?: Map<string, string>;
 +	includeNotes?: boolean;
++	/** Pre-rendered account policy line shown under the account header. */
++	policyLine?: string;
 +}
 +
 +export function formatUsageReportLines(report: UsageReport, options: FormatUsageReportLinesOptions = {}): string[] {
@@ -1675,6 +1804,7 @@ index 0000000..b7ddbc5
 +		for (const note of report.notes ?? []) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
 +	}
 +	lines.push(`  ${formatAccountHeader(report, options.index ?? 0, nowMs, options.redaction)}`);
++	if (options.policyLine) lines.push(`      ${chalk.dim(options.policyLine)}`);
 +	if (report.limits.length === 0) {
 +		lines.push(`      ${chalk.dim("no limits reported")}`);
 +		return lines;
@@ -1848,6 +1978,82 @@ index 0000000..b7ddbc5
 +	return `${masked} · ${redaction?.get(org) ?? org}`;
 +}
 +
++function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
++	const metadata = report.metadata ?? {};
++	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
++		const value = metadata[key];
++		return typeof value === "string" && value.length > 0 ? value : undefined;
++	};
++	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
++		for (const limit of report.limits) {
++			const value = limit.scope[key];
++			if (value) return value;
++		}
++		return undefined;
++	};
++	return {
++		email: read("email"),
++		accountId: read("accountId") ?? firstScoped("accountId"),
++		projectId: read("projectId") ?? firstScoped("projectId"),
++		orgId: read("orgId") ?? firstScoped("orgId"),
++		orgName: read("orgName"),
++	};
++}
++
++function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
++	return {
++		email: account.email,
++		accountId: account.accountId,
++		projectId: account.projectId,
++		orgId: account.orgId,
++		orgName: account.orgName,
++	};
++}
++
++function policyEnabledProviders(
++	reports: UsageReport[],
++	accounts: UsageAccountIdentity[],
++	options: UsagePolicyDiagnosticsOptions | undefined,
++): Set<string> {
++	const providers = new Set<string>();
++	if (!options) return providers;
++	for (const account of accounts) {
++		if (account.type === "oauth" && options.getAccountPolicy(account.provider, accountOAuthIdentity(account))) {
++			providers.add(account.provider);
++		}
++	}
++	for (const report of reports) {
++		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
++	}
++	return providers;
++}
++
++function formatPolicyLine(
++	provider: string,
++	identity: OAuthAccountIdentity,
++	limits: UsageLimit[] | undefined,
++	options: UsagePolicyDiagnosticsOptions,
++): string {
++	const policy = options.getAccountPolicy(provider, identity);
++	const priority = policy?.priority ?? 0;
++	const configuredReservePct = policy?.reservePct;
++	const inherited = configuredReservePct === undefined;
++	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
++	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
++	// `omp usage` has no model/session context, so report the conservative
++	// account-wide state from the most-consumed visible window. Actual routing
++	// still scopes limits and selection in AuthStorage.
++	const usedFractions = (limits ?? [])
++		.map(resolveUsedFraction)
++		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
++	if (usedFractions.length === 0) {
++		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
++	}
++	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
++	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
++	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
++}
++
 +/**
 + * Render the full text breakdown: per provider, per account, every limit
 + * with a bar, amounts, and reset times; unattributed credentials trail
@@ -1859,6 +2065,7 @@ index 0000000..b7ddbc5
 +	nowMs: number,
 +	redaction?: Map<string, string>,
 +	disabled: DisabledCredentialSummary[] = [],
++	policyOptions?: UsagePolicyDiagnosticsOptions,
 +	defaultAccounts?: ReadonlyMap<string, string>,
 +): string {
 +	const displayReports = collapseSharedUsageReports(reports);
@@ -1869,6 +2076,7 @@ index 0000000..b7ddbc5
 +		reportsByProvider.set(report.provider, list);
 +	}
 +	const unreported = collectUnreportedAccounts(displayReports, accounts);
++	const policyProviders = policyEnabledProviders(displayReports, accounts, policyOptions);
 +	const unreportedByProvider = new Map<string, UsageAccountIdentity[]>();
 +	for (const account of unreported) {
 +		const list = unreportedByProvider.get(account.provider) ?? [];
@@ -1914,6 +2122,10 @@ index 0000000..b7ddbc5
 +					nowMs,
 +					redaction,
 +					includeNotes: false,
++					policyLine:
++						policyOptions && policyProviders.has(provider)
++							? formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions)
++							: undefined,
 +				}),
 +			);
 +		});
@@ -1921,6 +2133,11 @@ index 0000000..b7ddbc5
 +		for (const account of providerUnreported) {
 +			const label = accountIdentityLabel(account, redaction);
 +			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
++			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
++				lines.push(
++					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
++				);
++			}
 +		}
 +
 +		for (const summary of disabledByProvider.get(provider) ?? []) {
@@ -1950,7 +2167,7 @@ index 0000000..b7ddbc5
 +	return lines.join("\n");
 +}
 diff --git a/packages/coding-agent/test/modes/controllers/usage-command.test.ts b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
-index 5bd46f8..b085d9d 100644
+index 5f0fcda..48a4412 100644
 --- a/packages/coding-agent/test/modes/controllers/usage-command.test.ts
 +++ b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
 @@ -1,10 +1,27 @@
@@ -1960,8 +2177,8 @@ index 5bd46f8..b085d9d 100644
  import type { UsageReport } from "@oh-my-pi/pi-ai";
 -import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 +import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
- import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 +import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+ import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
  
 -describe("renderUsageReports content", () => {
 +interface RenderableBlock {
@@ -1984,7 +2201,7 @@ index 5bd46f8..b085d9d 100644
  	beforeAll(async () => {
  		const darkTheme = await getThemeByName("dark");
  		if (!darkTheme) throw new Error("Expected dark theme");
-@@ -165,4 +182,489 @@ describe("renderUsageReports content", () => {
+@@ -169,4 +186,489 @@ describe("renderUsageReports content", () => {
  		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
  		expect(output.match(/Gemini/g)).toHaveLength(2);
  	});
@@ -2475,10 +2692,10 @@ index 5bd46f8..b085d9d 100644
 +	});
  });
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
-index bf51715..9257609 100644
+index bb7bce6..eafa57e 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
 +++ b/packages/coding-agent/test/usage-cli.test.ts
-@@ -502,6 +502,33 @@ describe("formatUsageBreakdown", () => {
+@@ -601,6 +601,33 @@ describe("formatUsageBreakdown", () => {
  		expect(text).toContain("✗ truly-dead@example.test — disabled");
  	});
  
@@ -2513,10 +2730,10 @@ index bf51715..9257609 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index 962ae29..2e354e7 100644
+index 2a08941..629bd68 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -23,6 +23,13 @@ - Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
+@@ -35,6 +35,13 @@ - Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -2692,10 +2909,10 @@ index 0a51ff9..4ad0342 100644
  		}
  	}
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index c820dcc..8ba4255 100644
+index 61fa9f6..ea46c10 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
-@@ -278,6 +278,11 @@ export async function initDb(): Promise<Database> {
+@@ -281,6 +281,11 @@ export async function initDb(): Promise<Database> {
  		);
  	`);
  
@@ -2707,7 +2924,7 @@ index c820dcc..8ba4255 100644
  	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
  	if (!offsetColumns.some(column => column.name === "parser_state")) {
  		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
-@@ -597,6 +602,11 @@ function backfillNoCacheInputCosts(database: Database): void {
+@@ -600,6 +605,11 @@ function backfillNoCacheInputCosts(database: Database): void {
  
  /**
   * Get the stored offset for a session file.
@@ -2719,7 +2936,7 @@ index c820dcc..8ba4255 100644
   */
  export function getFileOffset(
  	sessionFile: string,
-@@ -685,7 +695,11 @@ ): { processed: number; reconcile: boolean } {
+@@ -688,7 +698,11 @@ ): { processed: number; reconcile: boolean } {
  		if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
  		if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
  		if (result.toolResults.length > 0) updateToolResults(result.toolResults);

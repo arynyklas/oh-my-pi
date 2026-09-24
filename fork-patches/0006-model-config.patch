@@ -1,10 +1,10 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index d3e24e8..e179e3f 100644
+index 9c1a170..8fb93d0 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -494,6 +494,10 @@ | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
+@@ -537,6 +537,10 @@ | `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
  
- When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching roles when the session is not on those roles. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
+ When the active chat model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default` — which also owns a live model that belongs to no role (`/model` switch, ephemeral hop). The effective chain is the owning role's primary followed by its configured entries, and a live selector that appears nowhere in it is offered the whole chain. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching chat roles when the session is not on those roles. It skips chat candidates whose selectors are still cooling down and switches for the rest of the turn. Model-kind runners resolve their named role chain separately and never consume `default`. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
  
 +Claude account cooldowns are reconciled against fresh usage during `/usage`, account selection, and model-usage health checks. After a five-minute guard against lagging quota reports, healthy shared five-hour and weekly counters can clear a stale block; model-tier blocks also require that tier's counter to be reported and healthy. Missing, unknown, malformed, or header-only quota evidence does not clear a block. Legacy account-wide blocks require every reported shared and model-tier quota counter to be healthy; display-only Extra Usage spend is excluded. Sessions that already fell over from a configured default remain on their chosen sibling; a new session can use the recovered default.
 +
@@ -13,7 +13,7 @@ index d3e24e8..e179e3f 100644
  ### Tools and approvals
  
  ```yaml
-@@ -714,6 +718,8 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
+@@ -764,6 +768,8 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
  
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
@@ -22,17 +22,17 @@ index d3e24e8..e179e3f 100644
  ### Interaction
  
  | Key                    | Type    | Default         | Values                                                                                                  |
-@@ -770,6 +776,8 @@ | `providers.judgmentProvider`        | enum    | `auto`    | Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging). `auto` uses TypeSafe when `TYPESAFE_API_KEY` or a `/login typesafe` credential exists; failed TypeSafe requests fall back through `tiny`, `smol`, `default`, then the active session model. `llm` skips TypeSafe; a feature-configured local model remains the direct backend when TypeSafe is not selected.                                                                                                                       |
- | `providers.tinyModel`               | enum    | `online`  | `online` or a local model (`lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`).                                                                                                                                                                                                                                                                                                                                                              |
+@@ -825,6 +831,8 @@ | `providers.webSearchTimeoutSeconds` | number  | `60`      | Per-candidate web-search transport timeout. Values above `300` are capped at five minutes. This is not a whole-chain deadline; the `web` role advances to its next candidate after a timeout.                                                                                                                                                                                                                                                                                                         |
+ | `providers.fetch`                   | enum    | `auto`    | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                              |
  | `providers.tinyModelDevice`         | enum    | `default` | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                         |
  | `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                          |
 +| `providers.defaultAccount`          | record  | `{}`      | Pinned stored account per provider id, e.g. `{"anthropic": "me@example.com"}`. Matched against the account email, account id, project id, enterprise URL, or `#<credential id>`. The pin serves every request — including plan-gated models and advisor traffic — until the account hits a usage limit or cannot serve the model; the session then moves to a sibling and stays there.                                                  |
 +| `providers.accountPriority`         | record  | `{}`      | Ordered account preference per provider id, e.g. `{"anthropic": ["me@example.com", "backup@example.com"]}`. The head is the pinned default (so this supersedes `providers.defaultAccount` for that provider) and the rest is the fallover order. Edit it interactively with `/account`; changes apply to the next request, including advisor sessions, without a restart.                                                             |
  | `providers.tinyModelDtype`          | enum    | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`.                                                                                                                                                                                                                                                                                                                                                                   |
- | `providers.openaiWebsockets`        | enum    | `auto`    | `auto`, `off`, `on`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
- | `providers.openrouterVariant`       | enum    | `default` | `default`, `nitro`, `floor`, `online`, `exacto`.                                                                                                                                                                                                                                                                                                                                                                                       |
+ | `tts.localVoice`                    | enum    | `af_heart` | Voice used by the local Kokoro TTS runner. Available local voices remain configurable independently of `modelRoles.speech`.                                                                                                                                                                                                                                                                                                           |
+ | `speech.voice`                      | enum    | `af_heart` | Kokoro voice used when assistant-output vocalization is enabled.                                                                                                                                                                                                                                                                                                                                                                     |
 diff --git a/packages/coding-agent/src/config/custom-models.ts b/packages/coding-agent/src/config/custom-models.ts
-index 4fbdb0a..e34315a 100644
+index 79dd20c..b275e1e 100644
 --- a/packages/coding-agent/src/config/custom-models.ts
 +++ b/packages/coding-agent/src/config/custom-models.ts
 @@ -44,8 +44,9 @@ export function mergeAuthHeaderSources(
@@ -54,7 +54,7 @@ index 4fbdb0a..e34315a 100644
  		provider: providerName,
  		api,
  		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
-@@ -123,6 +125,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
+@@ -124,6 +126,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
  	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
  	const built = buildModel({
  		id: resolvedModel.id,
@@ -62,11 +62,81 @@ index 4fbdb0a..e34315a 100644
  		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
  		api: resolvedModel.api,
  		provider: resolvedModel.provider,
+diff --git a/packages/coding-agent/src/config/model-discovery.ts b/packages/coding-agent/src/config/model-discovery.ts
+index 8a5ccc7..0c33c04 100644
+--- a/packages/coding-agent/src/config/model-discovery.ts
++++ b/packages/coding-agent/src/config/model-discovery.ts
+@@ -9,6 +9,7 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+ import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
+ import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
+ import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
++import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+ import {
+ 	getBundledModelReferenceIndex,
+ 	inheritReferenceThinking,
+@@ -1098,7 +1099,14 @@ ): Promise<Model<Api>[]> {
+ 			}
+ 			headers = h;
+ 			return (await res.json()) as {
+-				data?: Array<{ id?: string; name?: string; supported_endpoint_types?: string[]; context_length?: number }>;
++				data?: Array<{
++					id?: string;
++					name?: string;
++					supported_endpoint_types?: string[];
++					context_length?: number;
++					reasoning?: unknown;
++					thinking_efforts?: unknown;
++				}>;
+ 			};
+ 		});
+ 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
+@@ -1119,6 +1127,14 @@ ): Promise<Model<Api>[]> {
+ 		if (!api) continue;
+ 		const isAnthropic = api === "anthropic-messages";
+ 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
++		// An omp auth-gateway advertises the served model's reasoning surface. It
++		// dispatches with its own catalog entry, so that ladder is authoritative
++		// over the reference guess (cross-provider references carry no thinking,
++		// which left gateway Claude rows on the generic minimal..high ladder).
++		// Only the OpenAI-shaped fallback api takes it: `effort` is the mode that
++		// wire encodes, while Anthropic rows keep their own identity-derived mode.
++		const advertisedEfforts = isAnthropic ? undefined : parseAdvertisedEfforts(item.thinking_efforts);
++		const reasoning = typeof item.reasoning === "boolean" ? item.reasoning : (reference?.reasoning ?? false);
+ 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
+ 		const displayName =
+ 			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??
+@@ -1132,8 +1148,10 @@ ): Promise<Model<Api>[]> {
+ 				api,
+ 				provider: providerConfig.provider,
+ 				baseUrl,
+-				reasoning: reference?.reasoning ?? false,
+-				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
++				reasoning,
++				thinking: advertisedEfforts
++					? { mode: "effort", efforts: advertisedEfforts }
++					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+ 				input: reference?.input ?? ["text"],
+ 				// Proxy pricing is provider-specific and usually does not match
+ 				// upstream bundled catalogs, so keep costs local-unknown even when
+@@ -1165,6 +1183,13 @@ ): Promise<Model<Api>[]> {
+ 	return discovered;
+ }
+ 
++/** Known efforts from a proxy row's `thinking_efforts`, in ladder order; undefined when none survive. */
++function parseAdvertisedEfforts(value: unknown): Effort[] | undefined {
++	if (!Array.isArray(value)) return undefined;
++	const efforts = THINKING_EFFORTS.filter(effort => value.includes(effort));
++	return efforts.length > 0 ? efforts : undefined;
++}
++
+ export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
+ 	const defaultBaseUrl = "http://127.0.0.1:8080";
+ 	const raw = baseUrl || defaultBaseUrl;
 diff --git a/packages/coding-agent/src/config/model-patch.ts b/packages/coding-agent/src/config/model-patch.ts
-index b37bc0c..aeaab62 100644
+index cec349b..e8a3260 100644
 --- a/packages/coding-agent/src/config/model-patch.ts
 +++ b/packages/coding-agent/src/config/model-patch.ts
-@@ -224,6 +224,7 @@ /**
+@@ -232,6 +232,7 @@ /**
   * always means "leave the base value alone".
   */
  export interface ModelPatch {
@@ -74,7 +144,7 @@ index b37bc0c..aeaab62 100644
  	name?: string;
  	reasoning?: boolean;
  	thinking?: ThinkingConfig;
-@@ -256,6 +257,7 @@ /**
+@@ -266,6 +267,7 @@ /**
  type ModelTransportPolicy = "merge" | "replace";
  export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
  	const result = { ...base };
@@ -83,10 +153,10 @@ index b37bc0c..aeaab62 100644
  	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
  	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
-index 4914eaf..d65b82f 100644
+index 8328db7..eb4cc3e 100644
 --- a/packages/coding-agent/src/config/model-registry.ts
 +++ b/packages/coding-agent/src/config/model-registry.ts
-@@ -256,6 +256,7 @@ export class ModelRegistry {
+@@ -259,6 +259,7 @@ export class ModelRegistry {
  	#commandConfigsByProvider: Map<string, Set<string>> = new Map();
  	#keylessProviders: Set<string> = new Set();
  	#discoverableProviders: DiscoveryProviderConfig[] = [];
@@ -94,7 +164,7 @@ index 4914eaf..d65b82f 100644
  	#customModelOverlays: CustomModelOverlay[] = [];
  	#providerOverrides: Map<string, ProviderOverride> = new Map();
  	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
-@@ -779,6 +780,7 @@ export class ModelRegistry {
+@@ -782,6 +783,7 @@ export class ModelRegistry {
  		this.#modelsConfigFile.invalidate();
  		this.#customProviderApiKeys.clear();
  		this.#keylessProviders.clear();
@@ -102,7 +172,7 @@ index 4914eaf..d65b82f 100644
  		this.#discoverableProviders = [];
  		// Drop config-sourced apiKeys from AuthStorage before reload; entries
  		// removed from models.yml must actually disappear from the resolver, not
-@@ -859,6 +861,7 @@ export class ModelRegistry {
+@@ -862,6 +864,7 @@ export class ModelRegistry {
  			error: configError,
  		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
  		this.#configError = configError;
@@ -110,7 +180,7 @@ index 4914eaf..d65b82f 100644
  		this.#keylessProviders = keylessProviders;
  		this.#discoverableProviders = discoverableProviders;
  		this.#customModelOverlays = customModels;
-@@ -1288,9 +1291,22 @@ export class ModelRegistry {
+@@ -1301,9 +1304,22 @@ export class ModelRegistry {
  		return models;
  	}
  
@@ -134,7 +204,7 @@ index 4914eaf..d65b82f 100644
  	}
  
  	#loadCachedDiscoverableModels(): Model<Api>[] {
-@@ -2263,6 +2279,7 @@ export class ModelRegistry {
+@@ -2295,6 +2311,7 @@ export class ModelRegistry {
  			headers?: Record<string, string>;
  			resolveHeaders?: Model<Api>["resolveHeaders"];
  			remoteCompaction?: RemoteCompactionConfig<Api>;
@@ -142,7 +212,7 @@ index 4914eaf..d65b82f 100644
  		},
  	>(
  		entry: T,
-@@ -2271,15 +2288,28 @@ export class ModelRegistry {
+@@ -2303,15 +2320,28 @@ export class ModelRegistry {
  			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
  		>,
  	): T {
@@ -174,7 +244,7 @@ index 4914eaf..d65b82f 100644
  				)
  			: entry.resolveHeaders;
  		return {
-@@ -2440,6 +2470,7 @@ export class ModelRegistry {
+@@ -2496,6 +2526,7 @@ export class ModelRegistry {
  		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
  			const modelDefs = providerConfig.models ?? [];
  			if (modelDefs.length === 0) continue; // Override-only, no custom models
@@ -182,7 +252,7 @@ index 4914eaf..d65b82f 100644
  			if (providerConfig.apiKey) {
  				this.#installProviderApiKey(providerName, providerConfig.apiKey);
  			}
-@@ -2602,6 +2633,14 @@ export class ModelRegistry {
+@@ -2686,6 +2717,14 @@ export class ModelRegistry {
  			.map(provider => provider.provider);
  	}
  
@@ -198,10 +268,10 @@ index 4914eaf..d65b82f 100644
  	 * Whether `providerId` is known to the registry: it has at least one live
  	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
 diff --git a/packages/coding-agent/src/config/models-config-schema-bundle.ts b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-index 92313cf..d993213 100644
+index 2b5e87f..0b1cad5 100644
 --- a/packages/coding-agent/src/config/models-config-schema-bundle.ts
 +++ b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-@@ -174,6 +174,7 @@ export const getModelsConfigSchemaBundle = once(() => {
+@@ -189,6 +189,7 @@ export const getModelsConfigSchemaBundle = once(() => {
  
  	const ModelDefinitionSchema = type({
  		id: "string",
@@ -209,7 +279,7 @@ index 92313cf..d993213 100644
  		"name?": "string",
  		"api?": ApiSchema,
  		"baseUrl?": "string",
-@@ -207,6 +208,13 @@ export const getModelsConfigSchemaBundle = once(() => {
+@@ -223,6 +224,13 @@ export const getModelsConfigSchemaBundle = once(() => {
  		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
  			return ctx.mustBe("name a non-empty string");
  		}
@@ -301,10 +371,10 @@ index c066153..362abb7 100644
  				hasResolved = true;
  			}
 diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
-index 7f47b74..819ee71 100644
+index 165ed57..60ba037 100644
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
-@@ -655,6 +655,30 @@ export const SETTINGS_SCHEMA = {
+@@ -464,6 +464,30 @@ export const SETTINGS_SCHEMA = {
  		},
  	},
  
@@ -336,7 +406,7 @@ index 7f47b74..819ee71 100644
  		type: "enum",
  		values: ["off", "on", "auto"] as const,
 diff --git a/packages/coding-agent/test/model-registry-command-values.test.ts b/packages/coding-agent/test/model-registry-command-values.test.ts
-index 944f9ca..fd64d89 100644
+index 722d362..4dd48fd 100644
 --- a/packages/coding-agent/test/model-registry-command-values.test.ts
 +++ b/packages/coding-agent/test/model-registry-command-values.test.ts
 @@ -6,6 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
@@ -604,10 +674,10 @@ index 944f9ca..fd64d89 100644
  		const tokenFile = path.join(tempDir, "token.txt");
  		const counterFile = path.join(tempDir, "counter.txt");
 diff --git a/packages/coding-agent/test/model-registry.test.ts b/packages/coding-agent/test/model-registry.test.ts
-index 9d35c94..1be4d02 100644
+index 001838f..6f13fd2 100644
 --- a/packages/coding-agent/test/model-registry.test.ts
 +++ b/packages/coding-agent/test/model-registry.test.ts
-@@ -558,6 +558,46 @@ describe("ModelRegistry", () => {
+@@ -689,6 +689,46 @@ describe("ModelRegistry", () => {
  				expect(model.baseUrl).toBe("http://localhost:4000");
  			}
  		});

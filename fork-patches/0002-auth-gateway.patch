@@ -1,5 +1,5 @@
 diff --git a/docs/auth-broker-gateway.md b/docs/auth-broker-gateway.md
-index ae6af59..c942ef5 100644
+index 26de84f..cd234de 100644
 --- a/docs/auth-broker-gateway.md
 +++ b/docs/auth-broker-gateway.md
 @@ -133,11 +133,35 @@ omp auth-gateway serve   [--bind=host:port] [--no-auth]
@@ -41,7 +41,7 @@ index ae6af59..c942ef5 100644
  
  ### Endpoints
  
-@@ -156,7 +180,77 @@ The model id is read from the top-level `model` field for foreign wire formats and from the pi-native request body for `/v1/pi/stream`. The gateway picks the first bundled `Model<Api>` matching that id, parses the inbound wire format into an omp `Context`, resolves the provider credential from broker-backed `AuthStorage`, dispatches through `streamSimple()`, and re-encodes the result to the inbound format (SSE for streamed responses).
+@@ -174,7 +198,77 @@ Pointing a TypeSafe SDK or omp's own `judge` role at the gateway means `TYPESAFE_BASE_URL=http://gateway:4000` with `TYPESAFE_API_KEY=<gateway token>`; OpenAI-SDK-style clients set their base URL to `http://gateway:4000/v1`.
  
  There is no raw provider passthrough path. All supported routes go through `pi-ai` provider logic so credential-specific request shaping, OAuth refresh-on-auth-error, and provider quirks stay centralized.
  
@@ -121,7 +121,7 @@ index ae6af59..c942ef5 100644
  ## Usage cache: server-side 5-min jitter + client-side 15 s single-flight
  
 diff --git a/packages/ai/src/auth-broker/remote-store.ts b/packages/ai/src/auth-broker/remote-store.ts
-index 9b8baec..e6f5fd0 100644
+index dd87145..f4dfa3d 100644
 --- a/packages/ai/src/auth-broker/remote-store.ts
 +++ b/packages/ai/src/auth-broker/remote-store.ts
 @@ -23,6 +23,7 @@ import * as AIError from "../error";
@@ -176,7 +176,7 @@ index 9b8baec..e6f5fd0 100644
  	/** Broker-backed disabled tombstones; empty against brokers predating the endpoint. */
  	listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
  		this.#noteActivity();
-@@ -1422,162 +1453,32 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
+@@ -1395,162 +1426,32 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
  /**
   * Match a broker-supplied usage report to a specific OAuth credential. The
   * broker returns aggregate reports across all credentials it manages, so we
@@ -332,16 +332,16 @@ index 9b8baec..e6f5fd0 100644
 -	projectId: string | undefined,
 -): boolean {
 -	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+-	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
+-	// Email identifies the member within shared Team workspace account/org ids.
+-	// When both sides provide it, a mismatch is decisive.
+-	if (email && metaEmail) return metaEmail === email;
 -	if (accountId) {
 -		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
 -		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
 -		for (const limit of report.limits) {
 -			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
 -		}
--	}
--	if (email) {
--		const metaEmail = readMetadataString(metadata, "email");
--		if (metaEmail && metaEmail.toLowerCase() === email) return true;
 -	}
 -	if (projectId) {
 -		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
@@ -360,10 +360,10 @@ index 9b8baec..e6f5fd0 100644
  }
 diff --git a/packages/ai/src/auth-gateway/access-control.ts b/packages/ai/src/auth-gateway/access-control.ts
 new file mode 100644
-index 0000000..d9b1c24
+index 0000000..d4dbff4
 --- /dev/null
 +++ b/packages/ai/src/auth-gateway/access-control.ts
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,442 @@
 +export const AUTH_GATEWAY_ACL_ROUTES = [
 +	"chat",
 +	"messages",
@@ -372,6 +372,13 @@ index 0000000..d9b1c24
 +	"models",
 +	"usage",
 +	"check",
++	"systemone",
++	"images",
++	"speech",
++	"transcriptions",
++	"embeddings",
++	"rerank",
++	"video",
 +] as const;
 +export const AUTH_GATEWAY_BASIC_ROUTES = [
 +	"chat",
@@ -563,6 +570,13 @@ index 0000000..d9b1c24
 +	models: true,
 +	usage: true,
 +	check: true,
++	systemone: true,
++	images: true,
++	speech: true,
++	transcriptions: true,
++	embeddings: true,
++	rerank: true,
++	video: true,
 +};
 +
 +const STRATEGIES: Record<AuthGatewayPoolStrategy, true> = {
@@ -3038,11 +3052,239 @@ index 0000000..9ed6f4d
 +		}
 +	}
 +}
+diff --git a/packages/ai/src/auth-gateway/dispatch.ts b/packages/ai/src/auth-gateway/dispatch.ts
+index c563567..de81fe6 100644
+--- a/packages/ai/src/auth-gateway/dispatch.ts
++++ b/packages/ai/src/auth-gateway/dispatch.ts
+@@ -9,7 +9,7 @@ /**
+  */
+ import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
+ import type { ApiKeyResolver } from "../auth-retry";
+-import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
++import type { AuthApiKeyOptions, AuthCredentialSelectionPolicy, AuthStorage } from "../auth-storage";
+ import * as AIError from "../error";
+ import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
+ import { isUsageLimitOutcome } from "../error/rate-limit";
+@@ -31,10 +31,59 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
+ 	resolveModel: ModelResolver;
+ 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
+ 	listModels?: () => Iterable<Model<Api>>;
++	/**
++	 * True when the resolved model is explicitly configured to run without
++	 * provider credentials (for example a self-hosted vLLM endpoint). Managed
++	 * users still need route/provider/model ACLs, but no pool credential.
++	 */
++	isKeylessModel?: (model: Model<Api>) => boolean;
++	/**
++	 * Per-request credential policy for the authenticated principal, installed
++	 * by the router on a request-scoped clone of these options. Absent on an
++	 * unmanaged gateway, where every request uses the full credential set.
++	 */
++	credentialScope?: GatewayCredentialScope;
+ 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
+ 	fetch?: FetchImpl;
+ }
+ 
++/** Placeholder bearer for models configured to run without provider credentials. */
++export const GATEWAY_KEYLESS_API_KEY = "N/A";
++
++/** Credential policy a principal gets for one model: a pool grant, or a denial. */
++export interface GatewayCredentialGrant {
++	/** Account pool the principal may draw on; absent means the full credential set. */
++	selection?: AuthCredentialSelectionPolicy;
++	/** Session-key namespace, so two pools never share a sticky credential. */
++	sessionScope?: string;
++	/** Model needs no provider credential; the sentinel bearer is used instead. */
++	keyless?: boolean;
++}
++
++export type GatewayCredentialScope = (model: Model<Api>) => GatewayCredentialGrant | GatewayErrorClassification;
++
++function isCredentialDenial(value: object): value is GatewayErrorClassification {
++	return "status" in value;
++}
++
++/**
++ * Resolve the principal's grant for `model` and namespace `sessionId` under it.
++ * Without a scope (unmanaged gateway) the request keeps its bare session id and
++ * the full credential set.
++ */
++function scopeGatewaySession(
++	bootOpts: AuthGatewayBootOptions,
++	model: Model<Api>,
++	sessionId: string,
++): { grant: GatewayCredentialGrant; sessionId: string } | GatewayErrorClassification {
++	const grant = bootOpts.credentialScope?.(model) ?? {};
++	if (isCredentialDenial(grant)) return grant;
++	return {
++		grant,
++		sessionId: grant.sessionScope ? `${grant.sessionScope}\u0000${sessionId}` : sessionId,
++	};
++}
++
+ /**
+  * The client's own session key, or `undefined` when it sent none. A blank key
+  * counts as none: honouring it would collapse every caller that sends an empty
+@@ -79,26 +128,41 @@ /**
+  *
+  * pi-ai clients never consult `AuthStorage`; the gateway resolves the bearer
+  * (an OAuth access token refreshed through the broker when needed) and hands
+- * it to the client. Returns the key, or the error classification the route
+- * should encode in its own envelope: storage failures map through
+- * {@link classifyGatewayError}, a provider without any credential is a 401.
++ * it to the client. When the router installed a {@link GatewayCredentialScope}
++ * the principal's pool policy applies: the grant may deny the request outright,
++ * mark the model keyless, or restrict selection to the pool's accounts.
++ * Returns the key, or the error classification the route should encode in its
++ * own envelope: storage failures map through {@link classifyGatewayError}, a
++ * provider without any usable credential is a 401.
+  */
+ export async function resolveGatewayApiKey(
+-	storage: AuthStorage,
++	bootOpts: AuthGatewayBootOptions,
+ 	model: Model<Api>,
+ 	sessionId: string,
+ 	signal: AbortSignal,
+ 	peer: string,
+ ): Promise<string | GatewayErrorClassification> {
+-	let apiKey: string | undefined;
++	const scoped = scopeGatewaySession(bootOpts, model, sessionId);
++	if (isCredentialDenial(scoped)) return scoped;
++	if (scoped.grant.keyless) return GATEWAY_KEYLESS_API_KEY;
+ 	try {
+-		apiKey = await storage.keys.get(model.provider, sessionId, modelKeyOptions(model, signal));
++		const resolved = await bootOpts.storage.resolveApiKeySelection(model.provider, scoped.sessionId, {
++			...modelKeyOptions(model, signal),
++			selection: scoped.grant.selection,
++		});
++		if (resolved.ok) return resolved.credential.apiKey;
++		if (resolved.reason === "all_eligible_blocked") {
++			return {
++				status: 429,
++				type: "rate_limit_error",
++				message: "No eligible credential is available for this request",
++			};
++		}
+ 	} catch (error) {
+ 		const classified = classifyGatewayError(error);
+ 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+ 		return classified;
+ 	}
+-	if (apiKey) return apiKey;
+ 	return {
+ 		status: 401,
+ 		type: "authentication_error",
+@@ -138,6 +202,7 @@ async function refreshGatewayApiKeyAfterAuthError(
+ 	signal: AbortSignal,
+ 	format: string,
+ 	peer: string,
++	selection: AuthCredentialSelectionPolicy | undefined,
+ ): Promise<string | undefined> {
+ 	const message = error instanceof Error ? error.message : String(error);
+ 	const status = extractHttpStatusFromError(error);
+@@ -150,6 +215,7 @@ ): Promise<string | undefined> {
+ 			modelId: model.id,
+ 			apiKey: oldKey,
+ 			signal,
++			selection,
+ 		});
+ 		logger.debug("auth-gateway retrying provider request after usage-limit block", {
+ 			format,
+@@ -161,16 +227,24 @@ ): Promise<string | undefined> {
+ 			error: message,
+ 		});
+ 		if (!switched) return undefined;
+-		return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
++		const rotated = await storage.resolveApiKeySelection(provider, sessionId, {
++			...modelKeyOptions(model, signal),
++			selection,
++		});
++		return rotated.ok ? rotated.credential.apiKey : undefined;
+ 	}
+-	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
++	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal, selection });
+ 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
+ 		format,
+ 		provider,
+ 		peer,
+ 		error: message,
+ 	});
+-	return storage.keys.get(provider, sessionId, modelKeyOptions(model, signal));
++	const rotated = await storage.resolveApiKeySelection(provider, sessionId, {
++		...modelKeyOptions(model, signal),
++		selection,
++	});
++	return rotated.ok ? rotated.credential.apiKey : undefined;
+ }
+ 
+ /** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
+@@ -191,10 +265,12 @@ /**
+  * `lastKey` tracks the most recent bearer so the switch step invalidates the
+  * credential that actually failed. `onResolvedKey` observes every rotation;
+  * routes that retain provider session state use it to re-key the account
+- * lease, one-shot routes pass `undefined`.
++ * lease, one-shot routes pass `undefined`. Rotation stays inside the
++ * principal's pool grant, so a managed user never fails over onto an account
++ * their ACL does not reach.
+  */
+ export function buildGatewayApiKeyResolver(
+-	storage: AuthStorage,
++	bootOpts: AuthGatewayBootOptions,
+ 	model: Model<Api>,
+ 	sessionId: string,
+ 	initialKey: string,
+@@ -203,6 +279,10 @@ export function buildGatewayApiKeyResolver(
+ 	peer: string,
+ 	onResolvedKey?: (apiKey: string) => void,
+ ): ApiKeyResolver {
++	const storage = bootOpts.storage;
++	const scoped = scopeGatewaySession(bootOpts, model, sessionId);
++	const grant = isCredentialDenial(scoped) ? undefined : scoped.grant;
++	const scopedSessionId = isCredentialDenial(scoped) ? sessionId : scoped.sessionId;
+ 	let lastKey = initialKey;
+ 	return async ({ lastChance, error, signal }) => {
+ 		const sig = signal ?? requestSignal;
+@@ -210,25 +290,30 @@ ): ApiKeyResolver {
+ 			lastKey = initialKey;
+ 			return initialKey;
+ 		}
++		// A denied or keyless grant has no credential to rotate onto.
++		if (grant === undefined || grant.keyless) return undefined;
+ 		if (!lastChance) {
+-			const refreshed = await storage.keys.get(model.provider, sessionId, {
++			const refreshed = await storage.resolveApiKeySelection(model.provider, scopedSessionId, {
+ 				...modelKeyOptions(model, sig),
+ 				forceRefresh: true,
++				selection: grant.selection,
+ 			});
+-			lastKey = refreshed ?? lastKey;
+-			if (refreshed) onResolvedKey?.(refreshed);
+-			return refreshed;
++			if (!refreshed.ok) return undefined;
++			lastKey = refreshed.credential.apiKey;
++			onResolvedKey?.(lastKey);
++			return lastKey;
+ 		}
+ 		const next = await refreshGatewayApiKeyAfterAuthError(
+ 			storage,
+ 			model,
+-			sessionId,
++			scopedSessionId,
+ 			model.provider,
+ 			lastKey,
+ 			error,
+ 			sig,
+ 			format,
+ 			peer,
++			grant.selection,
+ 		);
+ 		lastKey = next ?? lastKey;
+ 		if (next) onResolvedKey?.(next);
 diff --git a/packages/ai/src/auth-gateway/http.ts b/packages/ai/src/auth-gateway/http.ts
-index 551005c..363a6e5 100644
+index 9978173..bd79ac3 100644
 --- a/packages/ai/src/auth-gateway/http.ts
 +++ b/packages/ai/src/auth-gateway/http.ts
-@@ -80,6 +80,13 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+@@ -79,6 +79,13 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
  
  const TOKEN_ENCODER = new TextEncoder();
  
@@ -3063,17 +3305,18 @@ index 551005c..363a6e5 100644
 -	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 +	"Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
  	"Access-Control-Allow-Headers":
- 		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key",
+ 		"authorization, content-type, anthropic-version, anthropic-beta, anthropic-user-profile-id, openai-organization, openai-project, x-stainless-*, x-api-key",
  	"Access-Control-Expose-Headers":
 diff --git a/packages/ai/src/auth-gateway/index.ts b/packages/ai/src/auth-gateway/index.ts
-index c6bd8a3..cc494b6 100644
+index 7bbb054..49609c7 100644
 --- a/packages/ai/src/auth-gateway/index.ts
 +++ b/packages/ai/src/auth-gateway/index.ts
-@@ -1,4 +1,10 @@
+@@ -1,5 +1,11 @@
 +export * from "./access-control";
 +export * from "./access-store";
 +export * from "./admin-url";
 +export * from "./client";
+ export * from "./dispatch";
  export * from "./http";
 -export * from "./session-state";
 +export * from "./management-schemas";
@@ -3083,7 +3326,7 @@ index c6bd8a3..cc494b6 100644
  export * from "./types";
 diff --git a/packages/ai/src/auth-gateway/management-schemas.ts b/packages/ai/src/auth-gateway/management-schemas.ts
 new file mode 100644
-index 0000000..7b46731
+index 0000000..30eac82
 --- /dev/null
 +++ b/packages/ai/src/auth-gateway/management-schemas.ts
 @@ -0,0 +1,376 @@
@@ -3100,7 +3343,7 @@ index 0000000..7b46731
 +	"'success' | 'unauthorized' | 'denied_by_acl' | 'invalid_request' | 'unknown_model' | 'no_eligible_credential' | 'usage_limit' | 'upstream_error' | 'request_aborted' | 'not_found' | 'internal_error'",
 +);
 +export const authGatewayRouteFamilySchema = type(
-+	"'chat' | 'messages' | 'responses' | 'pi-native' | 'models' | 'usage' | 'check' | 'management' | 'unknown'",
++	"'chat' | 'messages' | 'responses' | 'pi-native' | 'models' | 'usage' | 'check' | 'systemone' | 'images' | 'speech' | 'transcriptions' | 'embeddings' | 'rerank' | 'video' | 'management' | 'unknown'",
 +);
 +
 +export const authGatewayUserSchema = type({
@@ -3465,10 +3708,12 @@ index 0000000..7b46731
 +export { credentialUploadRequestSchema as authGatewayCredentialUploadRequestSchema };
 diff --git a/packages/ai/src/auth-gateway/management-types.ts b/packages/ai/src/auth-gateway/management-types.ts
 new file mode 100644
-index 0000000..cea1414
+index 0000000..129bad0
 --- /dev/null
 +++ b/packages/ai/src/auth-gateway/management-types.ts
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,251 @@
++import type { Effort } from "@oh-my-pi/pi-catalog/effort";
++import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 +import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 +import type { Api } from "../types";
 +import type { UsageReport } from "../usage";
@@ -3590,11 +3835,26 @@ index 0000000..cea1414
 +	object: "model";
 +	owned_by: string;
 +	api: Api;
++	/**
++	 * Catalog kind for non-chat rows (`judge`, `image`, `tts`, `stt`,
++	 * `embedding`, `rerank`, `video`), so clients keep them off chat routes;
++	 * absent means chat.
++	 */
++	kind?: ModelKind;
 +	display_name: string;
 +	context_length?: number;
 +	max_output_tokens?: number;
 +	input_modalities: ("text" | "image")[];
 +	supports_tools?: boolean;
++	/** Whether the served model reasons; drives the client's thinking toggle. */
++	reasoning: boolean;
++	/**
++	 * Efforts the served model accepts, least → most intensive. Omitted when the
++	 * model has no controllable effort surface. Clients dispatching through the
++	 * gateway adopt this ladder instead of guessing one from their own wire
++	 * (e.g. `xhigh`/`max` on Claude Opus 4.7+).
++	 */
++	thinking_efforts?: readonly Effort[];
 +}
 +
 +export interface AuthGatewayModelSummary {
@@ -3705,10 +3965,10 @@ index 0000000..cea1414
 +}
 diff --git a/packages/ai/src/auth-gateway/management.ts b/packages/ai/src/auth-gateway/management.ts
 new file mode 100644
-index 0000000..2a19129
+index 0000000..54039ac
 --- /dev/null
 +++ b/packages/ai/src/auth-gateway/management.ts
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,670 @@
 +import { type } from "@oh-my-pi/omptype";
 +import { credentialUploadRequestSchema } from "../auth-broker/wire-schemas";
 +import type {
@@ -3804,14 +4064,14 @@ index 0000000..2a19129
 +			},
 +			counts: {
 +				...counts,
-+				credentials: storage.listStoredCredentials().length,
++				credentials: storage.credentials.list().length,
 +			},
 +		};
 +		return json(200, { status });
 +	}
 +	if (parts[0] !== "credentials") throw new ManagementHttpError(404, "not_found", "management route not found");
 +	if (parts.length === 1 && req.method === "GET") {
-+		return json(200, { credentials: storage.listStoredCredentials().map(credentialSummaryFromStored) });
++		return json(200, { credentials: storage.credentials.list().map(credentialSummaryFromStored) });
 +	}
 +	if (parts.length === 1 && req.method === "POST") {
 +		const parsed = await readCredentialUploadBody(req);
@@ -3830,7 +4090,7 @@ index 0000000..2a19129
 +			throw new ManagementHttpError(400, "credential_not_refreshable", "API-key credentials cannot be refreshed");
 +		}
 +		try {
-+			const refreshed = await storage.refreshCredentialById(credentialId, req.signal);
++			const refreshed = await storage.oauth.refresh(credentialId, req.signal);
 +			return json(200, { credential: credentialSummaryFromSnapshot(refreshed) });
 +		} catch {
 +			return managementError(502, "credential_refresh_failed", "Credential refresh failed");
@@ -3848,9 +4108,8 @@ index 0000000..2a19129
 +			);
 +		}
 +		try {
-+			const outcome = await storage.redeemResetCredit({
-+				target: { credentialId },
-+				provider: row.provider,
++			const outcome = await storage.resets.redeem({
++				target: { provider: row.provider, credentialId },
 +				signal: req.signal,
 +			});
 +			return json(200, { outcome });
@@ -3873,7 +4132,7 @@ index 0000000..2a19129
 +			);
 +		}
 +		try {
-+			const removed = await storage.removeCredential(row.provider, credentialId);
++			const removed = await storage.credentials.removeById(row.provider, credentialId);
 +			if (!removed) throw new ManagementHttpError(404, "not_found", "credential not found");
 +			return new Response(null, { status: 204 });
 +		} catch (error) {
@@ -4380,29 +4639,250 @@ index 0000000..2a19129
 +		super(message);
 +	}
 +}
+diff --git a/packages/ai/src/auth-gateway/routes/embeddings.ts b/packages/ai/src/auth-gateway/routes/embeddings.ts
+index d582c54..58092c4 100644
+--- a/packages/ai/src/auth-gateway/routes/embeddings.ts
++++ b/packages/ai/src/auth-gateway/routes/embeddings.ts
+@@ -49,7 +49,7 @@ ): Promise<Response> {
+ 
+ 	const client = resolveClientIdentity(req.headers);
+ 	const sessionId = deterministicUuid(`embeddings\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") {
+ 		return embeddings.formatError(apiKey.status, apiKey.type, apiKey.message);
+@@ -67,15 +67,7 @@ ): Promise<Response> {
+ 
+ 	try {
+ 		const result = await embed(model, parsed.request, {
+-			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
+-				model,
+-				sessionId,
+-				apiKey,
+-				controller.signal,
+-				"embeddings",
+-				peer,
+-			),
++			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "embeddings", peer),
+ 			fetch: bootOpts.fetch,
+ 			signal: controller.signal,
+ 		});
+diff --git a/packages/ai/src/auth-gateway/routes/images.ts b/packages/ai/src/auth-gateway/routes/images.ts
+index f355bc4..59c6b93 100644
+--- a/packages/ai/src/auth-gateway/routes/images.ts
++++ b/packages/ai/src/auth-gateway/routes/images.ts
+@@ -75,7 +75,7 @@ ): Promise<Response> {
+ 
+ 	const client = resolveClientIdentity(req.headers);
+ 	const sessionId = deterministicUuid(`images\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 
+@@ -91,15 +91,7 @@ ): Promise<Response> {
+ 
+ 	try {
+ 		const result = await generateImage(model, parsed.request, {
+-			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
+-				model,
+-				sessionId,
+-				apiKey,
+-				controller.signal,
+-				"images",
+-				peer,
+-			),
++			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "images", peer),
+ 			fetch: bootOpts.fetch,
+ 			signal: controller.signal,
+ 		});
+diff --git a/packages/ai/src/auth-gateway/routes/rerank.ts b/packages/ai/src/auth-gateway/routes/rerank.ts
+index 3df6efa..394e589 100644
+--- a/packages/ai/src/auth-gateway/routes/rerank.ts
++++ b/packages/ai/src/auth-gateway/routes/rerank.ts
+@@ -39,7 +39,7 @@ export async function handleRerank(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+ 
+ 	const client = resolveClientIdentity(req.headers);
+ 	const sessionId = deterministicUuid(`rerank\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return rerankWire.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 
+@@ -55,15 +55,7 @@ export async function handleRerank(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+ 
+ 	try {
+ 		const result = await rerank(model, parsed.request, {
+-			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
+-				model,
+-				sessionId,
+-				apiKey,
+-				controller.signal,
+-				"rerank",
+-				peer,
+-			),
++			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "rerank", peer),
+ 			fetch: bootOpts.fetch,
+ 			signal: controller.signal,
+ 		});
+diff --git a/packages/ai/src/auth-gateway/routes/speech.ts b/packages/ai/src/auth-gateway/routes/speech.ts
+index fe9c89d..8f7bc73 100644
+--- a/packages/ai/src/auth-gateway/routes/speech.ts
++++ b/packages/ai/src/auth-gateway/routes/speech.ts
+@@ -55,7 +55,7 @@ export async function handleSpeech(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+ 
+ 	const client = resolveClientIdentity(req.headers);
+ 	const sessionId = deterministicUuid(`speech\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 
+@@ -71,15 +71,7 @@ export async function handleSpeech(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+ 
+ 	try {
+ 		const result = await synthesizeSpeech(model, parsed.request, {
+-			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
+-				model,
+-				sessionId,
+-				apiKey,
+-				controller.signal,
+-				"speech",
+-				peer,
+-			),
++			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "speech", peer),
+ 			fetch: bootOpts.fetch,
+ 			signal: controller.signal,
+ 		});
+diff --git a/packages/ai/src/auth-gateway/routes/systemone.ts b/packages/ai/src/auth-gateway/routes/systemone.ts
+index 520c047..ef60e2c 100644
+--- a/packages/ai/src/auth-gateway/routes/systemone.ts
++++ b/packages/ai/src/auth-gateway/routes/systemone.ts
+@@ -67,20 +67,12 @@ export async function handleSystemOne(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+ 	// still lets `markUsageLimitReached` hand off to a sibling account.
+ 	const sessionId = deterministicUuid(`systemone\u0000${model.provider}/${model.id}`);
+ 
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 
+ 	const judge = new TypeSafeJudge({
+-		apiKey: buildGatewayApiKeyResolver(
+-			bootOpts.storage,
+-			model,
+-			sessionId,
+-			apiKey,
+-			controller.signal,
+-			"systemone",
+-			peer,
+-		),
++		apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "systemone", peer),
+ 		api: model.api,
+ 		provider: model.provider,
+ 		model: model.id,
+diff --git a/packages/ai/src/auth-gateway/routes/transcriptions.ts b/packages/ai/src/auth-gateway/routes/transcriptions.ts
+index e9d02ba..93aea72 100644
+--- a/packages/ai/src/auth-gateway/routes/transcriptions.ts
++++ b/packages/ai/src/auth-gateway/routes/transcriptions.ts
+@@ -49,7 +49,7 @@ ): Promise<Response> {
+ 
+ 	const client = resolveClientIdentity(req.headers);
+ 	const sessionId = deterministicUuid(`transcriptions\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") {
+ 		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
+@@ -68,7 +68,7 @@ ): Promise<Response> {
+ 	try {
+ 		const result = await transcribeAudio(model, parsed.request, {
+ 			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
++				bootOpts,
+ 				model,
+ 				sessionId,
+ 				apiKey,
+diff --git a/packages/ai/src/auth-gateway/routes/video.ts b/packages/ai/src/auth-gateway/routes/video.ts
+index 666c26c..732aa44 100644
+--- a/packages/ai/src/auth-gateway/routes/video.ts
++++ b/packages/ai/src/auth-gateway/routes/video.ts
+@@ -56,7 +56,7 @@ ): Promise<ResolvedVideoRequest | Response> {
+ 		);
+ 	}
+ 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 	return { model, upstreamId: identity.upstreamId, sessionId, apiKey, controller };
+@@ -65,7 +65,7 @@ ): Promise<ResolvedVideoRequest | Response> {
+ function videoOptions(bootOpts: AuthGatewayBootOptions, resolved: ResolvedVideoRequest, peer: string) {
+ 	return {
+ 		apiKey: buildGatewayApiKeyResolver(
+-			bootOpts.storage,
++			bootOpts,
+ 			resolved.model,
+ 			resolved.sessionId,
+ 			resolved.apiKey,
+@@ -139,7 +139,7 @@ ): Promise<Response> {
+ 		);
+ 	}
+ 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
++	const apiKey = await resolveGatewayApiKey(bootOpts, model, sessionId, controller.signal, peer);
+ 	if (controller.signal.aborted) return aborted();
+ 	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+ 	logger.info("auth-gateway request", {
+@@ -153,15 +153,7 @@ ): Promise<Response> {
+ 	});
+ 	try {
+ 		const job = await submitVideo(model, parsed.request, {
+-			apiKey: buildGatewayApiKeyResolver(
+-				bootOpts.storage,
+-				model,
+-				sessionId,
+-				apiKey,
+-				controller.signal,
+-				"video",
+-				peer,
+-			),
++			apiKey: buildGatewayApiKeyResolver(bootOpts, model, sessionId, apiKey, controller.signal, "video", peer),
+ 			fetch: bootOpts.fetch,
+ 			signal: controller.signal,
+ 		});
 diff --git a/packages/ai/src/auth-gateway/server.ts b/packages/ai/src/auth-gateway/server.ts
-index 469910f..f0e124f 100644
+index 60ac07e..172d0eb 100644
 --- a/packages/ai/src/auth-gateway/server.ts
 +++ b/packages/ai/src/auth-gateway/server.ts
-@@ -19,10 +19,12 @@ /**
+@@ -27,37 +27,63 @@ /**
   */
  
  import { Effort } from "@oh-my-pi/pi-catalog/effort";
 +import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
- import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
- import type { ApiKeyResolver } from "../auth-retry";
+ import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+-import { logger } from "@oh-my-pi/pi-utils";
 -import type { AuthStorage } from "../auth-storage";
+-import { classifyGatewayError } from "../error/gateway";
++import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
++import type { ApiKeyResolver } from "../auth-retry";
 +import type { AuthCredentialSelectionPolicy, AuthStorage, ResolvedAuthCredential } from "../auth-storage";
- import * as AIError from "../error";
++import * as AIError from "../error";
 +import { isAuthRetryableError } from "../error/auth-classify";
- import { classifyGatewayError } from "../error/gateway";
- import { isUsageLimitOutcome } from "../error/rate-limit";
++import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
++import { isUsageLimitOutcome } from "../error/rate-limit";
  import * as anthropicMessages from "../providers/anthropic-messages-server";
-@@ -30,21 +32,41 @@ import * as openaiChat from "../providers/openai-chat-server";
+ import * as openaiChat from "../providers/openai-chat-server";
  import * as openaiResponses from "../providers/openai-responses-server";
  import * as piNative from "../providers/pi-native-server";
  import { completeSimple, streamSimple } from "../stream";
--import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
++import { extractProviderRetryHint } from "../utils/retry-after";
 +import type {
 +	Api,
 +	AssistantMessage,
@@ -4413,10 +4893,19 @@ index 469910f..f0e124f 100644
 +	SimpleStreamOptions,
 +	Usage,
 +} from "../types";
- import type { ClientUsageIdentity } from "../usage";
  import { deterministicUuid } from "../utils/deterministic-id";
  import { parseBind } from "../utils/parse-bind";
- import { extractProviderRetryHint } from "../utils/retry-after";
+ import {
+ 	type AuthGatewayBootOptions,
+-	buildGatewayApiKeyResolver,
++	GATEWAY_KEYLESS_API_KEY,
++	type GatewayCredentialScope,
+ 	mirrorRequestAbort,
+ 	normalizeClientSessionKey,
+ 	recordGatewayUsage,
+ 	resolveGatewayAccount,
+-	resolveGatewayApiKey,
+ } from "./dispatch";
 +import {
 +	type AuthGatewayAuditOutcome,
 +	type AuthGatewayPrincipal,
@@ -4439,34 +4928,45 @@ index 469910f..f0e124f 100644
  } from "./http";
 +import { handleAuthGatewayManagementRequest } from "./management";
 +import type { AuthGatewayModelListRow } from "./management-types";
- import { AuthGatewaySessionStateStore } from "./session-state";
- import type {
- 	AuthGatewayServerHandle,
-@@ -69,6 +91,12 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
- 	resolveModel: ModelResolver;
- 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
- 	listModels?: () => Iterable<Model<Api>>;
-+	/**
-+	 * True when the resolved model is explicitly configured to run without
-+	 * provider credentials (for example a self-hosted vLLM endpoint). Managed
-+	 * users still need route/provider/model ACLs, but no pool credential.
-+	 */
-+	isKeylessModel?: (model: Model<Api>) => boolean;
+ import { handleEmbeddings } from "./routes/embeddings";
+ import { handleImageEdits, handleImageGenerations } from "./routes/images";
+ import { handleRerank } from "./routes/rerank";
+@@ -73,6 +99,9 @@ import type {
+ } from "./types";
+ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
+ 
++// ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
++// ModelResolver / AuthGatewayBootOptions come from ./dispatch, shared with routes/*.
++
+ // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
+ // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
+ 
+@@ -222,6 +251,532 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
+ 	return opts;
  }
  
- // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
-@@ -80,6 +108,7 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
- 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
- };
- 
-+const GATEWAY_KEYLESS_API_KEY = "N/A";
- // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
- // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
- // Every request now takes the translate path so credential-specific request
-@@ -271,6 +300,44 @@ /**
-  * failure with a fresh credential. Returning `undefined` aborts the retry
-  * and surfaces the original error to the caller.
-  */
++/**
++ * Hook fired by {@link streamSimple} when the upstream request fails in a
++ * way that's rotatable — today that's HTTP 401 (credential is bad) and
++ * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
++ * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
++ * `resource_exhausted`, …). The two cases need different storage actions:
++ *
++ * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
++ *   the current session's credential as temporarily blocked (honouring
++ *   `retry-after` / `resets_at` hints when present) and returns `true` only
++ *   when a sibling credential is still available. Burning the credential
++ *   with `invalidateCredentialMatching` here would orphan accounts whose
++ *   reset window is several hours away — exactly the bug this helper exists
++ *   to avoid.
++ * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
++ *   Suspect/delete the row so it doesn't get re-picked next request.
++ *
++ * In both branches we return the next `getApiKey` result (sticky on the
++ * same `sessionId`) so streamSimple can transparently retry the pre-emit
++ * failure with a fresh credential. Returning `undefined` aborts the retry
++ * and surfaces the original error to the caller.
++ */
 +interface GatewayCredentialResolution {
 +	apiKey: string;
 +	credential: ResolvedAuthCredential;
@@ -4505,33 +5005,42 @@ index 469910f..f0e124f 100644
 +	return message !== undefined && /(?:^|\b)(?:401|403)\b|\binvalid[-_ ]?api[-_ ]?key\b/i.test(message);
 +}
 +
- async function refreshGatewayApiKeyAfterAuthError(
- 	storage: AuthStorage,
- 	model: Model<Api>,
-@@ -281,6 +348,9 @@ async function refreshGatewayApiKeyAfterAuthError(
- 	signal: AbortSignal,
- 	format: string,
- 	peer: string,
++async function refreshGatewayApiKeyAfterAuthError(
++	storage: AuthStorage,
++	model: Model<Api>,
++	sessionId: string,
++	provider: string,
++	oldKey: string,
++	error: unknown,
++	signal: AbortSignal,
++	format: string,
++	peer: string,
 +	selection: AuthCredentialSelectionPolicy | undefined,
 +	exhaustion: PoolExhaustionState,
 +	onCredential: (credential: ResolvedAuthCredential) => void,
- ): Promise<string | undefined> {
- 	const message = error instanceof Error ? error.message : String(error);
- 	const status = extractHttpStatusFromError(error);
-@@ -293,6 +363,7 @@ ): Promise<string | undefined> {
- 			modelId: model.id,
- 			apiKey: oldKey,
- 			signal,
++): Promise<string | undefined> {
++	const message = error instanceof Error ? error.message : String(error);
++	const status = extractHttpStatusFromError(error);
++	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
++		const retryAfterMs = extractProviderRetryHint(provider, message);
++		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
++			retryAfterMs,
++			providerTimed: retryAfterMs !== undefined,
++			baseUrl: model.baseUrl,
++			modelId: model.id,
++			apiKey: oldKey,
++			signal,
 +			selection,
- 		});
- 		logger.debug("auth-gateway retrying provider request after usage-limit block", {
- 			format,
-@@ -303,58 +374,86 @@ ): Promise<string | undefined> {
- 			retryAtMs,
- 			error: message,
- 		});
--		if (!switched) return undefined;
--		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
++		});
++		logger.debug("auth-gateway retrying provider request after usage-limit block", {
++			format,
++			provider,
++			peer,
++			switched,
++			retryAfterMs,
++			retryAtMs,
++			error: message,
++		});
 +		if (!selection && !switched) return undefined;
 +		const retryExhaustion = selection ? exhaustion : {};
 +		const next = await resolveGatewayCredential(storage, model, sessionId, signal, selection, retryExhaustion);
@@ -4546,16 +5055,14 @@ index 469910f..f0e124f 100644
 +		}
 +		onCredential(next.credential);
 +		return next.apiKey;
- 	}
--	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
-+	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal, selection });
- 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
- 		format,
- 		provider,
- 		peer,
- 		error: message,
- 	});
--	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
++	}
++	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal, selection });
++	logger.debug("auth-gateway retrying provider request after credential invalidation", {
++		format,
++		provider,
++		peer,
++		error: message,
++	});
 +	const next = await resolveGatewayCredential(
 +		storage,
 +		model,
@@ -4573,58 +5080,36 @@ index 469910f..f0e124f 100644
 +	}
 +	onCredential(next.credential);
 +	return next.apiKey;
- }
- 
--/**
-- * Build the {@link ApiKeyResolver} handed to `streamSimple` for a gateway
-- * request. Drives the central a/b/c auth-retry policy server-side:
-- *
-- * - initial resolve → the credential already resolved for this request.
-- * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
-- *   (a peer/broker may have rotated its token out from under our cached copy).
-- * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
-- *   to a sibling (usage-limit block vs credential invalidation by error class).
-- *
-- * `lastKey` tracks the most recent bearer so the switch step invalidates the
-- * credential that actually failed.
-- */
- function buildGatewayApiKeyResolver(
- 	storage: AuthStorage,
- 	model: Model<Api>,
- 	sessionId: string,
--	initialKey: string,
++}
++
++function buildPooledApiKeyResolver(
++	storage: AuthStorage,
++	model: Model<Api>,
++	sessionId: string,
 +	initial: GatewayCredentialResolution,
- 	requestSignal: AbortSignal,
- 	format: string,
- 	peer: string,
--	onResolvedKey: (apiKey: string) => void,
++	requestSignal: AbortSignal,
++	format: string,
++	peer: string,
 +	selection: AuthCredentialSelectionPolicy | undefined,
 +	exhaustion: PoolExhaustionState,
 +	onCredential: (credential: ResolvedAuthCredential) => void,
- ): ApiKeyResolver {
--	let lastKey = initialKey;
++): ApiKeyResolver {
 +	let lastKey = initial.apiKey;
 +	onCredential(initial.credential);
- 	return async ({ lastChance, error, signal }) => {
- 		const sig = signal ?? requestSignal;
- 		if (error === undefined) {
--			lastKey = initialKey;
--			return initialKey;
++	return async ({ lastChance, error, signal }) => {
++		const sig = signal ?? requestSignal;
++		if (error === undefined) {
 +			lastKey = initial.apiKey;
 +			onCredential(initial.credential);
 +			return initial.apiKey;
- 		}
- 		if (!lastChance) {
--			const refreshed = await storage.getApiKey(model.provider, sessionId, {
++		}
++		if (!lastChance) {
 +			const refreshed = await storage.resolveApiKeySelection(model.provider, sessionId, {
- 				modelId: model.id,
- 				signal: sig,
- 				forceRefresh: true,
++				modelId: model.id,
++				signal: sig,
++				forceRefresh: true,
 +				selection,
- 			});
--			lastKey = refreshed ?? lastKey;
--			if (refreshed) onResolvedKey(refreshed);
--			return refreshed;
++			});
 +			if (!refreshed.ok) {
 +				if (selection) {
 +					exhaustion.reason =
@@ -4636,23 +5121,26 @@ index 469910f..f0e124f 100644
 +			lastKey = refreshed.credential.apiKey;
 +			onCredential(refreshed.credential);
 +			return refreshed.credential.apiKey;
- 		}
- 		const next = await refreshGatewayApiKeyAfterAuthError(
- 			storage,
-@@ -366,13 +465,345 @@ ): ApiKeyResolver {
- 			sig,
- 			format,
- 			peer,
++		}
++		const next = await refreshGatewayApiKeyAfterAuthError(
++			storage,
++			model,
++			sessionId,
++			model.provider,
++			lastKey,
++			error,
++			sig,
++			format,
++			peer,
 +			selection,
 +			exhaustion,
 +			onCredential,
- 		);
- 		lastKey = next ?? lastKey;
--		if (next) onResolvedKey(next);
- 		return next;
- 	};
- }
- 
++		);
++		lastKey = next ?? lastKey;
++		return next;
++	};
++}
++
 +interface TerminalCredentialErrorRecoveryOptions {
 +	storage: AuthStorage;
 +	model: Model<Api>;
@@ -4725,7 +5213,7 @@ index 469910f..f0e124f 100644
 +}
 +
 +function credentialIdsForProvider(storage: AuthStorage, provider: string): Set<number> {
-+	return new Set(storage.listStoredCredentials(provider).map(row => row.id));
++	return new Set(storage.credentials.list(provider).map(row => row.id));
 +}
 +
 +const BUNDLED_MODEL_PROVIDERS = new Set<string>(getBundledProviders());
@@ -4986,7 +5474,7 @@ index 469910f..f0e124f 100644
  function clientClosedResponse(route: { module: FormatModule }): Response {
  	return route.module.formatError(499, "request_aborted", "client closed request");
  }
-@@ -419,6 +850,9 @@ async function handleFormatEndpoint(
+@@ -251,6 +806,9 @@ async function handleFormatEndpoint(
  	bootOpts: AuthGatewayBootOptions,
  	req: Request,
  	peer: string,
@@ -4996,7 +5484,7 @@ index 469910f..f0e124f 100644
  	sessionStates: AuthGatewaySessionStateStore,
  ): Promise<Response> {
  	const startedAt = performance.now();
-@@ -431,39 +865,37 @@ ): Promise<Response> {
+@@ -263,41 +821,39 @@ ): Promise<Response> {
  		body = await req.json();
  	} catch (error) {
  		if (controller.signal.aborted) return clientClosedResponse(route);
@@ -5030,6 +5518,8 @@ index 469910f..f0e124f 100644
  		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
  	}
 +	audit?.setModel(modelId, model.provider, model.id);
+ 	const kindRejection = chatRouteRejection(model);
+ 	if (kindRejection) return route.module.formatError(400, "invalid_request_error", kindRejection);
  	const client = resolveClientIdentity(req.headers);
  
 -	// Parse the wire-format request BEFORE resolving the credential so we
@@ -5048,7 +5538,7 @@ index 469910f..f0e124f 100644
  		return route.module.formatError(400, "invalid_request_error", message);
  	}
  	// Merge gateway-captured passthrough headers under the parser's own
-@@ -476,6 +908,8 @@ ): Promise<Response> {
+@@ -310,6 +866,8 @@ ): Promise<Response> {
  	}
  	if (controller.signal.aborted) return clientClosedResponse(route);
  
@@ -5057,7 +5547,7 @@ index 469910f..f0e124f 100644
  	const supportsOpenAIImageFileReferences =
  		model.api === "openai-responses" ||
  		model.api === "azure-openai-responses" ||
-@@ -498,37 +932,135 @@ ): Promise<Response> {
+@@ -332,21 +890,136 @@ ): Promise<Response> {
  		);
  	}
  
@@ -5112,13 +5602,9 @@ index 469910f..f0e124f 100644
 -	// expected to resolve the credential and pass it as `options.apiKey`.
 -	// For OAuth providers this returns the access token (refreshed via the
 -	// broker override on AuthStorage when needed).
--	let apiKey: string | undefined;
--	try {
--		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
--			modelId: model.id,
--			signal: controller.signal,
--		});
--	} catch (error) {
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+-	if (controller.signal.aborted) return clientClosedResponse(route);
+-	if (typeof apiKey !== "string") return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 +	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
 +	const storageSessionId = isManagedRegular(principal)
 +		? `gateway:${principal.id}:${credentialSessionScope}:${requestSessionId}`
@@ -5157,17 +5643,7 @@ index 469910f..f0e124f 100644
 +			);
 +			return route.module.formatError(classified.status, classified.type, classified.message);
 +		}
- 		if (controller.signal.aborted) return clientClosedResponse(route);
--		const classified = classifyGatewayError(error);
--		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
--		return route.module.formatError(classified.status, classified.type, classified.message);
--	}
--	if (controller.signal.aborted) return clientClosedResponse(route);
--	if (!apiKey) {
--		return route.module.formatError(
--			401,
--			"authentication_error",
--			`No credential available for provider ${model.provider}`,
++		if (controller.signal.aborted) return clientClosedResponse(route);
 +		if (!credential) {
 +			const response = mapInitialCredentialFailure(route, model, selection, exhaustion);
 +			const poolFailure = describePoolExhaustion(exhaustion);
@@ -5190,7 +5666,7 @@ index 469910f..f0e124f 100644
 +			audit?.setCredential(next.credentialId ?? null);
 +			noteAccountRotation?.(next.apiKey);
 +		};
-+		streamApiKey = buildGatewayApiKeyResolver(
++		streamApiKey = buildPooledApiKeyResolver(
 +			bootOpts.storage,
 +			model,
 +			storageSessionId,
@@ -5201,7 +5677,7 @@ index 469910f..f0e124f 100644
 +			selection,
 +			exhaustion,
 +			onCredential,
- 		);
++		);
 +		recoverTerminalCredentialError = buildTerminalCredentialErrorRecovery({
 +			storage: bootOpts.storage,
 +			model,
@@ -5214,10 +5690,11 @@ index 469910f..f0e124f 100644
 +			exhaustion,
 +			onCredential,
 +		});
- 	}
++	}
  
  	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-@@ -538,24 +1070,20 @@ ): Promise<Response> {
+ 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+@@ -356,24 +1029,20 @@ ): Promise<Response> {
  	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
  	// keeps the entry out of reach of eviction until this request is done with
  	// it, so it MUST be released on every exit path.
@@ -5251,9 +5728,9 @@ index 469910f..f0e124f 100644
  
  	logger.info("auth-gateway request", {
  		requestId,
-@@ -573,9 +1101,11 @@ ): Promise<Response> {
+@@ -391,9 +1060,11 @@ ): Promise<Response> {
  			const message = await completeSimple(model, parsed.context, streamOpts);
- 			recordGatewayUsage(bootOpts.storage, model, client, message);
+ 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
  			if (message.stopReason === "aborted" || message.stopReason === "error") {
 -				const errorMessage =
 -					message.errorMessage ??
@@ -5266,7 +5743,7 @@ index 469910f..f0e124f 100644
  				logger.warn("auth-gateway non-streaming failed", {
  					format: route.label,
  					reason: message.stopReason,
-@@ -583,11 +1113,42 @@ ): Promise<Response> {
+@@ -401,11 +1072,42 @@ ): Promise<Response> {
  					peer,
  				});
  				if (message.stopReason === "aborted") {
@@ -5309,7 +5786,7 @@ index 469910f..f0e124f 100644
  			return json(
  				200,
  				route.module.encodeResponse(message, parsed.modelId),
-@@ -601,6 +1162,36 @@ ): Promise<Response> {
+@@ -419,6 +1121,36 @@ ): Promise<Response> {
  				error: classified.message,
  				peer,
  			});
@@ -5346,7 +5823,7 @@ index 469910f..f0e124f 100644
  			return route.module.formatError(classified.status, classified.type, classified.message);
  		} finally {
  			// Every non-streaming outcome — answered, upstream error, thrown,
-@@ -621,9 +1212,48 @@ ): Promise<Response> {
+@@ -439,9 +1171,48 @@ ): Promise<Response> {
  		} catch (error) {
  			const classified = classifyGatewayError(error);
  			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
@@ -5394,8 +5871,8 @@ index 469910f..f0e124f 100644
 +		);
  		void events
  			.result()
- 			.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-@@ -631,9 +1261,10 @@ ): Promise<Response> {
+ 			.then(message =>
+@@ -451,9 +1222,10 @@ ): Promise<Response> {
  			.finally(() => lease.release());
  		streamOwnsLease = true;
  
@@ -5407,7 +5884,7 @@ index 469910f..f0e124f 100644
  				if (!controller.signal.aborted) {
  					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
  				}
-@@ -675,12 +1306,17 @@ async function handlePiNative(
+@@ -495,12 +1267,17 @@ async function handlePiNative(
  	bootOpts: AuthGatewayBootOptions,
  	req: Request,
  	peer: string,
@@ -5426,7 +5903,7 @@ index 469910f..f0e124f 100644
  	if (controller.signal.aborted) return aborted();
  
  	let body: unknown;
-@@ -688,6 +1324,7 @@ ): Promise<Response> {
+@@ -508,6 +1285,7 @@ ): Promise<Response> {
  		body = await req.json();
  	} catch (error) {
  		if (controller.signal.aborted) return aborted();
@@ -5434,7 +5911,7 @@ index 469910f..f0e124f 100644
  		return piNative.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
  	}
  	if (controller.signal.aborted) return aborted();
-@@ -697,43 +1334,143 @@ ): Promise<Response> {
+@@ -517,64 +1295,176 @@ ): Promise<Response> {
  		parsed = piNative.parseRequest(body, req.headers);
  	} catch (error) {
  		if (controller.signal.aborted) return aborted();
@@ -5455,6 +5932,8 @@ index 469910f..f0e124f 100644
  		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
  	}
 +	audit?.setModel(parsed.modelId, model.provider, model.id);
+ 	const kindRejection = chatRouteRejection(model);
+ 	if (kindRejection) return piNative.formatError(400, "invalid_request_error", kindRejection);
  	const client = resolveClientIdentity(req.headers);
 +	const keylessModel = bootOpts.isKeylessModel?.(model) ?? false;
  	// Pi-native already parsed `streamOpts.sessionId` (when set by the
@@ -5468,11 +5947,9 @@ index 469910f..f0e124f 100644
 +	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
 +	parsed.options.sessionId = requestSessionId;
  
--	let apiKey: string | undefined;
--	try {
--		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
--			modelId: model.id,
--			signal: controller.signal,
+-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+-	if (controller.signal.aborted) return aborted();
+-	if (typeof apiKey !== "string") return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
 +	let selection: AuthCredentialSelectionPolicy | undefined;
 +	let credentialSessionScope = "default";
 +	const exhaustion: PoolExhaustionState = {};
@@ -5482,12 +5959,7 @@ index 469910f..f0e124f 100644
 +			route: "pi-native",
 +			provider: model.provider,
 +			qualifiedModel: qualifiedModelId(model),
- 		});
--	} catch (error) {
--		if (controller.signal.aborted) return aborted();
--		const classified = classifyGatewayError(error);
--		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
--		return piNative.formatError(classified.status, classified.type, classified.message);
++		});
 +		if (!access.allowed) {
 +			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 +			return gatewayPermissionDenied(route);
@@ -5516,13 +5988,7 @@ index 469910f..f0e124f 100644
 +				strategy: poolSelection.strategy,
 +			};
 +		}
- 	}
--	if (controller.signal.aborted) return aborted();
--	if (!apiKey) {
--		return piNative.formatError(
--			401,
--			"authentication_error",
--			`No credential available for provider ${model.provider}`,
++	}
 +
 +	const credentialSessionId = isManagedRegular(principal)
 +		? `gateway:${principal.id}:${credentialSessionScope}:${requestSessionId}`
@@ -5570,7 +6036,7 @@ index 469910f..f0e124f 100644
 +			audit?.setCredential(next.credentialId ?? null);
 +			noteAccountRotation?.(next.apiKey);
 +		};
-+		streamApiKey = buildGatewayApiKeyResolver(
++		streamApiKey = buildPooledApiKeyResolver(
 +			bootOpts.storage,
 +			model,
 +			credentialSessionId,
@@ -5581,7 +6047,7 @@ index 469910f..f0e124f 100644
 +			selection,
 +			exhaustion,
 +			onCredential,
- 		);
++		);
 +		recoverTerminalCredentialError = buildTerminalCredentialErrorRecovery({
 +			storage: bootOpts.storage,
 +			model,
@@ -5594,10 +6060,10 @@ index 469910f..f0e124f 100644
 +			exhaustion,
 +			onCredential,
 +		});
- 	}
++	}
  
  	// Per-session provider learning, owned by this gateway instance. The map is
-@@ -741,34 +1478,29 @@ ): Promise<Response> {
+ 	// non-serializable, so `parseRequest` cannot accept one from the wire and
  	// every turn would otherwise re-learn each lesson from a fresh upstream
  	// rejection. The lease keeps the entry out of reach of eviction until this
  	// request is done with it, so it MUST be released on every exit path.
@@ -5627,6 +6093,7 @@ index 469910f..f0e124f 100644
  		cursorExternalToolExecutor: true,
  		providerSessionState: lease.states,
  	};
+ 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 -	streamOpts.apiKey = buildGatewayApiKeyResolver(
 -		bootOpts.storage,
 -		model,
@@ -5641,7 +6108,7 @@ index 469910f..f0e124f 100644
  	if (model.api === "openai-codex-responses") {
  		delete streamOpts.temperature;
  		delete streamOpts.topP;
-@@ -783,7 +1515,7 @@ ): Promise<Response> {
+@@ -589,7 +1479,7 @@ ): Promise<Response> {
  	// headers — the client's values win when they collide.
  	const captured = captureRequestHeaders(req.headers);
  	streamOpts.headers = { ...captured, ...streamOpts.headers };
@@ -5650,9 +6117,9 @@ index 469910f..f0e124f 100644
  
  	logger.info("auth-gateway request", {
  		requestId,
-@@ -801,26 +1533,89 @@ ): Promise<Response> {
+@@ -607,21 +1497,54 @@ ): Promise<Response> {
  			const message = await completeSimple(model, parsed.context, streamOpts);
- 			recordGatewayUsage(bootOpts.storage, model, client, message);
+ 			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
  			if (message.stopReason === "aborted" || message.stopReason === "error") {
 -				const errorMessage =
 -					message.errorMessage ??
@@ -5705,7 +6172,11 @@ index 469910f..f0e124f 100644
  				return piNative.formatError(classified.status, classified.type, errorMessage);
  			}
 +			audit?.record("success", 200, usageOf(message));
- 			return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
+ 			return json(
+ 				200,
+ 				{ message },
+@@ -629,8 +1552,38 @@ ): Promise<Response> {
+ 			);
  		} catch (error) {
  			if (controller.signal.aborted) return aborted();
 +			const poolFailure = describePoolExhaustion(exhaustion);
@@ -5743,7 +6214,7 @@ index 469910f..f0e124f 100644
  			return piNative.formatError(classified.status, classified.type, classified.message);
  		} finally {
  			// Every non-streaming outcome — answered, upstream error, thrown,
-@@ -841,9 +1636,48 @@ ): Promise<Response> {
+@@ -651,9 +1604,48 @@ ): Promise<Response> {
  		} catch (error) {
  			const classified = classifyGatewayError(error);
  			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
@@ -5791,8 +6262,8 @@ index 469910f..f0e124f 100644
 +		);
  		void events
  			.result()
- 			.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-@@ -851,9 +1685,10 @@ ): Promise<Response> {
+ 			.then(message =>
+@@ -663,9 +1655,10 @@ ): Promise<Response> {
  			.finally(() => lease.release());
  		streamOwnsLease = true;
  
@@ -5804,12 +6275,12 @@ index 469910f..f0e124f 100644
  				if (!controller.signal.aborted) {
  					controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
  				}
-@@ -880,59 +1715,171 @@ /**
+@@ -692,85 +1685,351 @@ /**
   * failure) inside `AuthStorage`, so this handler is a thin wrapper that
   * surfaces the same data to HTTP callers (notably the macOS usage widget).
   */
 -async function handleUsage(storage: AuthStorage, signal: AbortSignal): Promise<Response> {
--	const reports = (await storage.fetchUsageReports?.({ signal })) ?? [];
+-	const reports = (await storage.usage.reports?.({ signal })) ?? [];
 -	// Drop the heavy provider-specific `raw` payload — UI consumers only need
 -	// `limits` + `metadata`. Match the broker's `/v1/usage` shape so a single
 -	// client struct (Swift widget, llm-git, ...) works against either endpoint.
@@ -5837,7 +6308,7 @@ index 469910f..f0e124f 100644
 +			},
 +		});
 +	}
-+	const reports = (await storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
++	const reports = (await storage.usage.reports?.({ signal: req.signal })) ?? [];
  	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
 -	return json(200, { generatedAt: Date.now(), reports: trimmed });
 +	return json(200, {
@@ -5926,7 +6397,7 @@ index 469910f..f0e124f 100644
 +			for (const credentialId of poolSelection.credentialIds) eligible.add(credentialId);
 +		}
 +
-+		const credentials = await storage.checkCredentials({ signal, credentialIds: [...eligible] });
++		const credentials = await storage.health.check({ signal, credentialIds: [...eligible] });
 +		const filtered = credentials
 +			.slice()
 +			.sort((a, b) => a.provider.localeCompare(b.provider) || a.type.localeCompare(b.type) || a.id - b.id);
@@ -5953,7 +6424,7 @@ index 469910f..f0e124f 100644
 +			}),
 +		});
 +	}
- 	const credentials = await storage.checkCredentials({ signal });
+ 	const credentials = await storage.health.check({ signal });
  	return json(200, { generatedAt: Date.now(), credentials });
  }
  
@@ -5963,13 +6434,16 @@ index 469910f..f0e124f 100644
 - * (omp's own proxy discovery, Zed's openai_compatible provider, ...) read to
 - * size and capability-gate discovered models: `context_length`,
 - * `max_output_tokens`, `input_modalities`, and `supports_tools` (only emitted
-- * when the catalog explicitly reports `false`; absent means usable).
+- * when the catalog explicitly reports `false`; absent means usable). `kind` is
+- * emitted for non-chat rows (`judge`, `image`, `tts`, `stt`, `embedding`,
+- * `rerank`, `video`) so clients can keep them off chat routes; absent means chat.
 - */
 -interface ModelListRow {
 -	id: string;
 -	object: "model";
 -	owned_by: string;
 -	api: Api;
+-	kind?: ModelKind;
 -	display_name: string;
 -	context_length?: number;
 -	max_output_tokens?: number;
@@ -6022,7 +6496,18 @@ index 469910f..f0e124f 100644
  			id,
  			object: "model",
  			owned_by: model.provider,
-@@ -948,10 +1895,49 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
+ 			api: model.api,
+ 			display_name: model.name,
+ 			input_modalities: model.input,
++			reasoning: model.reasoning,
+ 		};
+ 		if (modelKind(model) !== "chat") row.kind = modelKind(model);
+ 		if (model.contextWindow != null) row.context_length = model.contextWindow;
+ 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
+ 		if (model.supportsTools === false) row.supports_tools = false;
++		if (model.thinking) row.thinking_efforts = model.thinking.efforts;
+ 		data.push(row);
+ 	}
  	return json(200, { object: "list", data });
  }
  
@@ -6046,6 +6531,115 @@ index 469910f..f0e124f 100644
 +	return accessStore?.authenticateToken(bearer) ?? null;
 +}
 +
++/**
++ * Per-request credential policy for the `routes/*` modality handlers, which
++ * resolve their own model after parsing the body. Applies the same ACL and
++ * account-pool decisions the chat handlers make inline, reported as the
++ * denial the route encodes in its own error envelope.
++ */
++function gatewayCredentialScopeFor(
++	opts: AuthGatewayBootOptions,
++	principal: AuthGatewayPrincipal,
++	routeFamily: AuthGatewayRouteFamily,
++): GatewayCredentialScope {
++	const aclRoute = routeFamily === "management" || routeFamily === "unknown" ? undefined : routeFamily;
++	return model => {
++		const keyless = opts.isKeylessModel?.(model) ?? false;
++		if (!isManagedRegular(principal) || !opts.accessStore || aclRoute === undefined) {
++			return keyless ? { keyless: true } : {};
++		}
++		const rules = opts.accessStore.listAclRules(principal.userId);
++		const access = evaluateAuthGatewayAccess(principal, rules, {
++			route: aclRoute,
++			provider: model.provider,
++			qualifiedModel: qualifiedModelId(model),
++		});
++		const denied: GatewayErrorClassification = {
++			status: 403,
++			type: "permission_error",
++			message: "Access denied by gateway policy",
++		};
++		if (!access.allowed) return denied;
++		// Managed principals address credentials through their own pools, so a
++		// session id is namespaced per user even when the model needs no key.
++		const userScope = `gateway:${principal.id}`;
++		if (keyless) return { keyless: true, sessionScope: `${userScope}:default` };
++		const poolBindings = opts.accessStore.listUserPoolBindings(principal.userId);
++		if (poolBindings.length === 0) return denied;
++		const poolSelection = resolveAuthGatewayPoolSelection(
++			poolBindings,
++			credentialIdsForProvider(opts.storage, model.provider),
++		);
++		if (!poolSelection) {
++			return {
++				status: 503,
++				type: "no_eligible_credential",
++				message: "No eligible credential is available for this request",
++			};
++		}
++		const poolScope = gatewayPoolScope(poolSelection.poolId, model.provider);
++		return {
++			selection: {
++				policyKey: poolScope,
++				eligibleCredentialIds: poolSelection.credentialIds,
++				strategy: poolSelection.strategy,
++			},
++			sessionScope: `${userScope}:${poolScope}`,
++		};
++	};
++}
++
++/**
++ * Dispatch the non-chat modality routes. Returns `null` when `pathname` is not
++ * one of them, so the router falls through to its remaining routes. Streaming
++ * and long-poll modalities opt out of Bun's idle timer the same way inference
++ * does.
++ */
++async function dispatchModalityRoute(
++	opts: AuthGatewayBootOptions,
++	req: Request,
++	pathname: string,
++	peer: string,
++	server: { timeout: (req: Request, seconds: number) => void },
++): Promise<Response | null> {
++	if (req.method === "POST") {
++		// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own judge
++		// point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs reach the
++		// same handler through their Decisions path.
++		if (pathname === "/v1/systemone" || pathname === "/alpha/decisions") {
++			server.timeout(req, 0);
++			return handleSystemOne(opts, req, peer);
++		}
++		// Image generation: OpenAI `/v1/images/generations` + OpenRouter
++		// `/v1/images` (JSON), and OpenAI multipart / OpenRouter JSON edits.
++		if (pathname === "/v1/images/generations" || pathname === "/v1/images") {
++			server.timeout(req, 0);
++			return handleImageGenerations(opts, req, peer);
++		}
++		if (pathname === "/v1/images/edits") {
++			server.timeout(req, 0);
++			return handleImageEdits(opts, req, peer);
++		}
++		// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
++		if (pathname === "/v1/audio/speech") return handleSpeech(opts, req, peer);
++		// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
++		if (pathname === "/v1/audio/transcriptions") return handleTranscriptions(opts, req, peer);
++		// Embeddings, OpenAI wire (OpenRouter is compatible).
++		if (pathname === "/v1/embeddings") return handleEmbeddings(opts, req, peer);
++		// Rerank, OpenRouter wire.
++		if (pathname === "/v1/rerank") return handleRerank(opts, req, peer);
++		// Video generation, OpenRouter's asynchronous wire: submit, then poll and
++		// download by the gateway-issued job id (stateless — the id encodes
++		// provider, model, and upstream job).
++		if (pathname === "/v1/videos") return handleVideoSubmit(opts, req, peer);
++		return null;
++	}
++	const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
++	if (!videoJob) return null;
++	const gatewayId = decodeURIComponent(videoJob[1]);
++	return videoJob[2] ? handleVideoContent(opts, req, peer, gatewayId) : handleVideoPoll(opts, req, peer, gatewayId);
++}
++
 +function classifyRoute(pathname: string): AuthGatewayRouteFamily {
 +	if (pathname === "/v1/chat/completions") return "chat";
 +	if (pathname === "/v1/messages") return "messages";
@@ -6054,6 +6648,14 @@ index 469910f..f0e124f 100644
 +	if (pathname === "/v1/models") return "models";
 +	if (pathname === "/v1/usage") return "usage";
 +	if (pathname === "/v1/credentials/check") return "check";
++	if (pathname === "/v1/systemone" || pathname === "/alpha/decisions") return "systemone";
++	if (pathname === "/v1/images" || pathname === "/v1/images/generations" || pathname === "/v1/images/edits")
++		return "images";
++	if (pathname === "/v1/audio/speech") return "speech";
++	if (pathname === "/v1/audio/transcriptions") return "transcriptions";
++	if (pathname === "/v1/embeddings") return "embeddings";
++	if (pathname === "/v1/rerank") return "rerank";
++	if (pathname === "/v1/videos" || VIDEO_JOB_PATH.test(pathname)) return "video";
 +	if (
 +		pathname.startsWith("/v1/admin/") ||
 +		pathname === "/v1/admin" ||
@@ -6064,7 +6666,9 @@ index 469910f..f0e124f 100644
 +		return "management";
 +	return "unknown";
 +}
-+
+ /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
+ const VIDEO_JOB_PATH = /^\/v1\/videos\/([^/]+)(\/content)?$/;
+ 
  export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
  	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
  	const tokens = new Set<string>(opts.bearerTokens);
@@ -6073,7 +6677,7 @@ index 469910f..f0e124f 100644
  	// Owned by this server instance so two gateways in one process never share
  	// (or tear down) each other's provider state, and so `close()` can drain it.
  	const sessionStates = new AuthGatewaySessionStateStore();
-@@ -959,13 +1945,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
+@@ -778,13 +2037,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
  	const server = Bun.serve({
  		hostname: bind.hostname,
  		port: bind.port,
@@ -6088,7 +6692,7 @@ index 469910f..f0e124f 100644
  			if (req.method === "OPTIONS") {
  				return new Response(null, { status: 204, headers: corsHeaders(req) });
  			}
-@@ -973,45 +1956,89 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
+@@ -792,94 +2048,104 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
  				if (req.method === "GET" && pathname === "/healthz") {
  					return withCors(json(200, { ok: true, version }), req);
  				}
@@ -6177,11 +6781,72 @@ index 469910f..f0e124f 100644
 -				// foreign-wire routes, just without the wire-format translation.
  				if (req.method === "POST" && pathname === "/v1/pi/stream") {
 -					return withCors(await handlePiNative(opts, req, peer, sessionStates), req);
+-				}
+-
+-				// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
+-				// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
+-				// reach the same handler through their Decisions path.
+-				if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
+-					return withCors(await handleSystemOne(opts, req, peer), req);
 +					server.timeout(req, 0);
 +					return withCors(await handlePiNative(opts, req, peer, principal, audit, sessionStates), req);
  				}
  
--				// Model catalog.
+-				// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
+-				// (JSON), and OpenAI multipart / OpenRouter JSON edits.
+-				if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
+-					return withCors(await handleImageGenerations(opts, req, peer), req);
+-				}
+-				if (req.method === "POST" && pathname === "/v1/images/edits") {
+-					return withCors(await handleImageEdits(opts, req, peer), req);
+-				}
+-
+-				// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
+-				if (req.method === "POST" && pathname === "/v1/audio/speech") {
+-					return withCors(await handleSpeech(opts, req, peer), req);
+-				}
+-
+-				// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
+-				if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
+-					return withCors(await handleTranscriptions(opts, req, peer), req);
+-				}
+-
+-				// Embeddings, OpenAI wire (OpenRouter is compatible).
+-				if (req.method === "POST" && pathname === "/v1/embeddings") {
+-					return withCors(await handleEmbeddings(opts, req, peer), req);
+-				}
+-
+-				// Rerank, OpenRouter wire.
+-				if (req.method === "POST" && pathname === "/v1/rerank") {
+-					return withCors(await handleRerank(opts, req, peer), req);
+-				}
+-
+-				// Video generation, OpenRouter's asynchronous wire: submit, then poll
+-				// and download by the gateway-issued job id (stateless — the id
+-				// encodes provider, model, and upstream job).
+-				if (req.method === "POST" && pathname === "/v1/videos") {
+-					return withCors(await handleVideoSubmit(opts, req, peer), req);
+-				}
+-				const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
+-				if (videoJob) {
+-					const gatewayId = decodeURIComponent(videoJob[1]);
+-					const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
+-					return withCors(await handler(opts, req, peer, gatewayId), req);
++				// Non-chat modalities. Each handler resolves its own model after
++				// parsing the body, so the principal's ACL and account pool travel
++				// with the request through `credentialScope` instead of being
++				// checked here; the audit row is recorded from the settled status.
++				const modalityOpts: AuthGatewayBootOptions = {
++					...opts,
++					credentialScope: gatewayCredentialScopeFor(opts, principal, routeFamily),
++				};
++				const modality = await dispatchModalityRoute(modalityOpts, req, pathname, peer, server);
++				if (modality) {
++					audit?.record(auditOutcomeForStatus(modality.status), modality.status, zeroUsage());
++					return withCors(modality, req);
+ 				}
+ 
+ 				// Model catalog.
  				if (req.method === "GET" && pathname === "/v1/models") {
 -					return withCors(handleModelsList(opts), req);
 +					const response = handleModelsList(opts, principal);
@@ -6198,7 +6863,7 @@ index 469910f..f0e124f 100644
  			} catch (error) {
  				logger.error("auth-gateway handler crashed", {
  					method: req.method,
-@@ -1019,11 +2046,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
+@@ -887,11 +2153,13 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
  					peer,
  					error: String(error),
  				});
@@ -6214,24 +6879,30 @@ index 469910f..f0e124f 100644
  		idleTimeout: 255,
  	});
  
-@@ -1034,7 +2063,14 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
+@@ -902,7 +2170,20 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
  		port: boundPort,
  		hostname: boundHost,
  		close: async () => {
 -			server.stop(true);
-+			// Graceful drain: `stop()` (default `closeActiveConnections=false`)
-+			// stops accepting new connections and resolves once in-flight requests
-+			// finish, rather than force-killing them mid-stream. A forced close
-+			// aborts active requests, which clients see as a dropped connection
-+			// (Bun surfaces this as the opaque "socket connection was closed
-+			// unexpectedly"). The caller bounds how long it waits — under systemd
-+			// that is `TimeoutStopSec`, after which the process is hard-killed.
-+			await server.stop();
++			// Graceful drain: stop accepting new connections, then wait for the
++			// requests already in flight rather than force-killing them mid-stream.
++			// A forced close aborts active requests, which clients see as a dropped
++			// connection (Bun surfaces this as the opaque "socket connection was
++			// closed unexpectedly").
++			//
++			// Waiting on `stop()` alone is not enough: a connection can outlive
++			// every request on it — a body the server rejected without reading (an
++			// oversized upload answered with 413) leaves the socket open with bytes
++			// still in flight, and the graceful promise then never resolves. So we
++			// wait on the work, not the sockets, and force the idle remainder shut.
++			void server.stop();
++			while (server.pendingRequests > 0 || server.pendingWebSockets > 0) await Bun.sleep(25);
++			await server.stop(true);
  			// Drain after the listener is down: the retained provider states own
  			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
  			// process can't settle until each one is closed.
 diff --git a/packages/ai/src/auth-gateway/types.ts b/packages/ai/src/auth-gateway/types.ts
-index 586d9cb..e07806d 100644
+index 22a94c7..e46df8f 100644
 --- a/packages/ai/src/auth-gateway/types.ts
 +++ b/packages/ai/src/auth-gateway/types.ts
 @@ -8,6 +8,7 @@ import type {
@@ -6242,7 +6913,7 @@ index 586d9cb..e07806d 100644
  
  /**
   * Wire types for the omp auth-gateway.
-@@ -143,6 +144,8 @@ export interface AuthGatewayServerOptions {
+@@ -150,6 +151,8 @@ export interface AuthGatewayServerOptions {
  	bind?: string;
  	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
  	bearerTokens: string[];
@@ -6252,12 +6923,12 @@ index 586d9cb..e07806d 100644
  	version?: string;
  }
 diff --git a/packages/ai/src/auth/sqlite-credential-store.ts b/packages/ai/src/auth/sqlite-credential-store.ts
-index 110c369..c8ab2ab 100644
+index 94a0ebc..2e75bc8 100644
 --- a/packages/ai/src/auth/sqlite-credential-store.ts
 +++ b/packages/ai/src/auth/sqlite-credential-store.ts
 @@ -90,6 +90,14 @@ type SerializedCredentialRecord = {
  
- const AUTH_SCHEMA_VERSION = 7;
+ const AUTH_SCHEMA_VERSION = 8;
  const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 +/**
 + * Windows holds the SQLite file handle briefly after `Database.close()`, so a
@@ -6299,9 +6970,9 @@ index 110c369..c8ab2ab 100644
 +			 WHERE id = ? AND disabled_cause IS NOT NULL`,
 +		);
  		this.#deleteStmt = this.#db.prepare(
- 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+ 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
  		);
-@@ -1185,6 +1203,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -1228,6 +1246,21 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  		return results;
  	}
  
@@ -6323,7 +6994,7 @@ index 110c369..c8ab2ab 100644
  	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
  		const rows =
  			(provider
-@@ -1294,6 +1327,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -1337,6 +1370,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  				this.#deleteStmt.run("replaced by newer credential", row.id);
  			}
  
@@ -6343,7 +7014,7 @@ index 110c369..c8ab2ab 100644
  			if (targetId === null) {
  				const row = this.#insertStmt.get(
  					providerName,
-@@ -1343,11 +1389,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -1386,11 +1432,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
  			for (const row of disabledRows) {
  				if (hasActiveApiKey && row.credential_type === "api_key") {
@@ -6357,7 +7028,7 @@ index 110c369..c8ab2ab 100644
  					this.#hardDeleteStmt.run(row.id);
  					continue;
  				}
-@@ -1962,6 +2010,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -2007,6 +2055,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  		if (this.#closed) return;
  		this.#closed = true;
  		this.#listActiveStmt.finalize();
@@ -6366,7 +7037,7 @@ index 110c369..c8ab2ab 100644
  		this.#listActiveByProviderStmt.finalize();
  		this.#listDisabledStmt.finalize();
  		this.#listDisabledByProviderStmt.finalize();
-@@ -1993,6 +2043,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
+@@ -2038,6 +2088,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
  		this.#getCredentialRefreshLeaseStmt.finalize();
  		this.#renewCredentialRefreshLeaseStmt.finalize();
  		this.#releaseCredentialRefreshLeaseStmt.finalize();
@@ -6379,7 +7050,7 @@ index 110c369..c8ab2ab 100644
  	}
  }
 diff --git a/packages/ai/test/auth-broker-remote-store.test.ts b/packages/ai/test/auth-broker-remote-store.test.ts
-index 20e89c2..fc75770 100644
+index b180873..efd79c9 100644
 --- a/packages/ai/test/auth-broker-remote-store.test.ts
 +++ b/packages/ai/test/auth-broker-remote-store.test.ts
 @@ -395,6 +395,46 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
@@ -6387,7 +7058,7 @@ index 20e89c2..fc75770 100644
  	});
  
 +	test("looks up credentials by id in requested order and rebuilds the index after snapshot replacement", async () => {
-+		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
++		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
 +		const client = new AuthBrokerClient({ url: handle!.url, token });
 +		const initialResult = await client.fetchSnapshot();
 +		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
@@ -6413,7 +7084,7 @@ index 20e89c2..fc75770 100644
 +		const [updatedSecond] = remote.listAuthCredentialsByIds([second.id]);
 +		expect(updatedSecond?.credential).toMatchObject({ type: "oauth", access: "access-b-updated" });
 +
-+		storage!.upsertCredential("anthropic", mintOAuthCredential("c", Date.now() + 240_000));
++		await storage!.credentials.upsert("anthropic", mintOAuthCredential("c", Date.now() + 240_000));
 +		await remote.refreshSnapshot();
 +		const third = remote.snapshot.credentials.find(
 +			entry => entry.credential.type === "oauth" && entry.credential.access === "access-c",
@@ -6421,14 +7092,14 @@ index 20e89c2..fc75770 100644
 +		if (!third) throw new Error("expected third credential after refresh");
 +		expect(remote.listAuthCredentialsByIds([third.id]).map(row => row.id)).toEqual([third.id]);
 +
-+		expect(storage!.disableCredentialById(first.id, "revoked by test")).toBe(true);
++		expect(await storage!.credentials.disable(first.id, "revoked by test")).toBe(true);
 +		await remote.refreshSnapshot();
 +		expect(remote.listAuthCredentialsByIds([first.id, second.id]).map(row => row.id)).toEqual([second.id]);
 +	});
 +
  	test("filters configured OAuth identities while preserving API keys and raw snapshot callbacks", async () => {
- 		storage!.upsertCredential("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
- 		storage!.upsertCredential("anthropic", { type: "api_key", key: "visible-api-key" });
+ 		await storage!.credentials.upsert("anthropic", mintOAuthCredential("b", Date.now() + 120_000));
+ 		await storage!.credentials.upsert("anthropic", { type: "api_key", key: "visible-api-key" });
 diff --git a/packages/ai/test/auth-gateway-access-store.test.ts b/packages/ai/test/auth-gateway-access-store.test.ts
 new file mode 100644
 index 0000000..abfb44e
@@ -8025,7 +8696,7 @@ index 0000000..3921ccf
 +});
 diff --git a/packages/ai/test/auth-gateway-audit.test.ts b/packages/ai/test/auth-gateway-audit.test.ts
 new file mode 100644
-index 0000000..36035fc
+index 0000000..3e0e64e
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-audit.test.ts
 @@ -0,0 +1,381 @@
@@ -8349,7 +9020,7 @@ index 0000000..36035fc
 +		expect(usage.userId).toBe(user.user.id);
 +		expect(expectObject(usage.totals).requests).toBeGreaterThanOrEqual(1);
 +
-+		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
++		const listStoredSpy = vi.spyOn(harness.storage.credentials, "list");
 +
 +		response = await fetch(`${harness.handle.url}/v1/credentials/check`, { headers: jsonHeaders(user.token.value) });
 +		expect(response.status).toBe(200);
@@ -8391,13 +9062,13 @@ index 0000000..36035fc
 +		});
 +		const [staleRow] = harness.credentialStore.listAuthCredentials("mock");
 +		if (!staleRow) throw new Error("expected stale candidate row");
-+		harness.storage.upsertCredential("other-provider", { type: "api_key", key: "unrelated-live-secret" });
++		harness.storage.credentials.upsert("other-provider", { type: "api_key", key: "unrelated-live-secret" });
 +		const user = harness.accessStore.createUser({ name: "stalecheckuser" });
 +		const pool = harness.accessStore.createPool({ name: "stalecheckpool" });
 +		harness.accessStore.addPoolCredential(pool.id, staleRow.id);
 +		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
-+		expect(harness.storage.disableCredentialById(staleRow.id, "disabled by test")).toBe(true);
-+		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
++		expect(await harness.storage.credentials.disable(staleRow.id, "disabled by test")).toBe(true);
++		const listStoredSpy = vi.spyOn(harness.storage.credentials, "list");
 +
 +		const response = await fetch(`${harness.handle.url}/v1/credentials/check`, {
 +			headers: jsonHeaders(user.token.value),
@@ -8412,7 +9083,7 @@ index 0000000..36035fc
 +});
 diff --git a/packages/ai/test/auth-gateway-graceful-shutdown.test.ts b/packages/ai/test/auth-gateway-graceful-shutdown.test.ts
 new file mode 100644
-index 0000000..ec1a67c
+index 0000000..b32223c
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-graceful-shutdown.test.ts
 @@ -0,0 +1,81 @@
@@ -8434,7 +9105,7 @@ index 0000000..ec1a67c
 +		registerMockApi();
 +		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-drain-"));
 +		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-+		storage.setRuntimeApiKey("openrouter", "test-key");
++		storage.keys.setRuntime("openrouter", "test-key");
 +		const mock = createMockModel({ provider: "openrouter", id: "openrouter/drain-model" });
 +
 +		// Gate the mock response: the handler parks until the test releases it,
@@ -8499,7 +9170,7 @@ index 0000000..ec1a67c
 +});
 diff --git a/packages/ai/test/auth-gateway-idle-timeout.test.ts b/packages/ai/test/auth-gateway-idle-timeout.test.ts
 new file mode 100644
-index 0000000..c20fa8f
+index 0000000..1bdbf22
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-idle-timeout.test.ts
 @@ -0,0 +1,75 @@
@@ -8528,7 +9199,7 @@ index 0000000..c20fa8f
 +			registerMockApi();
 +			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-idle-"));
 +			const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-+			storage.setRuntimeApiKey("openrouter", "test-key");
++			storage.keys.setRuntime("openrouter", "test-key");
 +			const mock = createMockModel({ provider: "openrouter", id: "quiet-model" });
 +			mock.push({ delayMs: 6000, content: ["completed after silence"], stopReason: "stop" });
 +			const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(options => {
@@ -8580,10 +9251,10 @@ index 0000000..c20fa8f
 +});
 diff --git a/packages/ai/test/auth-gateway-integration-helpers.ts b/packages/ai/test/auth-gateway-integration-helpers.ts
 new file mode 100644
-index 0000000..68f030d
+index 0000000..0df06dd
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-integration-helpers.ts
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,132 @@
 +import { expect } from "bun:test";
 +import * as fs from "node:fs/promises";
 +import * as os from "node:os";
@@ -8626,12 +9297,9 @@ index 0000000..68f030d
 +	registerMockApi();
 +	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-gateway-step4-"));
 +	const credentialStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "credentials.db"));
-+	credentialStore.replaceAuthCredentialsForProvider(
-+		"mock",
-+		options.credentials ?? [{ type: "api_key", key: "key-a" }],
-+	);
++	await credentialStore.replaceAuthCredentials("mock", options.credentials ?? [{ type: "api_key", key: "key-a" }]);
 +	const storage = new AuthStorage(credentialStore);
-+	await storage.reload();
++	await storage.credentials.reload();
 +	const accessStore = await SqliteAuthGatewayAccessStore.open(path.join(tempDir, "access.db"));
 +	const models = new Map<string, MockModel>();
 +	const modelById = new Map<string, MockModel>();
@@ -8721,10 +9389,10 @@ index 0000000..68f030d
 +}
 diff --git a/packages/ai/test/auth-gateway-management.test.ts b/packages/ai/test/auth-gateway-management.test.ts
 new file mode 100644
-index 0000000..679d4a5
+index 0000000..3c79944
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-management.test.ts
-@@ -0,0 +1,721 @@
+@@ -0,0 +1,723 @@
 +import { afterEach, describe, expect, test } from "bun:test";
 +import {
 +	type AuthCredential,
@@ -8746,13 +9414,9 @@ index 0000000..679d4a5
 +	upsertAuthCredentialRemote?: (provider: string, credential: AuthCredential) => Promise<StoredAuthCredential[]>;
 +};
 +
-+type RefreshPatchedStorage = GatewayHarness["storage"] & {
-+	refreshCredentialById: GatewayHarness["storage"]["refreshCredentialById"];
-+};
++type RefreshPatchedStorage = Pick<GatewayHarness["storage"], "oauth">;
 +
-+type ResetPatchedStorage = GatewayHarness["storage"] & {
-+	redeemResetCredit(options: { target: ResetCreditTarget }): Promise<ResetCreditRedeemOutcome>;
-+};
++type ResetPatchedStorage = Pick<GatewayHarness["storage"], "resets">;
 +
 +async function requestJson(
 +	baseUrl: string,
@@ -8952,7 +9616,7 @@ index 0000000..679d4a5
 +	test("implements neutral pool CRUD, mixed-provider members, and ordered user bindings over HTTP", async () => {
 +		harness = await createGatewayHarness({ credentials: [{ type: "api_key", key: "mock-key" }] });
 +		const [credential] = harness.credentialStore.listAuthCredentials("mock");
-+		const [otherProviderCredential] = harness.credentialStore.upsertAuthCredentialForProvider("other", {
++		const [otherProviderCredential] = await harness.credentialStore.upsertAuthCredential("other", {
 +			type: "api_key",
 +			key: "other-key",
 +		});
@@ -9151,9 +9815,13 @@ index 0000000..679d4a5
 +		const currentHarness = harness;
 +		if (!currentHarness) throw new Error("expected gateway harness");
 +		const remoteStore = currentHarness.credentialStore as RemoteUpsertStore;
-+		remoteStore.upsertAuthCredentialRemote = async (provider, credential) => {
++		// The broker-delegated writer is now the store's `upsertAuthCredential`;
++		// capture the original before patching so the hook delegates instead of
++		// recursing into itself.
++		const upsertLocally = remoteStore.upsertAuthCredential.bind(remoteStore);
++		remoteStore.upsertAuthCredential = async (provider, credential) => {
 +			uploadCalled = true;
-+			return currentHarness.credentialStore.upsertAuthCredentialForProvider(provider, credential);
++			return upsertLocally(provider, credential);
 +		};
 +		response = await requestJson(currentHarness.handle.url, "POST", "/v1/admin/credentials", admin.token.value, {
 +			provider: "mock",
@@ -9165,7 +9833,7 @@ index 0000000..679d4a5
 +		expect(body.credentials).toBeArray();
 +		expect(JSON.stringify(body)).not.toContain("uploaded-api-key-secret");
 +
-+		remoteStore.upsertAuthCredentialRemote = async () => {
++		remoteStore.upsertAuthCredential = async () => {
 +			throw new Error("uploaded-api-key-secret should not leak");
 +		};
 +		response = await requestJson(harness.handle.url, "POST", "/v1/admin/credentials", admin.token.value, {
@@ -9190,7 +9858,7 @@ index 0000000..679d4a5
 +		const apiKeyRow = rows.find(row => row.credential.type === "api_key");
 +		if (!oauthRow || !apiKeyRow) throw new Error("expected seeded credential rows");
 +		const refreshStorage = harness.storage as RefreshPatchedStorage;
-+		refreshStorage.refreshCredentialById = async id => ({
++		refreshStorage.oauth.refresh = async id => ({
 +			id,
 +			provider: "mock",
 +			identityKey: "mock:alice@example.com",
@@ -9281,7 +9949,7 @@ index 0000000..679d4a5
 +
 +	test("redeems a saved reset for one Codex OAuth credential and preserves business outcomes", async () => {
 +		harness = await createGatewayHarness();
-+		const [credential] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
++		const [credential] = await harness.credentialStore.upsertAuthCredential("openai-codex", {
 +			type: "oauth",
 +			access: "codex-access",
 +			refresh: "codex-refresh",
@@ -9290,7 +9958,7 @@ index 0000000..679d4a5
 +			accountId: "acct-codex",
 +		});
 +		if (!credential) throw new Error("expected Codex credential");
-+		await harness.storage.reload();
++		await harness.storage.credentials.reload();
 +		let redeemedTarget: ResetCreditTarget | undefined;
 +		let outcome: ResetCreditRedeemOutcome = {
 +			ok: true,
@@ -9300,7 +9968,7 @@ index 0000000..679d4a5
 +			creditId: "credit-1",
 +		};
 +		const storage = harness.storage as ResetPatchedStorage;
-+		storage.redeemResetCredit = async options => {
++		storage.resets.redeem = async options => {
 +			redeemedTarget = options.target;
 +			return outcome;
 +		};
@@ -9313,7 +9981,7 @@ index 0000000..679d4a5
 +			{},
 +		);
 +		expect(response.status).toBe(200);
-+		expect(redeemedTarget).toEqual({ credentialId: credential.id });
++		expect(redeemedTarget).toEqual({ provider: "openai-codex", credentialId: credential.id });
 +		expect(await readJson(response)).toEqual({ outcome });
 +
 +		outcome = { ok: false, code: "nothing_to_reset", accountId: "acct-codex", email: "codex@example.com" };
@@ -9330,19 +9998,19 @@ index 0000000..679d4a5
 +
 +	test("rejects reset activation for non-Codex and API-key credentials", async () => {
 +		harness = await createGatewayHarness();
-+		const [anthropic] = harness.credentialStore.upsertAuthCredentialForProvider("anthropic", {
++		const [anthropic] = await harness.credentialStore.upsertAuthCredential("anthropic", {
 +			type: "oauth",
 +			access: "anthropic-access",
 +			refresh: "anthropic-refresh",
 +			expires: 1_900_000_000_000,
 +			email: "anthropic@example.com",
 +		});
-+		const [apiKey] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
++		const [apiKey] = await harness.credentialStore.upsertAuthCredential("openai-codex", {
 +			type: "api_key",
 +			key: "codex-key",
 +		});
 +		if (!anthropic || !apiKey) throw new Error("expected reset-ineligible credentials");
-+		await harness.storage.reload();
++		await harness.storage.credentials.reload();
 +
 +		for (const credentialId of [anthropic.id, apiKey.id]) {
 +			const response = await requestJson(
@@ -9407,10 +10075,12 @@ index 0000000..679d4a5
 +			]);
 +		}
 +
-+		const otherProviderRow = harness.credentialStore.upsertAuthCredentialForProvider("other", {
-+			type: "api_key",
-+			key: "wrong-provider-secret",
-+		})[0];
++		const otherProviderRow = (
++			await harness.credentialStore.upsertAuthCredential("other", {
++				type: "api_key",
++				key: "wrong-provider-secret",
++			})
++		)[0];
 +		if (!otherProviderRow) throw new Error("expected other provider credential row");
 +		harness.accessStore.addPoolCredential(pool.id, otherProviderRow.id);
 +		response = await requestJson(harness.handle.url, "PATCH", `/v1/pools/${pool.id}/members`, admin.token.value, {
@@ -9447,7 +10117,7 @@ index 0000000..679d4a5
 +	});
 +});
 diff --git a/packages/ai/test/auth-gateway-model-list.test.ts b/packages/ai/test/auth-gateway-model-list.test.ts
-index 0fa8a2f..bc28dbd 100644
+index 0fa8a2f..277197a 100644
 --- a/packages/ai/test/auth-gateway-model-list.test.ts
 +++ b/packages/ai/test/auth-gateway-model-list.test.ts
 @@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
@@ -9459,7 +10129,23 @@ index 0fa8a2f..bc28dbd 100644
  import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
  import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
  import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-@@ -86,3 +86,26 @@ test("model listing preserves bundled multimodal context limits", async () => {
+@@ -36,6 +36,7 @@ test("model listing exposes one provider-qualified route per upstream model", async () => {
+ 					context_length: 200_000,
+ 					max_output_tokens: 32_768,
+ 					input_modalities: ["text"],
++					reasoning: false,
+ 				},
+ 				{
+ 					id: "devin/shared-model",
+@@ -46,6 +47,7 @@ test("model listing exposes one provider-qualified route per upstream model", async () => {
+ 					context_length: 200_000,
+ 					max_output_tokens: 32_768,
+ 					input_modalities: ["text"],
++					reasoning: false,
+ 				},
+ 			],
+ 		});
+@@ -86,3 +88,26 @@ test("model listing preserves bundled multimodal context limits", async () => {
  		await fs.rm(dir, { recursive: true, force: true });
  	}
  });
@@ -9488,7 +10174,7 @@ index 0fa8a2f..bc28dbd 100644
 +});
 diff --git a/packages/ai/test/auth-gateway-pools.test.ts b/packages/ai/test/auth-gateway-pools.test.ts
 new file mode 100644
-index 0000000..7c67592
+index 0000000..eb09fe0
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-pools.test.ts
 @@ -0,0 +1,886 @@
@@ -9595,9 +10281,9 @@ index 0000000..7c67592
 +	provider: string,
 +	key: string,
 +): Promise<{ id: number; provider: string }> {
-+	const [row] = harness.credentialStore.upsertAuthCredentialForProvider(provider, { type: "api_key", key });
++	const [row] = await harness.credentialStore.upsertAuthCredential(provider, { type: "api_key", key });
 +	if (!row) throw new Error(`expected ${provider} credential row`);
-+	await harness.storage.reload();
++	await harness.storage.credentials.reload();
 +	return row;
 +}
 +
@@ -9850,8 +10536,8 @@ index 0000000..7c67592
 +		harness.accessStore.addPoolCredential(pool.id, row.id);
 +		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 +
-+		expect(harness.storage.disableCredentialById(row.id, "oauth refresh failed: invalid_grant")).toBe(true);
-+		harness.storage.upsertCredential("mock", {
++		expect(await harness.storage.credentials.disable(row.id, "oauth refresh failed: invalid_grant")).toBe(true);
++		harness.storage.credentials.upsert("mock", {
 +			type: "oauth",
 +			access: "oauth-after",
 +			refresh: "refresh-after",
@@ -10380,7 +11066,7 @@ index 0000000..7c67592
 +});
 diff --git a/packages/ai/test/auth-gateway-users.test.ts b/packages/ai/test/auth-gateway-users.test.ts
 new file mode 100644
-index 0000000..c52d32a
+index 0000000..0152915
 --- /dev/null
 +++ b/packages/ai/test/auth-gateway-users.test.ts
 @@ -0,0 +1,370 @@
@@ -10408,9 +11094,9 @@ index 0000000..c52d32a
 +	provider: string,
 +	key: string,
 +): Promise<{ id: number; provider: string }> {
-+	const [row] = harness.credentialStore.upsertAuthCredentialForProvider(provider, { type: "api_key", key });
++	const [row] = await harness.credentialStore.upsertAuthCredential(provider, { type: "api_key", key });
 +	if (!row) throw new Error(`expected ${provider} credential row`);
-+	await harness.storage.reload();
++	await harness.storage.credentials.reload();
 +	return row;
 +}
 +
@@ -10581,7 +11267,7 @@ index 0000000..c52d32a
 +		await grantModelAccess(harness.accessStore, managed.user.id, pool.id);
 +
 +		const listUserPoolBindings = spyOn(harness.accessStore, "listUserPoolBindings");
-+		const listStoredCredentials = spyOn(harness.storage, "listStoredCredentials");
++		const listStoredCredentials = spyOn(harness.storage.credentials, "list");
 +		try {
 +			const response = await postChat(harness.handle.url, managed.token.value);
 +
@@ -10661,7 +11347,7 @@ index 0000000..c52d32a
 +
 +		const listAclRules = spyOn(harness.accessStore, "listAclRules");
 +		const listUserPoolBindings = spyOn(harness.accessStore, "listUserPoolBindings");
-+		const listStoredCredentials = spyOn(harness.storage, "listStoredCredentials");
++		const listStoredCredentials = spyOn(harness.storage.credentials, "list");
 +		try {
 +			const response = await fetch(`${harness.handle.url}/v1/models`, { headers: jsonHeaders(managed.token.value) });
 +			expect(response.status).toBe(200);
@@ -11355,10 +12041,10 @@ index 0000000..4734197
 +	});
 +}
 diff --git a/packages/coding-agent/src/cli/auth-gateway-cli.ts b/packages/coding-agent/src/cli/auth-gateway-cli.ts
-index b3d606c..9aca250 100644
+index f907fa3..20b1bf6 100644
 --- a/packages/coding-agent/src/cli/auth-gateway-cli.ts
 +++ b/packages/coding-agent/src/cli/auth-gateway-cli.ts
-@@ -30,21 +30,52 @@ import {
+@@ -30,11 +30,25 @@ import {
  	RemoteAuthCredentialStore,
  	type SnapshotResponse,
  } from "@oh-my-pi/pi-ai/auth-broker";
@@ -11378,11 +12064,16 @@ index b3d606c..9aca250 100644
 +	startAuthGateway,
 +} from "@oh-my-pi/pi-ai/auth-gateway";
  import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+ import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
  import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
 +import { runAuthGatewayTui } from "../auth-gateway/run-tui";
  import { ModelRegistry } from "../config/model-registry";
- import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
+ import {
+ 	type AuthBrokerClientConfig,
+@@ -42,14 +56,31 @@ import {
+ 	resolveAuthBrokerConfig,
+ } from "../session/auth-broker-config";
  
 -export type AuthGatewayAction = "serve" | "token" | "status" | "check";
 +export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit" | "tui";
@@ -11413,7 +12104,7 @@ index b3d606c..9aca250 100644
  		/**
  		 * Disable bearer-token auth on inbound requests. Useful when the gateway
  		 * is bound to loopback (the default `127.0.0.1:4000`) and you don't want
-@@ -62,12 +93,82 @@ export interface AuthGatewayCommandArgs {
+@@ -67,12 +98,82 @@ export interface AuthGatewayCommandArgs {
  	};
  }
  
@@ -11434,7 +12125,7 @@ index b3d606c..9aca250 100644
 +	const modelById = new Map<string, Model<Api>>();
 +	const models: Model<Api>[] = [];
 +	const keylessProviders = new Set<string>();
-+	for (const model of modelRegistry.getAvailable()) {
++	for (const model of GATEWAY_MODEL_KINDS.flatMap(kind => modelRegistry.getAvailable(kind))) {
 +		const keylessProvider = modelRegistry.isKeylessProvider(model.provider);
 +		if (keylessProvider && !modelRegistry.isConfiguredModel(model.provider, model.id)) continue;
 +		models.push(model);
@@ -11496,8 +12187,8 @@ index b3d606c..9aca250 100644
 +
  async function readToken(): Promise<string | null> {
  	try {
- 		const raw = await Bun.file(getTokenFilePath()).text();
-@@ -141,6 +242,20 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotResponse> {
+ 		const raw = await fs.readFile(getTokenFilePath(), "utf8");
+@@ -146,6 +247,20 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotResponse> {
  	return result.snapshot;
  }
  
@@ -11518,7 +12209,7 @@ index b3d606c..9aca250 100644
  /**
   * How often a long-lived `serve` rebuilds its catalog from the registry so
   * models discovered after boot become routable without a restart. `refresh()`
-@@ -213,7 +328,7 @@ export function createSerializedRebuilder(run: (force: boolean) => Promise<void>): (force?: boolean) => Promise<void> {
+@@ -244,7 +359,7 @@ export function createSerializedRebuilder(run: (force: boolean) => Promise<void>): (force?: boolean) => Promise<void> {
  	return rebuild;
  }
  
@@ -11527,7 +12218,7 @@ index b3d606c..9aca250 100644
  	const brokerConfig = await resolveAuthBrokerConfig();
  	if (!brokerConfig) {
  		throw new Error(
-@@ -222,146 +337,137 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -253,149 +368,140 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  	}
  	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
  	const gatewayToken = flags.noAuth ? null : await ensureToken();
@@ -11537,6 +12228,7 @@ index b3d606c..9aca250 100644
 -	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 -	// in sdk.ts. The gateway never touches local SQLite.
 -	const accountPool = await loadAuthBrokerAccountPool();
+-	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig();
 -	const client = createBrokerClient(brokerConfig);
 -	const initialSnapshot = await fetchBrokerSnapshot(client);
 -	const store = new RemoteAuthCredentialStore({
@@ -11550,8 +12242,10 @@ index b3d606c..9aca250 100644
 -	// gateway only needs to construct the store and pass it in.
 -	const storage = new AuthStorage(store, {
 -		sourceLabel: `broker ${brokerConfig.url}`,
+-		accountPolicies,
+-		defaultReservePct,
 -	});
--	await storage.reload();
+-	await storage.credentials.reload();
 -
 -	// Build the model resolver + catalog from the ModelRegistry — the same
 -	// component the TUI/CLI use — scoped to providers we hold credentials for.
@@ -11571,7 +12265,7 @@ index b3d606c..9aca250 100644
 -	// advertised until restart.
 -	const providersWithCreds = (): Set<string> => {
 -		const providers = new Set<string>();
--		for (const entry of storage.exportSnapshot().credentials) providers.add(entry.provider);
+-		for (const entry of storage.credentials.snapshot().credentials) providers.add(entry.provider);
 -		return providers;
 -	};
 -	let modelById = new Map<string, Model<Api>>();
@@ -11584,7 +12278,7 @@ index b3d606c..9aca250 100644
 -	// for up to a cache TTL. Periodic rebuilds stay cached.
 -	const rebuildCatalog = createSerializedRebuilder(async force => {
 -		await registry.refresh(force ? "online" : "online-if-uncached");
--		modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
+-		modelById = indexModelsByRequestId(gatewayRoutableModels(registry), providersWithCreds());
 -	});
 -	await rebuildCatalog();
 -
@@ -11618,6 +12312,7 @@ index b3d606c..9aca250 100644
 +		// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 +		// in sdk.ts. The gateway never touches local SQLite for provider secrets.
 +		const accountPool = await loadAuthBrokerAccountPool();
++		const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig();
 +		const client = createBrokerClient(brokerConfig);
 +		const initialSnapshot = await fetchBrokerSnapshot(client);
 +		const store = new RemoteAuthCredentialStore({ client, initialSnapshot, accountPool });
@@ -11625,6 +12320,8 @@ index b3d606c..9aca250 100644
 +		// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
 +		storage = new AuthStorage(store, {
 +			sourceLabel: `broker ${brokerConfig.url}`,
++			accountPolicies,
++			defaultReservePct,
  		});
 -	}, CATALOG_REFRESH_INTERVAL_MS);
 -	catalogRefresh.unref();
@@ -11638,10 +12335,10 @@ index b3d606c..9aca250 100644
 -	const credentialSync = setInterval(() => {
 -		void (async () => {
 -			try {
--				if (await storage.pollExternalChanges()) await rebuildCatalog(true);
+-				if (await storage.credentials.poll()) await rebuildCatalog(true);
 -			} catch (error) {
 -				logger.warn("auth-gateway credential sync failed", {
-+		await storage.reload();
++		await storage.credentials.reload();
 +		accessStore = await SqliteAuthGatewayAccessStore.open(getAccessDbPath(deps));
 +
 +		// Use the same registry contract as the interactive agent: bundled
@@ -11695,7 +12392,7 @@ index b3d606c..9aca250 100644
 +		catalogRefresh.unref();
 +
 +		// Poll the broker-backed store for credential changes made by another
-+		// process (host `login`/`logout`). `pollExternalChanges()` reloads the
++		// process (host `login`/`logout`). `credentials.poll()` reloads the
 +		// storage's credential view so selection stops 401ing (or stops using a
 +		// removed credential); the forced rebuild then refetches account-scoped
 +		// catalogs and updates `/v1/models` and `resolveModel`. `unref()` for the
@@ -11703,7 +12400,7 @@ index b3d606c..9aca250 100644
 +		const credentialSync = setInterval(() => {
 +			void (async () => {
 +				try {
-+					if (await storage?.pollExternalChanges()) await rebuildCatalog(true);
++					if (await storage?.credentials.poll()) await rebuildCatalog(true);
 +				} catch (error) {
 +					logger.warn("auth-gateway credential sync failed", {
 +						error: error instanceof Error ? error.message : String(error),
@@ -11767,14 +12464,14 @@ index b3d606c..9aca250 100644
 +			await stopped.promise;
  		} finally {
 -			storage.close();
-+			process.off("SIGINT", onSigint);
-+			process.off("SIGTERM", onSigterm);
- 		}
+-		}
 -		if (closeError) {
 -			stopped.reject(closeError);
 -		} else {
 -			stopped.resolve();
--		}
++			process.off("SIGINT", onSigint);
++			process.off("SIGTERM", onSigterm);
+ 		}
 -	};
 -	const onSigint = (): void => {
 -		void stop("SIGINT");
@@ -11797,7 +12494,7 @@ index b3d606c..9aca250 100644
  	}
  }
  
-@@ -384,24 +490,110 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -418,24 +524,110 @@ async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  	}
  }
  
@@ -11911,7 +12608,7 @@ index b3d606c..9aca250 100644
  			process.stdout.write(
  				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
  			);
-@@ -412,7 +604,6 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -446,7 +638,6 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  
  	try {
  		const snapshot = await fetchBrokerSnapshot(createBrokerClient(brokerConfig));
@@ -11919,7 +12616,7 @@ index b3d606c..9aca250 100644
  		const status = {
  			ready: tokenPresent,
  			reason: tokenPresent ? null : "token_missing",
-@@ -422,6 +613,7 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -456,6 +647,7 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  			brokerConfigured: true,
  			brokerAuthenticated: true,
  			credentialCount: snapshot.credentials.length,
@@ -11927,7 +12624,7 @@ index b3d606c..9aca250 100644
  		};
  		if (flags.json) {
  			process.stdout.write(`${JSON.stringify(status)}\n`);
-@@ -430,6 +622,9 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -464,6 +656,9 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  				snapshot.credentials.length === 1 ? "" : "s"
  			})`;
  			process.stdout.write(`${tokenPresent ? chalk.green("ready") : chalk.yellow("not ready")} ${brokerLine}\n`);
@@ -11937,7 +12634,7 @@ index b3d606c..9aca250 100644
  			process.stdout.write(
  				`token: ${tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
  			);
-@@ -446,16 +641,20 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -480,16 +675,20 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  			ready: false,
  			reason: "broker_unavailable",
  			tokenFile,
@@ -11959,7 +12656,7 @@ index b3d606c..9aca250 100644
  			process.stdout.write(
  				`token: ${status.tokenPresent ? chalk.green("present") : chalk.red("missing")} at ${status.tokenFile}\n`,
  			);
-@@ -464,20 +663,540 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+@@ -498,20 +697,540 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
  	}
  }
  
@@ -12504,7 +13201,7 @@ index b3d606c..9aca250 100644
  			const _exhaustive: never = cmd.action;
  			throw new Error(`Unknown auth-gateway action: ${String(_exhaustive)}`);
 diff --git a/packages/coding-agent/src/commands/auth-gateway.ts b/packages/coding-agent/src/commands/auth-gateway.ts
-index e791f7b..059bc3c 100644
+index 9eb2677..1c9667b 100644
 --- a/packages/coding-agent/src/commands/auth-gateway.ts
 +++ b/packages/coding-agent/src/commands/auth-gateway.ts
 @@ -20,12 +20,37 @@ export default class AuthGateway extends Command {
@@ -14183,7 +14880,7 @@ index 0000000..54991c4
 +}
 diff --git a/packages/coding-agent/src/modes/components/auth-gateway/console.test.ts b/packages/coding-agent/src/modes/components/auth-gateway/console.test.ts
 new file mode 100644
-index 0000000..46fdf39
+index 0000000..ce30ae5
 --- /dev/null
 +++ b/packages/coding-agent/src/modes/components/auth-gateway/console.test.ts
 @@ -0,0 +1,418 @@
@@ -14201,7 +14898,7 @@ index 0000000..46fdf39
 +import type { TUI } from "@oh-my-pi/pi-tui";
 +import type { AuthGatewayProfileStore, ResolvedAuthGatewayConnection } from "../../../auth-gateway/profiles";
 +import { formatUsageReportLines } from "../../../utils/usage-format";
-+import { initTheme } from "../../theme/theme";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
 +import { AuthGatewayConsole } from "./console";
 +
 +const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
@@ -14607,10 +15304,10 @@ index 0000000..46fdf39
 +});
 diff --git a/packages/coding-agent/src/modes/components/auth-gateway/console.ts b/packages/coding-agent/src/modes/components/auth-gateway/console.ts
 new file mode 100644
-index 0000000..385fdab
+index 0000000..1d8f729
 --- /dev/null
 +++ b/packages/coding-agent/src/modes/components/auth-gateway/console.ts
-@@ -0,0 +1,2328 @@
+@@ -0,0 +1,2337 @@
 +import type {
 +	AddAclRuleInput,
 +	AuthGatewayAclEffect,
@@ -14648,11 +15345,11 @@ index 0000000..385fdab
 +import { describeRedeemOutcome } from "../../../slash-commands/helpers/reset-usage";
 +import { copyToClipboard } from "../../../utils/clipboard";
 +import { formatUsageReportLines } from "../../../utils/usage-format";
-+import { getTabBarTheme } from "../../shared";
-+import { theme } from "../../theme/theme";
++import { getTabBarTheme } from "@oh-my-pi/pi-tui/chrome/shared";
++import { theme } from "@oh-my-pi/pi-tui/theme";
 +import { renderOAuthAuthorizationLink } from "../oauth-authorization-link";
-+import { OAuthSelectorComponent } from "../oauth-selector";
-+import { bottomBorder, divider, row, topBorder } from "../overlay-box";
++import { OAuthSelectorComponent, type OAuthSelectorAuthSource } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
++import { bottomBorder, divider, row, topBorder } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 +import {
 +	AuthGatewayAccountLoginController,
 +	type AuthGatewayAccountLoginPromptState,
@@ -14720,6 +15417,15 @@ index 0000000..385fdab
 +
 +const FOOTER_PREFIX = "1-5 tabs · ↑/↓ select · / filter · r refresh · ? help";
 +const LEADING_SGR_MOUSE_EVENT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]/;
++/**
++ * The console logs into accounts held by the remote gateway, so the local
++ * credential store says nothing about them: every provider is offered, none is
++ * reported as already authenticated.
++ */
++const NO_LOCAL_AUTH: OAuthSelectorAuthSource = {
++	credentials: { has: () => false },
++	keys: { source: () => undefined },
++};
 +const NAME_HELP = "Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.";
 +const DESCRIPTION_HELP = "Human-readable purpose; blank leaves it unset.";
 +const OWNER_HELP = "Operator or team responsible for this user; blank leaves it unset.";
@@ -15225,7 +15931,7 @@ index 0000000..385fdab
 +		this.#loginProviderSelector?.stopValidation();
 +		this.#loginProviderSelector = new OAuthSelectorComponent(
 +			"login",
-+			undefined,
++			NO_LOCAL_AUTH,
 +			providerId => {
 +				this.#loginProviderSelector?.stopValidation();
 +				this.#loginProviderSelector = null;
@@ -16973,7 +17679,7 @@ index 0000000..76daa17
 +}
 diff --git a/packages/coding-agent/src/modes/components/auth-gateway/flow-dialog.ts b/packages/coding-agent/src/modes/components/auth-gateway/flow-dialog.ts
 new file mode 100644
-index 0000000..de49178
+index 0000000..a71c7c5
 --- /dev/null
 +++ b/packages/coding-agent/src/modes/components/auth-gateway/flow-dialog.ts
 @@ -0,0 +1,186 @@
@@ -16986,7 +17692,7 @@ index 0000000..de49178
 +	type SgrMouseEvent,
 +	truncateToWidth,
 +} from "@oh-my-pi/pi-tui";
-+import { getSelectListTheme, theme } from "../../theme/theme";
++import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
 +
 +export type AuthGatewayFlowStep =
 +	| {
@@ -17165,10 +17871,10 @@ index 0000000..de49178
 +}
 diff --git a/packages/coding-agent/src/modes/components/auth-gateway/profile-settings.ts b/packages/coding-agent/src/modes/components/auth-gateway/profile-settings.ts
 new file mode 100644
-index 0000000..423aede
+index 0000000..e5877f9
 --- /dev/null
 +++ b/packages/coding-agent/src/modes/components/auth-gateway/profile-settings.ts
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,486 @@
 +import type { AuthGatewayAdminClient } from "@oh-my-pi/pi-ai/auth-gateway";
 +import {
 +	type Component,
@@ -17179,14 +17885,15 @@ index 0000000..423aede
 +	type SgrMouseEvent,
 +} from "@oh-my-pi/pi-tui";
 +import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/utils";
++import type { GatewaySettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 +import type {
 +	AuthGatewayConnectionProfile,
 +	AuthGatewayProfileStore,
 +	AuthGatewayTokenSource,
 +	ResolvedAuthGatewayConnection,
 +} from "../../../auth-gateway/profiles";
-+import { getSelectListTheme, theme } from "../../theme/theme";
-+import { routeSelectListMouseWithTopBorder } from "../select-list-mouse-routing";
++import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
++import { routeSelectListMouseWithTopBorder } from "@oh-my-pi/pi-tui/chrome/select-list-mouse-routing";
 +
 +export interface GatewayProfileSettingsContext {
 +	profileStore: AuthGatewayProfileStore;
@@ -17198,6 +17905,17 @@ index 0000000..423aede
 +	onboarding?: boolean;
 +	onConnectionReady?: (name: string) => void;
 +	onCancel?: () => void;
++}
++
++/**
++ * Adapt the profile editor to the `GatewaySettingsHost` seam pi-tui's settings
++ * selector renders its Gateway tab through. The editor reads coding-agent's
++ * profile store, so pi-tui only ever sees the panel interface.
++ */
++export function createGatewaySettingsHost(context: GatewayProfileSettingsContext): GatewaySettingsHost {
++	return {
++		createPanel: options => new GatewayProfileSettingsComponent(context, options),
++	};
 +}
 +
 +type TokenSourceMode = "file" | "env" | "command";
@@ -19009,10 +19727,10 @@ index 0000000..33b1807
 +});
 diff --git a/packages/coding-agent/test/auth-gateway-profile-settings.test.ts b/packages/coding-agent/test/auth-gateway-profile-settings.test.ts
 new file mode 100644
-index 0000000..8c73a7f
+index 0000000..eaf242b
 --- /dev/null
 +++ b/packages/coding-agent/test/auth-gateway-profile-settings.test.ts
-@@ -0,0 +1,715 @@
+@@ -0,0 +1,722 @@
 +import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 +import * as fs from "node:fs/promises";
 +import * as os from "node:os";
@@ -19021,12 +19739,15 @@ index 0000000..8c73a7f
 +import { AuthGatewayAdminClientError } from "@oh-my-pi/pi-ai/auth-gateway";
 +import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 +import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
++import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 +import {
++	createGatewaySettingsHost,
 +	GatewayProfileSettingsComponent,
 +	type GatewayProfileSettingsContext,
 +} from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/profile-settings";
-+import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
-+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
++import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
 +import { removeWithRetries } from "@oh-my-pi/pi-utils";
 +
 +const CURSOR_MARKER = "\x1b_pi:c\x07";
@@ -19595,8 +20316,9 @@ index 0000000..8c73a7f
 +				thinkingLevel: undefined,
 +				availableThemes: ["dark"],
 +				providers: [],
-+				cwd: process.cwd(),
-+				gatewayProfiles: context(),
++				settings: createSettingsHost(),
++				plugins: createPluginSettingsHost(process.cwd()),
++				gatewayProfiles: createGatewaySettingsHost(context()),
 +			},
 +			{ onChange: () => {}, onCancel: () => {} },
 +		);
@@ -19625,8 +20347,9 @@ index 0000000..8c73a7f
 +				thinkingLevel: undefined,
 +				availableThemes: ["dark"],
 +				providers: [],
-+				cwd: process.cwd(),
-+				gatewayProfiles: context(store),
++				settings: createSettingsHost(),
++				plugins: createPluginSettingsHost(process.cwd()),
++				gatewayProfiles: createGatewaySettingsHost(context(store)),
 +			},
 +			{ onChange: () => {}, onCancel: () => cancels++ },
 +		);
@@ -19653,8 +20376,9 @@ index 0000000..8c73a7f
 +				thinkingLevel: undefined,
 +				availableThemes: ["dark"],
 +				providers: [],
-+				cwd: process.cwd(),
-+				gatewayProfiles: context(store),
++				settings: createSettingsHost(),
++				plugins: createPluginSettingsHost(process.cwd()),
++				gatewayProfiles: createGatewaySettingsHost(context(store)),
 +			},
 +			{ onChange: () => {}, onCancel: () => cancels++ },
 +		);
@@ -19694,8 +20418,9 @@ index 0000000..8c73a7f
 +				thinkingLevel: undefined,
 +				availableThemes: ["dark"],
 +				providers: [],
-+				cwd: process.cwd(),
-+				gatewayProfiles: context(store),
++				settings: createSettingsHost(),
++				plugins: createPluginSettingsHost(process.cwd()),
++				gatewayProfiles: createGatewaySettingsHost(context(store)),
 +			},
 +			{ onChange: () => {}, onCancel: () => {} },
 +		);
@@ -20199,10 +20924,10 @@ index 0000000..492a6ea
 +});
 diff --git a/packages/coding-agent/test/auth-gateway-tui.test.ts b/packages/coding-agent/test/auth-gateway-tui.test.ts
 new file mode 100644
-index 0000000..d2802d7
+index 0000000..a940119
 --- /dev/null
 +++ b/packages/coding-agent/test/auth-gateway-tui.test.ts
-@@ -0,0 +1,3412 @@
+@@ -0,0 +1,3419 @@
 +import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 +import * as fs from "node:fs/promises";
 +import * as os from "node:os";
@@ -20261,7 +20986,7 @@ index 0000000..d2802d7
 +	copyOneTimeTokenDialogValue,
 +	createOneTimeTokenDialog,
 +} from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/dialogs";
-+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
++import { initTheme } from "@oh-my-pi/pi-tui/theme";
 +import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 +import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 +import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -22722,7 +23447,14 @@ index 0000000..d2802d7
 +		expect(rendered).toContain("Basic routes");
 +		expect(rendered).toContain(AUTH_GATEWAY_BASIC_ROUTES.join(", "));
 +		expect(rendered).toContain("All routes (*)");
-+		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(rendered).toContain(route);
++		// The canonical list outgrew one popup window, so walking to the end is
++		// part of the contract: every family must be reachable, not merely the
++		// first screenful.
++		// Two entries (Basic routes, All routes) precede the families, so this
++		// lands exactly on the last one — the list wraps if over-pressed.
++		for (let i = 0; i <= AUTH_GATEWAY_ACL_ROUTES.length; i++) component.handleInput("\x1b[B");
++		const scrolled = `${rendered}\n${plain(component, 120)}`;
++		for (const route of AUTH_GATEWAY_ACL_ROUTES) expect(scrolled).toContain(route);
 +		component.dispose?.();
 +	});
 +
