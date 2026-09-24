@@ -3,7 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { type KindApiKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
@@ -27,6 +27,27 @@ export interface ProviderOverride {
 }
 
 /**
+ * Non-chat runners that speak an OpenAI-shaped `/v1/<task>` wire, keyed by the
+ * model kind each serves. A `models.yml` entry declaring one of these APIs is
+ * that kind, and an omp auth-gateway row of that kind is reached through it:
+ * the gateway answers each on `/v1/images/generations`, `/v1/audio/speech`,
+ * and `/v1/audio/transcriptions` whatever upstream API it dispatches with.
+ */
+export const OPENAI_RUNNER_APIS = {
+	image: "openai-images",
+	tts: "openai-speech",
+	stt: "openai-transcriptions",
+} as const satisfies Partial<Record<KindApiKind, Api>>;
+
+/** The model kind an {@link OPENAI_RUNNER_APIS} transport serves; undefined for chat and other APIs. */
+export function openAIRunnerKind(api: Api): KindApiKind | undefined {
+	for (const [kind, runnerApi] of Object.entries(OPENAI_RUNNER_APIS)) {
+		if (runnerApi === api) return kind as keyof typeof OPENAI_RUNNER_APIS;
+	}
+	return undefined;
+}
+
+/**
  * Single decision point for provider `baseUrl` application, shared by every
  * composition path (built-in load, cached load, discovery merge, runtime
  * overrides). `undefined` `baseUrlApis` keeps the historical provider-wide
@@ -35,9 +56,9 @@ export interface ProviderOverride {
  * (docs/models.md): every model under the provider rides the auth-gateway,
  * so the gateway `baseUrl` follows the transport regardless of the model's
  * own API — a model must never end up pi-native on a catalog upstream host
- * (#2555). Image runners never stream over `/v1/pi/stream`; the gateway
- * answers them on its OpenAI-compatible `/v1/images*` routes, so they get
- * the gateway's `/v1` root instead.
+ * (#2555). Image, speech, and transcription runners never stream over
+ * `/v1/pi/stream`; the gateway answers them on its OpenAI-compatible
+ * `/v1/<task>` routes, so they get the gateway's `/v1` root instead.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
@@ -46,7 +67,7 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 ): string | undefined {
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") {
-		if (modelApi === "openai-images" || modelApi === "openrouter-images") {
+		if (modelApi === "openrouter-images" || openAIRunnerKind(modelApi) !== undefined) {
 			return `${override.baseUrl.replace(/\/+$/, "")}/v1`;
 		}
 		return override.baseUrl;

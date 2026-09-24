@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.3.0-fork.3] - 2026-09-24
+
+### Added
+
+- Speech (`tts`) and dictation (`stt`) models from OpenAI-compatible gateways now land in the `speech` and `dictation` roles: `models.yml` accepts `api: openai-speech` and `api: openai-transcriptions`, `openai-models-list` discovery routes Envoy AI Gateway rows by their advertised `/audio/speech` and `/audio/transcriptions` endpoints, and `discovery: proxy` maps omp auth-gateway `kind: tts`/`stt` rows to the gateway's `/v1/audio/*` routes.
+
+### Changed
+
+- Image, speech, and transcription models declared in `models.yml` no longer advertise chat token defaults (128K context / 16K output).
+
 ## [18.3.0-fork.2] - 2026-09-24
 
 ### Fixed

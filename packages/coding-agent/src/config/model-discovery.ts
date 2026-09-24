@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { OPENAI_RUNNER_APIS } from "./model-patch";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -833,10 +834,15 @@ function extractOpenAIModelsListInputCapabilities(item: {
  * `/images/generations` surfaces of the same OpenAI-compatible root the
  * provider already serves its model list from.
  *
+ * Audio needs explicit task metadata: an `audio` output alone cannot tell a
+ * TTS SKU from a music generator, and `text` output from audio input is also
+ * what an audio-chat model emits. Rows that list their served paths (Envoy AI
+ * Gateway's `metadata.endpoints`) and do not serve chat are routed by path:
+ * `/audio/speech` is TTS, `/audio/transcriptions` is STT.
+ *
  * Anything else stays chat. Rows that also emit `text` are ordinary (multimodal)
- * chat models, and an `audio` or `video` output alone cannot distinguish a TTS
- * SKU from a music generator, or a chat response from a video-job API — those
- * need explicit task metadata this list shape does not carry.
+ * chat models, and a video output cannot distinguish a chat response from a
+ * video-job API.
  */
 function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
@@ -852,17 +858,27 @@ function extractOpenAIModelsListOutputTask(item: {
 		architecture?.output_modalities,
 		metadata?.output_modalities,
 	]);
-	if (modalities.size !== 1) return undefined;
-	const [modality] = modalities;
-	switch (modality) {
-		case "embedding":
-		case "embeddings":
-			return { kind: "embedding", api: "openai-embeddings" };
-		case "image":
-			return { kind: "image", api: "openai-images" };
-		default:
-			return undefined;
+	if (modalities.size === 1) {
+		const [modality] = modalities;
+		switch (modality) {
+			case "embedding":
+			case "embeddings":
+				return { kind: "embedding", api: "openai-embeddings" };
+			case "image":
+				return { kind: "image", api: "openai-images" };
+		}
 	}
+	const endpoints = Array.isArray(metadata?.endpoints)
+		? metadata.endpoints.filter((endpoint): endpoint is string => typeof endpoint === "string")
+		: [];
+	if (endpoints.some(endpoint => endpoint.endsWith("/chat/completions"))) return undefined;
+	if (endpoints.some(endpoint => endpoint.endsWith("/audio/speech"))) {
+		return { kind: "tts", api: "openai-speech" };
+	}
+	if (endpoints.some(endpoint => endpoint.endsWith("/audio/transcriptions"))) {
+		return { kind: "stt", api: "openai-transcriptions" };
+	}
+	return undefined;
 }
 
 export async function discoverOpenAIModelsList(
@@ -1139,17 +1155,19 @@ export async function discoverProxyModels(
 		const id = item.id;
 		if (!id) continue;
 		// An omp auth-gateway tags non-chat runners with `kind` and answers each
-		// on its own `/v1/<task>` route, never on chat. Image rows speak the
-		// OpenAI images wire there whatever upstream API the gateway uses; other
-		// runner kinds have no client mapping here and must not be offered as chat.
+		// on its own `/v1/<task>` route, never on chat. Image, speech, and
+		// transcription rows speak the OpenAI wire there whatever upstream API
+		// the gateway uses; other runner kinds have no client mapping here and
+		// must not be offered as chat.
 		if (typeof item.kind === "string" && item.kind !== "chat") {
-			if (item.kind !== "image") continue;
+			if (!Object.hasOwn(OPENAI_RUNNER_APIS, item.kind)) continue;
+			const kind = item.kind as keyof typeof OPENAI_RUNNER_APIS;
 			discovered.push(
 				buildModel({
 					id,
 					name: typeof item.display_name === "string" && item.display_name ? item.display_name : id,
-					api: "openai-images",
-					kind: "image",
+					api: OPENAI_RUNNER_APIS[kind],
+					kind,
 					provider: providerConfig.provider,
 					baseUrl,
 					reasoning: false,

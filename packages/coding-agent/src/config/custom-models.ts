@@ -8,7 +8,7 @@ import {
 } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
-import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
+import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig, openAIRunnerKind } from "./model-patch";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import type { ModelOverride, ProviderAuthMode } from "./models-config-schema";
 export interface CustomModelDefinitionLike extends ModelPatch {
@@ -124,14 +124,15 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
+	const runnerKind = openAIRunnerKind(resolvedModel.api);
 	const built = buildModel({
 		id: resolvedModel.id,
 		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
-		// `openai-images` only generates images; a chat kind would hide the model
-		// from the image role and offer it to the chat picker instead.
-		...(resolvedModel.api === "openai-images" ? { kind: "image" as const } : {}),
+		// Runner APIs only serve their task; a chat kind would hide the model
+		// from its role and offer it to the chat picker instead.
+		...(runnerKind ? { kind: runnerKind } : {}),
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
@@ -140,8 +141,12 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		imageInputDecoder: resolvedModel.imageInputDecoder,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
-		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
-		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
+		// Chat token defaults mean nothing for image/audio jobs; leave them unknown.
+		contextWindow:
+			resolvedModel.contextWindow ??
+			reference?.contextWindow ??
+			(options.useDefaults && !runnerKind ? 128000 : null),
+		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults && !runnerKind ? 16384 : null),
 		headers: resolvedModel.headers,
 		resolveHeaders: resolvedModel.resolveHeaders,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,

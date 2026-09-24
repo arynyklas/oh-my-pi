@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type FetchImpl, generateImage, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, type FetchImpl, generateImage, type Model } from "@oh-my-pi/pi-ai";
+import { synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
+import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage as GatewayAuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -2579,6 +2581,34 @@ providers:
 							},
 						},
 						{
+							id: "qwen3-tts:1.7b-base",
+							object: "model",
+							metadata: {
+								endpoints: ["/v1/audio/speech", "/v1/audio/voices"],
+								input_modalities: ["text"],
+								output_modalities: ["audio"],
+							},
+						},
+						{
+							id: "whisper-large-v3",
+							object: "model",
+							metadata: {
+								endpoints: ["/v1/audio/transcriptions", "/v1/audio/translations"],
+								input_modalities: ["audio"],
+								output_modalities: ["text"],
+							},
+						},
+						{
+							// Audio in, text out over chat: an audio-chat model, not STT.
+							id: "audio-chat",
+							object: "model",
+							metadata: {
+								endpoints: ["/v1/chat/completions", "/v1/audio/transcriptions"],
+								input_modalities: ["text", "audio"],
+								output_modalities: ["text"],
+							},
+						},
+						{
 							id: "vision-chat:31b",
 							object: "model",
 							metadata: {
@@ -2605,29 +2635,41 @@ providers:
 			input: ["text", "image"],
 			contextWindow: 32768,
 		});
-		expect(
-			registry
-				.getAll("image")
-				.filter(model => model.provider === "aigw")
-				.map(model => model.id),
-		).toEqual(["qwen-image-2.1:t2i"]);
+		const byKind = registry
+			.getAll("all")
+			.filter(model => model.provider === "aigw")
+			.map(model => [model.id, model.kind ?? "chat", model.api]);
+		expect(byKind).toEqual([
+			["qwen-image-2.1:t2i", "image", "openai-images"],
+			["qwen3-tts:1.7b-base", "tts", "openai-speech"],
+			["whisper-large-v3", "stt", "openai-transcriptions"],
+			["audio-chat", "chat", "openai-completions"],
+			["vision-chat:31b", "chat", "openai-completions"],
+		]);
 	});
 
-	test("configured openai-images models are image runners, not chat models", async () => {
+	test("configured runner-API models get their runner kind, not chat", async () => {
 		writeRawModelsJson({
 			"local-aigw": {
 				baseUrl: "http://127.0.0.1:9993/v1",
 				api: "openai-completions",
 				auth: "none",
-				models: [{ id: "qwen-image-2.1:t2i", api: "openai-images" }, { id: "chat-model" }],
+				models: [
+					{ id: "qwen-image-2.1:t2i", api: "openai-images" },
+					{ id: "qwen3-tts:1.7b-base", api: "openai-speech" },
+					{ id: "whisper-large-v3", api: "openai-transcriptions" },
+					{ id: "chat-model" },
+				],
 			},
 		});
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 		await registry.refresh();
 		const providerModels = registry.getAll("all").filter(model => model.provider === "local-aigw");
-		expect(providerModels.map(model => [model.id, model.kind ?? "chat"])).toEqual([
-			["qwen-image-2.1:t2i", "image"],
-			["chat-model", "chat"],
+		expect(providerModels.map(model => [model.id, model.kind ?? "chat", model.contextWindow])).toEqual([
+			["qwen-image-2.1:t2i", "image", null],
+			["qwen3-tts:1.7b-base", "tts", null],
+			["whisper-large-v3", "stt", null],
+			["chat-model", "chat", 128000],
 		]);
 	});
 
@@ -2857,38 +2899,58 @@ providers:
 		}
 	});
 
-	test("pi-native gateway image models land in the image role and generate through the gateway", async () => {
-		const upstreamBodies: unknown[] = [];
+	test("pi-native gateway runner models land in their roles and run through the gateway", async () => {
+		const upstreamCalls: string[] = [];
 		const upstream = Bun.serve({
 			port: 0,
 			async fetch(req) {
-				if (new URL(req.url).pathname !== "/v1/images/generations") return new Response("nope", { status: 404 });
-				upstreamBodies.push(await req.json());
-				return Response.json({ created: 0, data: [{ b64_json: Buffer.from("png-bytes").toString("base64") }] });
+				const { pathname } = new URL(req.url);
+				if (pathname === "/v1/images/generations") {
+					const body = (await req.json()) as { model: string };
+					upstreamCalls.push(`${pathname} ${body.model}`);
+					return Response.json({ created: 0, data: [{ b64_json: Buffer.from("png-bytes").toString("base64") }] });
+				}
+				if (pathname === "/v1/audio/speech") {
+					const body = (await req.json()) as { model: string };
+					upstreamCalls.push(`${pathname} ${body.model}`);
+					return new Response("wav-bytes", { headers: { "Content-Type": "audio/wav" } });
+				}
+				if (pathname === "/v1/audio/transcriptions") {
+					const form = await req.formData();
+					upstreamCalls.push(`${pathname} ${form.get("model")}`);
+					return Response.json({ text: "hello from whisper" });
+				}
+				return new Response("nope", { status: 404 });
 			},
 		});
-		// What a gateway-side models.yml entry with `api: openai-images` becomes.
-		const imageModel = buildModel({
-			id: "qwen-image-2.1:t2i",
-			name: "Qwen Image 2.1",
-			api: "openai-images",
-			kind: "image",
-			provider: "local-aigw",
-			baseUrl: `${upstream.url.origin}/v1`,
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: null,
-			maxTokens: null,
-		});
+		// What keyless gateway-side models.yml entries with runner APIs become.
+		const runner = (id: string, api: Api, kind: "image" | "tts" | "stt") =>
+			buildModel({
+				id,
+				name: id,
+				api,
+				kind,
+				provider: "local-aigw",
+				baseUrl: `${upstream.url.origin}/v1`,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			});
+		const served = [
+			runner("qwen-image-2.1:t2i", "openai-images", "image"),
+			runner("qwen3-tts:1.7b-base", "openai-speech", "tts"),
+			runner("whisper-large-v3", "openai-transcriptions", "stt"),
+		];
 		const gatewayStorage = await GatewayAuthStorage.create(path.join(tempDir, "gateway-auth.db"));
-		gatewayStorage.keys.setRuntime("local-aigw", "upstream-key");
 		const gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: [],
 			storage: gatewayStorage,
-			resolveModel: id => (id === "local-aigw/qwen-image-2.1:t2i" ? imageModel : undefined),
-			listModels: () => [imageModel],
+			resolveModel: id => served.find(model => `${model.provider}/${model.id}` === id),
+			listModels: () => served,
+			isKeylessModel: () => true,
 			version: "test",
 		});
 		try {
@@ -2902,16 +2964,30 @@ providers:
 			});
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
 			await registry.refresh();
-			const pool = roleCandidatePool("image", Settings.isolated({}), registry).filter(
-				model => model.provider === "gateway-test",
+			const settings = Settings.isolated({});
+			const [image, speech, dictation] = (["image", "speech", "dictation"] as const).map(role => {
+				const pool = roleCandidatePool(role, settings, registry).filter(model => model.provider === "gateway-test");
+				expect(pool).toHaveLength(1);
+				return pool[0];
+			});
+			expect([image.id, speech.id, dictation.id]).toEqual(served.map(model => `local-aigw/${model.id}`));
+			// Chat must not offer them: the gateway only answers them on their task routes.
+			expect(registry.getAll("chat").some(model => model.provider === "gateway-test")).toBe(false);
+
+			const picture = await generateImage(image, { prompt: "a red apple" }, { apiKey: "unused" });
+			expect(Buffer.from(picture.images[0].data, "base64").toString()).toBe("png-bytes");
+			const voice = await synthesizeSpeech(speech, { text: "hello", format: "wav" }, { apiKey: "unused" });
+			expect(new TextDecoder().decode(voice.audio)).toBe("wav-bytes");
+			const transcript = await transcribeAudio(
+				dictation,
+				{ audio: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav", responseFormat: "json" },
+				{ apiKey: "unused" },
 			);
-			expect(pool.map(model => model.id)).toEqual(["local-aigw/qwen-image-2.1:t2i"]);
-			// Chat must not offer it: the gateway only answers it on /v1/images*.
-			expect(registry.getAll("chat").some(model => model.id === "local-aigw/qwen-image-2.1:t2i")).toBe(false);
-			const result = await generateImage(pool[0], { prompt: "a red apple" }, { apiKey: "unused" });
-			expect(Buffer.from(result.images[0].data, "base64").toString()).toBe("png-bytes");
-			expect(upstreamBodies).toEqual([
-				expect.objectContaining({ model: "qwen-image-2.1:t2i", prompt: "a red apple" }),
+			expect(transcript.text).toBe("hello from whisper");
+			expect(upstreamCalls).toEqual([
+				"/v1/images/generations qwen-image-2.1:t2i",
+				"/v1/audio/speech qwen3-tts:1.7b-base",
+				"/v1/audio/transcriptions whisper-large-v3",
 			]);
 		} finally {
 			await gateway.close();
