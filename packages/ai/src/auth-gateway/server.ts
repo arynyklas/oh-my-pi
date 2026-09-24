@@ -1856,11 +1856,13 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 			api: model.api,
 			display_name: model.name,
 			input_modalities: model.input,
+			reasoning: model.reasoning,
 		};
 		if (modelKind(model) !== "chat") row.kind = modelKind(model);
 		if (model.contextWindow != null) row.context_length = model.contextWindow;
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
 		if (model.supportsTools === false) row.supports_tools = false;
+		if (model.thinking) row.thinking_efforts = model.thinking.efforts;
 		data.push(row);
 	}
 	return json(200, { object: "list", data });

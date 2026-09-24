@@ -674,6 +674,29 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).compat.supportsForcedToolChoice,
 		).toBe(true);
 	});
+	it("downgrades forced tool choice for Claude Opus 5.5 on every host", () => {
+		// Anthropic 400s Opus 5.5 on `tool_choice: {type:"tool"|"any"}`; the older
+		// Opus line still accepts it, including Venice's squashed `opus-45` (4.5).
+		const anthropic = (id: string, provider = "anthropic") =>
+			resolveModelPolicy({
+				id,
+				name: id,
+				api: "anthropic-messages",
+				provider,
+				baseUrl: "https://api.anthropic.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+			}).compat.supportsForcedToolChoice;
+		expect(anthropic("claude-opus-5-5")).toBe(false);
+		expect(anthropic("claude-opus-5")).toBe(true);
+		expect(anthropic("claude-opus-45", "venice")).toBe(true);
+		expect(
+			resolveModelPolicy(openrouterSpec({ id: "anthropic/claude-opus-5.5" })).compat.supportsForcedToolChoice,
+		).toBe(false);
+	});
 	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
 		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
 		// cannot round-trip encrypted reasoning: the upstream binds

@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthStorage as GatewayAuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -2742,6 +2744,37 @@ providers:
 		await registry.refresh();
 		const model = registry.find("proxy-test", "gpt-5");
 		expect(model?.name).toBe("GPT-5");
+	});
+
+	test("proxy discovery adopts the thinking ladder an omp auth-gateway advertises", async () => {
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		if (!opus) throw new Error("expected bundled Claude Opus 5.5");
+		const gatewayStorage = await GatewayAuthStorage.create(path.join(tempDir, "gateway-auth.db"));
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			storage: gatewayStorage,
+			resolveModel: () => opus,
+			listModels: () => [opus],
+			version: "test",
+		});
+		try {
+			writeRawModelsJson({
+				"gateway-test": { baseUrl: gateway.url, auth: "none", discovery: { type: "proxy" } },
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
+			await registry.refresh();
+			// The row has no supported_endpoint_types, so the client model rides the
+			// openai-completions fallback, whose generic ladder stops at `high`.
+			// The gateway serves Opus 5.5 with its native ladder; the client must
+			// offer exactly that, `xhigh`/`max` included and no `minimal`.
+			const model = registry.find("gateway-test", "anthropic/claude-opus-5-5");
+			expect(model?.reasoning).toBe(true);
+			expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		} finally {
+			await gateway.close();
+			gatewayStorage.close();
+		}
 	});
 
 	test("litellm discovery maps rich model metadata and keeps runtime /v1 baseUrl", async () => {

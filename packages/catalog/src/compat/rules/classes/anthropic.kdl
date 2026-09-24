@@ -36,6 +36,16 @@ class "anthropic" {
 			supports-server-compaction #true
 		}
 	}
+	// Opus 5.5 rejects forced tool use with a 400 ("tool_choice: type \"tool\"
+	// and \"any\" are not supported for this model"); verified 2026-09-24 against
+	// api.anthropic.com, where Opus 5, Sonnet 5 and the 4.x line still accept it.
+	// Transports downgrade any/tool to auto so the tool stays callable. The upper
+	// bound keeps squashed Opus 4.5 ids (venice `claude-opus-45`, revision 45) out.
+	family "opus" {
+		revision ">=5.5 <45" {
+			supports-forced-tool-choice #false
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {

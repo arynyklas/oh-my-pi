@@ -9,6 +9,7 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -1098,7 +1099,14 @@ export async function discoverProxyModels(
 			}
 			headers = h;
 			return (await res.json()) as {
-				data?: Array<{ id?: string; name?: string; supported_endpoint_types?: string[]; context_length?: number }>;
+				data?: Array<{
+					id?: string;
+					name?: string;
+					supported_endpoint_types?: string[];
+					context_length?: number;
+					reasoning?: unknown;
+					thinking_efforts?: unknown;
+				}>;
 			};
 		});
 	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
@@ -1119,6 +1127,14 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		// An omp auth-gateway advertises the served model's reasoning surface. It
+		// dispatches with its own catalog entry, so that ladder is authoritative
+		// over the reference guess (cross-provider references carry no thinking,
+		// which left gateway Claude rows on the generic minimal..high ladder).
+		// Only the OpenAI-shaped fallback api takes it: `effort` is the mode that
+		// wire encodes, while Anthropic rows keep their own identity-derived mode.
+		const advertisedEfforts = isAnthropic ? undefined : parseAdvertisedEfforts(item.thinking_efforts);
+		const reasoning = typeof item.reasoning === "boolean" ? item.reasoning : (reference?.reasoning ?? false);
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
 			(discoveryName && discoveryName !== id ? discoveryName : undefined) ??
@@ -1132,8 +1148,10 @@ export async function discoverProxyModels(
 				api,
 				provider: providerConfig.provider,
 				baseUrl,
-				reasoning: reference?.reasoning ?? false,
-				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+				reasoning,
+				thinking: advertisedEfforts
+					? { mode: "effort", efforts: advertisedEfforts }
+					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 				input: reference?.input ?? ["text"],
 				// Proxy pricing is provider-specific and usually does not match
 				// upstream bundled catalogs, so keep costs local-unknown even when
@@ -1163,6 +1181,13 @@ export async function discoverProxyModels(
 		);
 	}
 	return discovered;
+}
+
+/** Known efforts from a proxy row's `thinking_efforts`, in ladder order; undefined when none survive. */
+function parseAdvertisedEfforts(value: unknown): Effort[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const efforts = THINKING_EFFORTS.filter(effort => value.includes(effort));
+	return efforts.length > 0 ? efforts : undefined;
 }
 
 export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {

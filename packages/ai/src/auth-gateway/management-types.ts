@@ -1,3 +1,4 @@
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { AuthCredential, ResetCreditRedeemOutcome } from "../auth-storage";
 import type { Api } from "../types";
@@ -131,6 +132,15 @@ export interface AuthGatewayModelListRow {
 	max_output_tokens?: number;
 	input_modalities: ("text" | "image")[];
 	supports_tools?: boolean;
+	/** Whether the served model reasons; drives the client's thinking toggle. */
+	reasoning: boolean;
+	/**
+	 * Efforts the served model accepts, least → most intensive. Omitted when the
+	 * model has no controllable effort surface. Clients dispatching through the
+	 * gateway adopt this ladder instead of guessing one from their own wire
+	 * (e.g. `xhigh`/`max` on Claude Opus 4.7+).
+	 */
+	thinking_efforts?: readonly Effort[];
 }
 
 export interface AuthGatewayModelSummary {

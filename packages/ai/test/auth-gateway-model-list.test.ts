@@ -36,6 +36,7 @@ test("model listing exposes one provider-qualified route per upstream model", as
 					context_length: 200_000,
 					max_output_tokens: 32_768,
 					input_modalities: ["text"],
+					reasoning: false,
 				},
 				{
 					id: "devin/shared-model",
@@ -46,6 +47,7 @@ test("model listing exposes one provider-qualified route per upstream model", as
 					context_length: 200_000,
 					max_output_tokens: 32_768,
 					input_modalities: ["text"],
+					reasoning: false,
 				},
 			],
 		});
