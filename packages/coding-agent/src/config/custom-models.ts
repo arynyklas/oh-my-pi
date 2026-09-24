@@ -129,6 +129,9 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
+		// `openai-images` only generates images; a chat kind would hide the model
+		// from the image role and offer it to the chat picker instead.
+		...(resolvedModel.api === "openai-images" ? { kind: "image" as const } : {}),
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),

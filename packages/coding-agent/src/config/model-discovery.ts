@@ -803,17 +803,25 @@ function collectModalities(values: readonly unknown[]): Set<string> {
 
 /**
  * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
- * direct `input` arrays, Synthetic-style top-level `input_modalities`, and
- * OpenRouter-style `architecture.input_modalities`; returns undefined when none
- * is present so the bundled reference (or the `["text"]` default) can take over.
+ * direct `input` arrays, Synthetic-style top-level `input_modalities`,
+ * OpenRouter-style `architecture.input_modalities`, and Envoy AI Gateway-style
+ * `metadata.input_modalities`; returns undefined when none is present so the
+ * bundled reference (or the `["text"]` default) can take over.
  */
 function extractOpenAIModelsListInputCapabilities(item: {
 	input?: unknown;
 	input_modalities?: unknown;
 	architecture?: unknown;
+	metadata?: unknown;
 }): ("text" | "image")[] | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.input, item.input_modalities, architecture?.input_modalities]);
+	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const modalities = collectModalities([
+		item.input,
+		item.input_modalities,
+		architecture?.input_modalities,
+		metadata?.input_modalities,
+	]);
 	if (modalities.size === 0) return undefined;
 	return modalities.has("image") ? ["text", "image"] : ["text"];
 }
@@ -834,9 +842,16 @@ function extractOpenAIModelsListOutputTask(item: {
 	output?: unknown;
 	output_modalities?: unknown;
 	architecture?: unknown;
+	metadata?: unknown;
 }): { kind: KindApiKind; api: Api } | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
-	const modalities = collectModalities([item.output, item.output_modalities, architecture?.output_modalities]);
+	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
+	const modalities = collectModalities([
+		item.output,
+		item.output_modalities,
+		architecture?.output_modalities,
+		metadata?.output_modalities,
+	]);
 	if (modalities.size !== 1) return undefined;
 	const [modality] = modalities;
 	switch (modality) {
@@ -896,6 +911,7 @@ export async function discoverOpenAIModelsList(
 						output?: unknown;
 						output_modalities?: unknown;
 						architecture?: unknown;
+						metadata?: unknown;
 						mode?: unknown;
 					}>;
 				};
@@ -933,6 +949,7 @@ export async function discoverOpenAIModelsList(
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
+			(isRecord(item.metadata) ? toPositiveNumberOrUndefined(item.metadata.context_length) : undefined) ??
 			nativeMetadataForModel?.contextWindow ??
 			reference?.contextWindow ??
 			null;
@@ -1106,6 +1123,9 @@ export async function discoverProxyModels(
 					context_length?: number;
 					reasoning?: unknown;
 					thinking_efforts?: unknown;
+					kind?: unknown;
+					display_name?: unknown;
+					input_modalities?: unknown;
 				}>;
 			};
 		});
@@ -1118,6 +1138,31 @@ export async function discoverProxyModels(
 	for (const item of items) {
 		const id = item.id;
 		if (!id) continue;
+		// An omp auth-gateway tags non-chat runners with `kind` and answers each
+		// on its own `/v1/<task>` route, never on chat. Image rows speak the
+		// OpenAI images wire there whatever upstream API the gateway uses; other
+		// runner kinds have no client mapping here and must not be offered as chat.
+		if (typeof item.kind === "string" && item.kind !== "chat") {
+			if (item.kind !== "image") continue;
+			discovered.push(
+				buildModel({
+					id,
+					name: typeof item.display_name === "string" && item.display_name ? item.display_name : id,
+					api: "openai-images",
+					kind: "image",
+					provider: providerConfig.provider,
+					baseUrl,
+					reasoning: false,
+					input: extractOpenAIModelsListInputCapabilities(item) ?? ["text"],
+					supportsTools: false,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: null,
+					maxTokens: null,
+					headers,
+				} as ModelSpec<Api>),
+			);
+			continue;
+		}
 		const endpoints = item.supported_endpoint_types ?? [];
 		const api: Api | undefined = endpoints.includes("anthropic")
 			? "anthropic-messages"

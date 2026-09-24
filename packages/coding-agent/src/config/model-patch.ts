@@ -35,7 +35,9 @@ export interface ProviderOverride {
  * (docs/models.md): every model under the provider rides the auth-gateway,
  * so the gateway `baseUrl` follows the transport regardless of the model's
  * own API — a model must never end up pi-native on a catalog upstream host
- * (#2555).
+ * (#2555). Image runners never stream over `/v1/pi/stream`; the gateway
+ * answers them on its OpenAI-compatible `/v1/images*` routes, so they get
+ * the gateway's `/v1` root instead.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
@@ -43,7 +45,12 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
 ): string | undefined {
 	if (override?.baseUrl === undefined) return modelBaseUrl;
-	if (override.transport === "pi-native") return override.baseUrl;
+	if (override.transport === "pi-native") {
+		if (modelApi === "openai-images" || modelApi === "openrouter-images") {
+			return `${override.baseUrl.replace(/\/+$/, "")}/v1`;
+		}
+		return override.baseUrl;
+	}
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
 	return override.baseUrl;
 }

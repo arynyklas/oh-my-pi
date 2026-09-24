@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.3.0-fork.2] - 2026-09-24
+
+### Fixed
+
+- Image models from OpenAI-compatible gateways now appear in the `image` role instead of the chat picker: `openai-models-list` discovery reads Envoy AI Gateway (`aigw`) `metadata` modalities, `models.yml` accepts `api: openai-images`, and `discovery: proxy` maps omp auth-gateway `kind: image` rows to image models served through the gateway's `/v1/images/generations`.
+
 ## [18.3.0-fork.1] - 2026-09-24
 
 ### Changed

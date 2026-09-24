@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, generateImage, type Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage as GatewayAuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -16,8 +16,9 @@ import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/ty
 import { discoverOllamaModels, discoveryProbeTimeoutMs } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -2551,6 +2552,85 @@ providers:
 		expect(rosterFor("image")).toEqual(["image-generator"]);
 	});
 
+	test("openai-models-list discovery reads Envoy AI Gateway row metadata", async () => {
+		writeRawModelsJson({
+			aigw: {
+				baseUrl: "http://127.0.0.1:9994/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				// Shape served by aigw: task facts live under `metadata`, not top level.
+				return Response.json({
+					data: [
+						{
+							id: "qwen-image-2.1:t2i",
+							object: "model",
+							metadata: {
+								context_length: null,
+								endpoints: ["/v1/images/generations"],
+								input_modalities: ["text"],
+								output_modalities: ["image"],
+								task: "image_generation",
+							},
+						},
+						{
+							id: "vision-chat:31b",
+							object: "model",
+							metadata: {
+								context_length: 32768,
+								input_modalities: ["text", "image"],
+								output_modalities: ["text"],
+								task: "chat",
+							},
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("aigw", "qwen-image-2.1:t2i")).toMatchObject({
+			kind: "image",
+			api: "openai-images",
+			baseUrl: "http://127.0.0.1:9994/v1",
+		});
+		expect(registry.find("aigw", "vision-chat:31b")).toMatchObject({
+			api: "openai-completions",
+			input: ["text", "image"],
+			contextWindow: 32768,
+		});
+		expect(
+			registry
+				.getAll("image")
+				.filter(model => model.provider === "aigw")
+				.map(model => model.id),
+		).toEqual(["qwen-image-2.1:t2i"]);
+	});
+
+	test("configured openai-images models are image runners, not chat models", async () => {
+		writeRawModelsJson({
+			"local-aigw": {
+				baseUrl: "http://127.0.0.1:9993/v1",
+				api: "openai-completions",
+				auth: "none",
+				models: [{ id: "qwen-image-2.1:t2i", api: "openai-images" }, { id: "chat-model" }],
+			},
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		await registry.refresh();
+		const providerModels = registry.getAll("all").filter(model => model.provider === "local-aigw");
+		expect(providerModels.map(model => [model.id, model.kind ?? "chat"])).toEqual([
+			["qwen-image-2.1:t2i", "image"],
+			["chat-model", "chat"],
+		]);
+	});
+
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
 		// Gateways like opper.ai root their OpenAI-compatible surface at a
 		// versioned path (`https://api.opper.ai/v3/compat`); the default
@@ -2774,6 +2854,69 @@ providers:
 		} finally {
 			await gateway.close();
 			gatewayStorage.close();
+		}
+	});
+
+	test("pi-native gateway image models land in the image role and generate through the gateway", async () => {
+		const upstreamBodies: unknown[] = [];
+		const upstream = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (new URL(req.url).pathname !== "/v1/images/generations") return new Response("nope", { status: 404 });
+				upstreamBodies.push(await req.json());
+				return Response.json({ created: 0, data: [{ b64_json: Buffer.from("png-bytes").toString("base64") }] });
+			},
+		});
+		// What a gateway-side models.yml entry with `api: openai-images` becomes.
+		const imageModel = buildModel({
+			id: "qwen-image-2.1:t2i",
+			name: "Qwen Image 2.1",
+			api: "openai-images",
+			kind: "image",
+			provider: "local-aigw",
+			baseUrl: `${upstream.url.origin}/v1`,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		const gatewayStorage = await GatewayAuthStorage.create(path.join(tempDir, "gateway-auth.db"));
+		gatewayStorage.keys.setRuntime("local-aigw", "upstream-key");
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			storage: gatewayStorage,
+			resolveModel: id => (id === "local-aigw/qwen-image-2.1:t2i" ? imageModel : undefined),
+			listModels: () => [imageModel],
+			version: "test",
+		});
+		try {
+			writeRawModelsJson({
+				"gateway-test": {
+					baseUrl: gateway.url,
+					auth: "none",
+					transport: "pi-native",
+					discovery: { type: "proxy" },
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
+			await registry.refresh();
+			const pool = roleCandidatePool("image", Settings.isolated({}), registry).filter(
+				model => model.provider === "gateway-test",
+			);
+			expect(pool.map(model => model.id)).toEqual(["local-aigw/qwen-image-2.1:t2i"]);
+			// Chat must not offer it: the gateway only answers it on /v1/images*.
+			expect(registry.getAll("chat").some(model => model.id === "local-aigw/qwen-image-2.1:t2i")).toBe(false);
+			const result = await generateImage(pool[0], { prompt: "a red apple" }, { apiKey: "unused" });
+			expect(Buffer.from(result.images[0].data, "base64").toString()).toBe("png-bytes");
+			expect(upstreamBodies).toEqual([
+				expect.objectContaining({ model: "qwen-image-2.1:t2i", prompt: "a red apple" }),
+			]);
+		} finally {
+			await gateway.close();
+			gatewayStorage.close();
+			upstream.stop(true);
 		}
 	});
 

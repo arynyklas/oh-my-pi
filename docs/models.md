@@ -116,8 +116,11 @@ selecting the extended window.
 - `google-vertex`
 - `typesafe`
 - `openrouter-decisions`
+- `openai-images`
 
 `typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+
+`openai-images` is an image-generation API: a model declared with it answers `{baseUrl}/images/generations` (and `/images/edits` for inputs), is catalogued as an `image` model, and is selected by the `image` model role instead of the chat picker. Under `transport: pi-native` it targets the gateway's `/v1` root.
 
 ### Allowed auth/discovery values
 
@@ -347,6 +350,8 @@ derives each model's `api` from the entry's `supported_endpoint_types`:
 - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
 - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
 - otherwise -> falls back to provider-level `api` if set, else dropped
+
+Rows an omp auth-gateway marks with a non-chat `kind` skip that routing: `kind: image` becomes an `openai-images` model in the `image` role (served by the gateway's `/v1/images/generations`); other runner kinds are not offered as chat models.
 
 Provider-level `api` is **optional** with `discovery.type: proxy` because the
 per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
