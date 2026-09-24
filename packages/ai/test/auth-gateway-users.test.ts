@@ -22,9 +22,9 @@ async function addProviderCredential(
 	provider: string,
 	key: string,
 ): Promise<{ id: number; provider: string }> {
-	const [row] = harness.credentialStore.upsertAuthCredentialForProvider(provider, { type: "api_key", key });
+	const [row] = await harness.credentialStore.upsertAuthCredential(provider, { type: "api_key", key });
 	if (!row) throw new Error(`expected ${provider} credential row`);
-	await harness.storage.reload();
+	await harness.storage.credentials.reload();
 	return row;
 }
 
@@ -195,7 +195,7 @@ describe("auth-gateway managed users", () => {
 		await grantModelAccess(harness.accessStore, managed.user.id, pool.id);
 
 		const listUserPoolBindings = spyOn(harness.accessStore, "listUserPoolBindings");
-		const listStoredCredentials = spyOn(harness.storage, "listStoredCredentials");
+		const listStoredCredentials = spyOn(harness.storage.credentials, "list");
 		try {
 			const response = await postChat(harness.handle.url, managed.token.value);
 
@@ -275,7 +275,7 @@ describe("auth-gateway managed users", () => {
 
 		const listAclRules = spyOn(harness.accessStore, "listAclRules");
 		const listUserPoolBindings = spyOn(harness.accessStore, "listUserPoolBindings");
-		const listStoredCredentials = spyOn(harness.storage, "listStoredCredentials");
+		const listStoredCredentials = spyOn(harness.storage.credentials, "list");
 		try {
 			const response = await fetch(`${harness.handle.url}/v1/models`, { headers: jsonHeaders(managed.token.value) });
 			expect(response.status).toBe(200);

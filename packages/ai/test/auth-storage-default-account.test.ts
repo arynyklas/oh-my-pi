@@ -120,7 +120,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		// Baseline: no default configured — distinct sessions spread across both accounts.
 		{
 			const { storage } = createStorage();
-			await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 			const seen = new Set<number>();
 			for (let i = 0; i < 20; i++) {
 				const id = await resolvedCredentialId(storage, `spread-${i}`);
@@ -131,7 +131,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		// With default = b@example.com — every distinct session resolves to B.
 		{
 			const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "b@example.com" } });
-			await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 			const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
 			for (let i = 0; i < 20; i++) {
 				expect(await resolvedCredentialId(storage, `pin-${i}`)).toBe(bId);
@@ -148,7 +148,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		// Without a default, ranking drains toward the lighter account A.
 		{
 			const { store, storage } = createStorage({ withStrategy: true, usageByAccount });
-			await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 			const aId = store.listAuthCredentials(PROVIDER)[0]!.id;
 			expect(await resolvedCredentialId(storage, "rank")).toBe(aId);
 		}
@@ -159,7 +159,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 				usageByAccount,
 				defaultAccounts: { [PROVIDER]: "b@example.com" },
 			});
-			await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 			const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
 			expect(await resolvedCredentialId(storage, "rank-default")).toBe(bId);
 		}
@@ -168,7 +168,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 	test("blocked default falls over to a sibling and reports the fallover exactly once", async () => {
 		registerProvider();
 		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
@@ -177,7 +177,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		expect(await resolvedCredentialId(storage, session)).toBe(aId);
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, session)).toBeUndefined();
 
-		await storage.markUsageLimitReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
+		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
 		expect(await resolvedCredentialId(storage, session)).toBe(bId);
 
 		const fallover = storage.consumeDefaultAccountFallover(PROVIDER, session);
@@ -191,14 +191,14 @@ describe("AuthStorage providers.defaultAccount", () => {
 		registerProvider();
 		setSystemTime(new Date("2025-01-01T00:00:00Z"));
 		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
 		const session = "sticky";
 
 		expect(await resolvedCredentialId(storage, session)).toBe(aId);
-		await storage.markUsageLimitReached(PROVIDER, session, { credentialId: aId, retryAfterMs: 60_000 });
+		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: 60_000 });
 		expect(await resolvedCredentialId(storage, session)).toBe(bId);
 
 		// Advance past the default's block: the same session still stays on the sibling.
@@ -213,7 +213,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		// Two accounts share the matched email → ambiguous → no pin.
 		{
 			const { storage } = createStorage({ defaultAccounts: { [PROVIDER]: "dup@example.com" } });
-			await storage.set(PROVIDER, [
+			await storage.credentials.set(PROVIDER, [
 				oauthCredential("a", { email: "dup@example.com" }),
 				oauthCredential("b", { email: "dup@example.com" }),
 			]);
@@ -228,7 +228,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		// Selector matches nothing → no pin, but the raw selector is still reported.
 		{
 			const { storage } = createStorage({ defaultAccounts: { [PROVIDER]: "nobody@example.com" } });
-			await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 			const seen = new Set<number>();
 			for (let i = 0; i < 20; i++) {
 				const id = await resolvedCredentialId(storage, `miss-${i}`);
@@ -243,7 +243,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 	test("api_key rows pin by #<id> and fall over when the default is blocked", async () => {
 		registerProvider();
 		const { store, storage } = createStorage();
-		await storage.set(PROVIDER, [apiKeyCredential("key-a"), apiKeyCredential("key-b")]);
+		await storage.credentials.set(PROVIDER, [apiKeyCredential("key-a"), apiKeyCredential("key-b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
@@ -251,7 +251,7 @@ describe("AuthStorage providers.defaultAccount", () => {
 		const session = "api-key";
 
 		expect(await resolvedCredentialId(storage, session)).toBe(aId);
-		await storage.markUsageLimitReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
+		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
 		expect(await resolvedCredentialId(storage, session)).toBe(bId);
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, session)?.usedCredentialId).toBe(bId);
 	});

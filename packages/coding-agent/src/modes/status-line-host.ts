@@ -38,11 +38,11 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
 	goalStatusInFooter: session => (session.settings ?? settings).get("goal.statusInFooter"),
 	activeAccount: (session, provider) =>
-		session.modelRegistry?.authStorage?.getOAuthAccountIdentity(provider, session.sessionId),
+		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
 	/**
-	 * `listOAuthAccounts` marks only the session-sticky row `active`, so the
+	 * `oauth.accounts` marks only the session-sticky row `active`, so the
 	 * chip stays hidden until the session has really resolved a credential —
-	 * unlike `getOAuthAccountIdentity`, which falls back to the first stored
+	 * unlike `oauth.identity`, which falls back to the first stored
 	 * row and would name an account no request has used yet. Fallover is
 	 * decided on durable credential ids, not labels: two subscriptions can
 	 * share one email, and the one-shot
@@ -53,7 +53,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		const provider = session.state.model?.provider ?? session.model?.provider;
 		const authStorage = session.modelRegistry?.authStorage;
 		if (!provider || !authStorage) return null;
-		const stored = authStorage.listOAuthAccounts(provider, session.sessionId);
+		const stored = authStorage.oauth.accounts(provider, session.sessionId);
 		const active = stored.find(account => account.active);
 		if (!active) return null;
 		const label = formatAccountLabelAmong(active, stored);
@@ -71,7 +71,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		// implement the accessor.
 		const advisors: { slug: string; label: string; fellBack: boolean }[] = [];
 		for (const binding of session.getAdvisorAccountBindings?.() ?? []) {
-			const advisorStored = authStorage.listOAuthAccounts(binding.provider, binding.providerSessionId);
+			const advisorStored = authStorage.oauth.accounts(binding.provider, binding.providerSessionId);
 			const advisorAccount = advisorStored.find(account => account.active);
 			if (!advisorAccount) continue;
 			const advisorLabel = formatAccountLabelAmong(advisorAccount, advisorStored);

@@ -9,7 +9,7 @@
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
-import type { AuthCredentialSelectionPolicy, AuthStorage } from "../auth-storage";
+import type { AuthApiKeyOptions, AuthCredentialSelectionPolicy, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -111,7 +111,7 @@ export function resolveGatewayAccount(
 	sessionId: string,
 	apiKey: string,
 ): string {
-	const identity = storage.getOAuthAccountIdentity(provider, sessionId);
+	const identity = storage.oauth.identity(provider, sessionId);
 	if (identity) {
 		return `oauth:${JSON.stringify([
 			identity.accountId ?? "",
@@ -147,8 +147,7 @@ export async function resolveGatewayApiKey(
 	if (scoped.grant.keyless) return GATEWAY_KEYLESS_API_KEY;
 	try {
 		const resolved = await bootOpts.storage.resolveApiKeySelection(model.provider, scoped.sessionId, {
-			modelId: model.id,
-			signal,
+			...modelKeyOptions(model, signal),
 			selection: scoped.grant.selection,
 		});
 		if (resolved.ok) return resolved.credential.apiKey;
@@ -178,14 +177,14 @@ export async function resolveGatewayApiKey(
  * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
  * `resource_exhausted`, …). The two cases need different storage actions:
  *
- * - **usage-limit** → {@link AuthStorage.markUsageLimitReached}. Marks just
+ * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
  *   the current session's credential as temporarily blocked (honouring
  *   `retry-after` / `resets_at` hints when present) and returns `true` only
  *   when a sibling credential is still available. Burning the credential
  *   with `invalidateCredentialMatching` here would orphan accounts whose
  *   reset window is several hours away — exactly the bug this helper exists
  *   to avoid.
- * - **auth-failure** → {@link AuthStorage.invalidateCredentialMatching}.
+ * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
  *   Suspect/delete the row so it doesn't get re-picked next request.
  *
  * In both branches we return the next `getApiKey` result (sticky on the
@@ -209,7 +208,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 		const retryAfterMs = extractProviderRetryHint(provider, message);
-		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
@@ -229,21 +228,28 @@ async function refreshGatewayApiKeyAfterAuthError(
 		});
 		if (!switched) return undefined;
 		const rotated = await storage.resolveApiKeySelection(provider, sessionId, {
-			modelId: model.id,
-			signal,
+			...modelKeyOptions(model, signal),
 			selection,
 		});
 		return rotated.ok ? rotated.credential.apiKey : undefined;
 	}
-	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal, selection });
+	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal, selection });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
 		format,
 		provider,
 		peer,
 		error: message,
 	});
-	const rotated = await storage.resolveApiKeySelection(provider, sessionId, { modelId: model.id, signal, selection });
+	const rotated = await storage.resolveApiKeySelection(provider, sessionId, {
+		...modelKeyOptions(model, signal),
+		selection,
+	});
 	return rotated.ok ? rotated.credential.apiKey : undefined;
+}
+
+/** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
+function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOptions {
+	return { modelId: model.id, accountIds: model.accountAccess && Object.keys(model.accountAccess), signal };
 }
 
 /**
@@ -288,8 +294,7 @@ export function buildGatewayApiKeyResolver(
 		if (grant === undefined || grant.keyless) return undefined;
 		if (!lastChance) {
 			const refreshed = await storage.resolveApiKeySelection(model.provider, scopedSessionId, {
-				modelId: model.id,
-				signal: sig,
+				...modelKeyOptions(model, sig),
 				forceRefresh: true,
 				selection: grant.selection,
 			});
@@ -318,7 +323,7 @@ export function buildGatewayApiKeyResolver(
 
 /**
  * Attribute one settled upstream request to the originating client via the
- * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
+ * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
  * by the remote store). Error/aborted turns still record — the provider
  * billed whatever tokens the partial turn consumed; zero-usage results
  * (pre-flight failures) are skipped. `at` defaults to now.
@@ -331,7 +336,7 @@ export function recordGatewayUsage(
 	at?: number,
 ): void {
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.recordObservedUsage({
+	storage.usage.observe({
 		provider: model.provider,
 		model: model.id,
 		at,

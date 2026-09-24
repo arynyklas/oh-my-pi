@@ -129,7 +129,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("ordered allow-list limits OAuth and stored API-key selection and empty pools do not fall through", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("oauth-a"),
 			oauthCredential("oauth-b"),
 			apiKeyCredential("login-key", "login"),
@@ -172,9 +172,8 @@ describe("AuthStorage credential selection policy", () => {
 			const emptyStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 			const emptyStorage = new AuthStorage(emptyStore);
 			try {
-				emptyStorage.setRuntimeApiKey("openai", "runtime-key");
-				emptyStorage.setConfigApiKey("openai", "config-key");
-				emptyStorage.setFallbackResolver(() => "fallback-key");
+				emptyStorage.keys.setRuntime("openai", "runtime-key");
+				emptyStorage.keys.setConfig("openai", "config-key");
 				await expect(
 					emptyStorage.resolveApiKeySelection("openai", "empty", {
 						selection: policy("failover", []),
@@ -188,7 +187,10 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("mixed eligible pools try API keys before reporting the pool exhausted", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("oauth-first"), apiKeyCredential("api-second", "login")]);
+		await storage.credentials.set(CUSTOM_PROVIDER, [
+			oauthCredential("oauth-first"),
+			apiKeyCredential("api-second", "login"),
+		]);
 		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 		const mixed = policy("failover", [oauthRow.id, apiRow.id], "mixed-pool");
@@ -199,7 +201,7 @@ describe("AuthStorage credential selection policy", () => {
 			ok: true,
 			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
 		});
-		await storage.markUsageLimitReached(CUSTOM_PROVIDER, "mixed", { retryAfterMs: 30_000, selection: mixed });
+		await storage.limits.markReached(CUSTOM_PROVIDER, "mixed", { retryAfterMs: 30_000, selection: mixed });
 		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed", { selection: mixed })).resolves.toEqual({
 			ok: true,
 			credential: { apiKey: "api-second", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
@@ -207,7 +209,10 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("explicit mixed failover honors API-key-before-OAuth pool order", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("fallback"), apiKeyCredential("api-primary", "login")]);
+		await storage.credentials.set(CUSTOM_PROVIDER, [
+			oauthCredential("fallback"),
+			apiKeyCredential("api-primary", "login"),
+		]);
 		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 
@@ -222,7 +227,10 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("explicit mixed round-robin advances across credential types and keeps session stickiness", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("oauth-rr"), apiKeyCredential("api-rr", "login")]);
+		await storage.credentials.set(CUSTOM_PROVIDER, [
+			oauthCredential("oauth-rr"),
+			apiKeyCredential("api-rr", "login"),
+		]);
 		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 		const mixed = policy("round-robin", [apiRow.id, oauthRow.id], "mixed-rr");
@@ -237,7 +245,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("explicit mixed usage-limit marks cross-type availability", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("oauth-limited"),
 			apiKeyCredential("api-after-oauth", "login"),
 		]);
@@ -252,7 +260,7 @@ describe("AuthStorage credential selection policy", () => {
 			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
 		});
 		await expect(
-			storage.markUsageLimitReached(CUSTOM_PROVIDER, "mixed-limit", {
+			storage.limits.markReached(CUSTOM_PROVIDER, "mixed-limit", {
 				apiKey: "access-oauth-limited",
 				selection: mixed,
 			}),
@@ -275,7 +283,7 @@ describe("AuthStorage credential selection policy", () => {
 		vi.useFakeTimers();
 		setSystemTime(new Date(now));
 		try {
-			await storage.set(CUSTOM_PROVIDER, [
+			await storage.credentials.set(CUSTOM_PROVIDER, [
 				oauthCredential("high", { accountId: "high" }),
 				oauthCredential("low", { accountId: "low" }),
 			]);
@@ -300,7 +308,7 @@ describe("AuthStorage credential selection policy", () => {
 				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-b", { selection: leastUsed }),
 			).resolves.toMatchObject({ ok: true, credential: { credentialId: highRow.id } });
 
-			await storage.markUsageLimitReached(CUSTOM_PROVIDER, "least-a", {
+			await storage.limits.markReached(CUSTOM_PROVIDER, "least-a", {
 				retryAfterMs: 30_000,
 				selection: leastUsed,
 			});
@@ -315,7 +323,10 @@ describe("AuthStorage credential selection policy", () => {
 
 	test("least-used falls back to unified pool order when OAuth has no usage signal", async () => {
 		fetchUsageOverride = async () => null;
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("no-usage"), apiKeyCredential("api-no-usage", "login")]);
+		await storage.credentials.set(CUSTOM_PROVIDER, [
+			oauthCredential("no-usage"),
+			apiKeyCredential("api-no-usage", "login"),
+		]);
 		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
 
@@ -339,7 +350,7 @@ describe("AuthStorage credential selection policy", () => {
 		vi.useFakeTimers();
 		setSystemTime(new Date(now));
 		try {
-			await storage.set(CUSTOM_PROVIDER, [
+			await storage.credentials.set(CUSTOM_PROVIDER, [
 				oauthCredential("stale-a", { accountId: "stale-a" }),
 				oauthCredential("stale-b", { accountId: "stale-b" }),
 			]);
@@ -362,17 +373,17 @@ describe("AuthStorage credential selection policy", () => {
 				return usageReport(params.credential.accountId ?? "unknown", 0);
 			};
 
-			const markPromise = storage.markUsageLimitReached(CUSTOM_PROVIDER, "stable-id", {
+			const markPromise = storage.limits.markReached(CUSTOM_PROVIDER, "stable-id", {
 				apiKey: "access-stale-a",
 				selection: selected,
 			});
 			await usageStarted.promise;
 			store.deleteAuthCredential(rowA.id, "simulated external deletion");
-			await storage.reload();
+			await storage.credentials.reload();
 			releaseUsage.resolve();
 			await markPromise;
 
-			expect(storage.listCredentialBlocks([rowB.id])).toEqual([]);
+			expect(storage.blocks.list([rowB.id])).toEqual([]);
 			await expect(
 				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "stable-id-replacement", {
 					selection: policy("failover", [rowB.id], "stable-id-replacement"),
@@ -385,26 +396,26 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("OAuth access helpers honor selection policy credential ids", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("oauth-a"), oauthCredential("oauth-b")]);
+		await storage.credentials.set(CUSTOM_PROVIDER, [oauthCredential("oauth-a"), oauthCredential("oauth-b")]);
 		const [firstRow, secondRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 		if (!firstRow || !secondRow) throw new Error("expected oauth rows");
 		const selected = policy("failover", [secondRow.id], "oauth-helper-pool");
 
-		const accesses = await storage.getOAuthAccesses(CUSTOM_PROVIDER, { selection: selected });
+		const accesses = await storage.oauth.accessAll(CUSTOM_PROVIDER, { selection: selected });
 		expect(accesses.map(access => access.credentialId)).toEqual([secondRow.id]);
-		await expect(storage.getOAuthAccessAt(CUSTOM_PROVIDER, 0, { selection: selected })).resolves.toMatchObject({
+		await expect(storage.oauth.accessAt(CUSTOM_PROVIDER, 0, { selection: selected })).resolves.toMatchObject({
 			ok: true,
 			credentialId: secondRow.id,
 			accessToken: "access-oauth-b",
 		});
-		await expect(storage.getOAuthAccessAt(CUSTOM_PROVIDER, 1, { selection: selected })).resolves.toBeUndefined();
+		await expect(storage.oauth.accessAt(CUSTOM_PROVIDER, 1, { selection: selected })).resolves.toBeUndefined();
 	});
 
 	test("omitting policy preserves legacy precedence and session stickiness", async () => {
-		await storage.set(CUSTOM_PROVIDER, [oauthCredential("one"), oauthCredential("two")]);
-		storage.setRuntimeApiKey(CUSTOM_PROVIDER, "runtime-key");
+		await storage.credentials.set(CUSTOM_PROVIDER, [oauthCredential("one"), oauthCredential("two")]);
+		storage.keys.setRuntime(CUSTOM_PROVIDER, "runtime-key");
 		expect(await storage.getApiKey(CUSTOM_PROVIDER, "legacy-runtime")).toBe("runtime-key");
-		storage.removeRuntimeApiKey(CUSTOM_PROVIDER);
+		storage.keys.removeRuntime(CUSTOM_PROVIDER);
 
 		const first = await storage.getApiKey(CUSTOM_PROVIDER, "legacy-sticky");
 		const second = await storage.getApiKey(CUSTOM_PROVIDER, "legacy-sticky");
@@ -412,13 +423,12 @@ describe("AuthStorage credential selection policy", () => {
 		expect(second).toBe(first);
 	});
 
-	test("omitting policy stops at unresolved stored login API keys before env or fallback", async () => {
+	test("omitting policy stops at unresolved stored login API keys before env", async () => {
 		await withEnv({ OPENAI_API_KEY: "env-key" }, async () => {
 			const unresolvedStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 			const unresolvedStorage = new AuthStorage(unresolvedStore, { configValueResolver: async () => undefined });
 			try {
-				await unresolvedStorage.set("openai", [apiKeyCredential("missing-secret", "login")]);
-				unresolvedStorage.setFallbackResolver(() => "fallback-key");
+				await unresolvedStorage.credentials.set("openai", [apiKeyCredential("missing-secret", "login")]);
 				await expect(unresolvedStorage.resolveApiKeySelection("openai", "legacy")).resolves.toEqual({
 					ok: false,
 					reason: "no_credential",
@@ -432,7 +442,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("sticky-session, round-robin, least-used, and failover apply strategy semantics within eligible rows", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("low", { accountId: "low" }),
 			oauthCredential("high", { accountId: "high" }),
 			oauthCredential("outside", { accountId: "outside" }),
@@ -465,7 +475,7 @@ describe("AuthStorage credential selection policy", () => {
 		const failover = policy("failover", [highRow.id, lowRow.id], "failover-pool");
 		const failoverFirst = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "failover", { selection: failover });
 		expect(failoverFirst.ok && failoverFirst.credential.credentialId).toBe(highRow.id);
-		const mark = await storage.markUsageLimitReached(CUSTOM_PROVIDER, "failover", {
+		const mark = await storage.limits.markReached(CUSTOM_PROVIDER, "failover", {
 			retryAfterMs: 30_000,
 			selection: failover,
 		});
@@ -479,7 +489,10 @@ describe("AuthStorage credential selection policy", () => {
 		vi.useFakeTimers();
 		setSystemTime(new Date(now));
 		try {
-			await storage.set(CUSTOM_PROVIDER, [apiKeyCredential("api-a", "login"), apiKeyCredential("api-b", "login")]);
+			await storage.credentials.set(CUSTOM_PROVIDER, [
+				apiKeyCredential("api-a", "login"),
+				apiKeyCredential("api-b", "login"),
+			]);
 			const [firstRow, secondRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
 			if (!firstRow || !secondRow) throw new Error("expected seeded API-key rows");
 			const failover = policy("failover", [firstRow.id, secondRow.id], "api-key-failover-pool");
@@ -488,7 +501,7 @@ describe("AuthStorage credential selection policy", () => {
 				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
 			).resolves.toMatchObject({ ok: true, credential: { credentialId: firstRow.id, apiKey: "api-a" } });
 			await expect(
-				storage.markUsageLimitReached(CUSTOM_PROVIDER, "api-failover", {
+				storage.limits.markReached(CUSTOM_PROVIDER, "api-failover", {
 					retryAfterMs: 1_000,
 					selection: failover,
 				}),
@@ -509,7 +522,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("in-memory stickies keep the recorded credential id after reload reindexes rows", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			apiKeyCredential("api-a", "login"),
 			apiKeyCredential("api-b", "login"),
 			apiKeyCredential("api-c", "login"),
@@ -524,7 +537,7 @@ describe("AuthStorage credential selection policy", () => {
 			ok: true,
 			credential: { credentialId: firstRow.id, apiKey: "api-a" },
 		});
-		await storage.markUsageLimitReached(CUSTOM_PROVIDER, "rr-reindex", { retryAfterMs: 30_000, selection: rr });
+		await storage.limits.markReached(CUSTOM_PROVIDER, "rr-reindex", { retryAfterMs: 30_000, selection: rr });
 		await expect(
 			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
 		).resolves.toMatchObject({
@@ -533,7 +546,7 @@ describe("AuthStorage credential selection policy", () => {
 		});
 
 		store.deleteAuthCredential(firstRow.id, "simulated external deletion");
-		await storage.reload();
+		await storage.credentials.reload();
 
 		await expect(
 			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
@@ -544,7 +557,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("blocked and invalid selected credentials fail over only within the eligible pool", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("first"),
 			oauthCredential("second"),
 			oauthCredential("outside"),
@@ -559,7 +572,7 @@ describe("AuthStorage credential selection policy", () => {
 			ok: true,
 			credential: { credentialId: firstRow.id },
 		});
-		await storage.markUsageLimitReached(CUSTOM_PROVIDER, "blocked", { retryAfterMs: 30_000, selection: failover });
+		await storage.limits.markReached(CUSTOM_PROVIDER, "blocked", { retryAfterMs: 30_000, selection: failover });
 		await expect(
 			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover }),
 		).resolves.toMatchObject({
@@ -567,7 +580,7 @@ describe("AuthStorage credential selection policy", () => {
 			credential: { credentialId: secondRow.id },
 		});
 		const blockedBefore = Date.now();
-		const finalMark = await storage.markUsageLimitReached(CUSTOM_PROVIDER, "blocked", {
+		const finalMark = await storage.limits.markReached(CUSTOM_PROVIDER, "blocked", {
 			retryAfterMs: 45_000,
 			selection: failover,
 		});
@@ -582,7 +595,7 @@ describe("AuthStorage credential selection policy", () => {
 			await storage.getApiKey(CUSTOM_PROVIDER, "outside-ok", { selection: policy("failover", [outsideRow.id]) }),
 		).toBe("access-outside");
 
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("invalid", { refresh: "refresh-invalid", expires: Date.now() - HOUR_MS }),
 			oauthCredential("valid"),
 			oauthCredential("invalid-outside"),
@@ -597,7 +610,7 @@ describe("AuthStorage credential selection policy", () => {
 	});
 
 	test("checkCredentials only probes credential ids requested by the caller", async () => {
-		await storage.set(CUSTOM_PROVIDER, [
+		await storage.credentials.set(CUSTOM_PROVIDER, [
 			oauthCredential("check-a"),
 			apiKeyCredential("check-b"),
 			oauthCredential("check-c"),
@@ -610,7 +623,7 @@ describe("AuthStorage credential selection policy", () => {
 			return { ok: true };
 		};
 
-		const results = await storage.checkCredentials({ credentialIds: [target.id], completionProbe });
+		const results = await storage.health.check({ credentialIds: [target.id], completionProbe });
 		expect(results.map(result => result.id)).toEqual([target.id]);
 		expect(probed).toEqual([target.id]);
 		expect(results[0]?.completion).toEqual({ ok: true });

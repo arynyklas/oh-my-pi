@@ -113,9 +113,8 @@ const LEADING_SGR_MOUSE_EVENT_PATTERN = /^\x1b\[<\d+;\d+;\d+[Mm]/;
  * reported as already authenticated.
  */
 const NO_LOCAL_AUTH: OAuthSelectorAuthSource = {
-	has: () => false,
-	hasAuth: () => false,
-	getCredentialOrigin: () => undefined,
+	credentials: { has: () => false },
+	keys: { source: () => undefined },
 };
 const NAME_HELP = "Lowercase letters, digits, _ and -; must start with a letter; 1–64 characters.";
 const DESCRIPTION_HELP = "Human-readable purpose; blank leaves it unset.";

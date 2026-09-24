@@ -318,7 +318,7 @@ describe("auth-gateway audit", () => {
 		expect(usage.userId).toBe(user.user.id);
 		expect(expectObject(usage.totals).requests).toBeGreaterThanOrEqual(1);
 
-		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
+		const listStoredSpy = vi.spyOn(harness.storage.credentials, "list");
 
 		response = await fetch(`${harness.handle.url}/v1/credentials/check`, { headers: jsonHeaders(user.token.value) });
 		expect(response.status).toBe(200);
@@ -360,13 +360,13 @@ describe("auth-gateway audit", () => {
 		});
 		const [staleRow] = harness.credentialStore.listAuthCredentials("mock");
 		if (!staleRow) throw new Error("expected stale candidate row");
-		harness.storage.upsertCredential("other-provider", { type: "api_key", key: "unrelated-live-secret" });
+		harness.storage.credentials.upsert("other-provider", { type: "api_key", key: "unrelated-live-secret" });
 		const user = harness.accessStore.createUser({ name: "stalecheckuser" });
 		const pool = harness.accessStore.createPool({ name: "stalecheckpool" });
 		harness.accessStore.addPoolCredential(pool.id, staleRow.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
-		expect(harness.storage.disableCredentialById(staleRow.id, "disabled by test")).toBe(true);
-		const listStoredSpy = vi.spyOn(harness.storage, "listStoredCredentials");
+		expect(await harness.storage.credentials.disable(staleRow.id, "disabled by test")).toBe(true);
+		const listStoredSpy = vi.spyOn(harness.storage.credentials, "list");
 
 		const response = await fetch(`${harness.handle.url}/v1/credentials/check`, {
 			headers: jsonHeaders(user.token.value),

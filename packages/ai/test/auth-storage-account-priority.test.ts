@@ -122,7 +122,7 @@ describe("AuthStorage account priority", () => {
 			defaultAccounts: { [PROVIDER]: "b@example.com" },
 			usageByAccount,
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
 
 		expect(await resolvedCredentialId(storage, "plan-free", PLAN_FREE_MODEL)).toBe(bId);
@@ -133,7 +133,7 @@ describe("AuthStorage account priority", () => {
 		const { store, storage } = createStorage({
 			accountPriorities: { [PROVIDER]: ["b@example.com", "a@example.com"] },
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
@@ -143,7 +143,7 @@ describe("AuthStorage account priority", () => {
 
 		const session = "priority";
 		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(bId);
-		await storage.markUsageLimitReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
+		await storage.limits.markReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
 		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(aId);
 	});
 
@@ -151,14 +151,14 @@ describe("AuthStorage account priority", () => {
 		const { store, storage } = createStorage({
 			accountPriorities: { [PROVIDER]: ["b@example.com", "a@example.com"] },
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
 		const session = "journal";
 
 		await resolvedCredentialId(storage, session, PLAN_GATED_MODEL);
-		await storage.markUsageLimitReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
+		await storage.limits.markReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
 		await resolvedCredentialId(storage, session, PLAN_GATED_MODEL);
 
 		const events = storage.listAccountSelectionEvents({ sessionId: session });
@@ -176,7 +176,7 @@ describe("AuthStorage account priority", () => {
 		const { store, storage } = createStorage({
 			accountPriorities: { [PROVIDER]: ["a@example.com", "b@example.com"] },
 		});
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
@@ -200,7 +200,7 @@ describe("AuthStorage account priority", () => {
 	// session that had already bound a credential.
 	test("changing the default mid-session rebinds an already-bound advisor session", async () => {
 		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
-		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
 		const rows = store.listAuthCredentials(PROVIDER);
 		const aId = rows[0]!.id;
 		const bId = rows[1]!.id;
@@ -218,7 +218,7 @@ describe("AuthStorage account priority", () => {
 
 	test("describeAccountSelector falls back to #<id> when an identity is shared", async () => {
 		const { store, storage } = createStorage();
-		await storage.set(PROVIDER, [
+		await storage.credentials.set(PROVIDER, [
 			oauthCredential("team", { email: "team@example.com", accountId: "acct-1", orgId: "org-1" }),
 			oauthCredential("team2", { email: "team@example.com", accountId: "acct-2", orgId: "org-2" }),
 			oauthCredential("solo"),

@@ -16,7 +16,7 @@ describe("auth-gateway graceful shutdown", () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-drain-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		storage.setRuntimeApiKey("openrouter", "test-key");
+		storage.keys.setRuntime("openrouter", "test-key");
 		const mock = createMockModel({ provider: "openrouter", id: "openrouter/drain-model" });
 
 		// Gate the mock response: the handler parks until the test releases it,

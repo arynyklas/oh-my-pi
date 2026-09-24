@@ -18,6 +18,7 @@ packages/natives/native/embedded-addons.*.tar.gz
 
 # Environment
 .env
+.venv
 
 # Editors
 .vscode/

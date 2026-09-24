@@ -93,14 +93,14 @@ async function handleAdmin(
 			},
 			counts: {
 				...counts,
-				credentials: storage.listStoredCredentials().length,
+				credentials: storage.credentials.list().length,
 			},
 		};
 		return json(200, { status });
 	}
 	if (parts[0] !== "credentials") throw new ManagementHttpError(404, "not_found", "management route not found");
 	if (parts.length === 1 && req.method === "GET") {
-		return json(200, { credentials: storage.listStoredCredentials().map(credentialSummaryFromStored) });
+		return json(200, { credentials: storage.credentials.list().map(credentialSummaryFromStored) });
 	}
 	if (parts.length === 1 && req.method === "POST") {
 		const parsed = await readCredentialUploadBody(req);
@@ -119,7 +119,7 @@ async function handleAdmin(
 			throw new ManagementHttpError(400, "credential_not_refreshable", "API-key credentials cannot be refreshed");
 		}
 		try {
-			const refreshed = await storage.refreshCredentialById(credentialId, req.signal);
+			const refreshed = await storage.oauth.refresh(credentialId, req.signal);
 			return json(200, { credential: credentialSummaryFromSnapshot(refreshed) });
 		} catch {
 			return managementError(502, "credential_refresh_failed", "Credential refresh failed");
@@ -137,7 +137,7 @@ async function handleAdmin(
 			);
 		}
 		try {
-			const outcome = await storage.redeemResetCredit({
+			const outcome = await storage.resets.redeem({
 				target: { provider: row.provider, credentialId },
 				signal: req.signal,
 			});
@@ -161,7 +161,7 @@ async function handleAdmin(
 			);
 		}
 		try {
-			const removed = await storage.removeCredential(row.provider, credentialId);
+			const removed = await storage.credentials.removeById(row.provider, credentialId);
 			if (!removed) throw new ManagementHttpError(404, "not_found", "credential not found");
 			return new Response(null, { status: 204 });
 		} catch (error) {

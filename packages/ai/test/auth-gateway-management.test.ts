@@ -19,13 +19,9 @@ type RemoteUpsertStore = GatewayHarness["credentialStore"] & {
 	upsertAuthCredentialRemote?: (provider: string, credential: AuthCredential) => Promise<StoredAuthCredential[]>;
 };
 
-type RefreshPatchedStorage = GatewayHarness["storage"] & {
-	refreshCredentialById: GatewayHarness["storage"]["refreshCredentialById"];
-};
+type RefreshPatchedStorage = Pick<GatewayHarness["storage"], "oauth">;
 
-type ResetPatchedStorage = GatewayHarness["storage"] & {
-	redeemResetCredit(options: { target: ResetCreditTarget }): Promise<ResetCreditRedeemOutcome>;
-};
+type ResetPatchedStorage = Pick<GatewayHarness["storage"], "resets">;
 
 async function requestJson(
 	baseUrl: string,
@@ -225,7 +221,7 @@ describe("auth-gateway management HTTP", () => {
 	test("implements neutral pool CRUD, mixed-provider members, and ordered user bindings over HTTP", async () => {
 		harness = await createGatewayHarness({ credentials: [{ type: "api_key", key: "mock-key" }] });
 		const [credential] = harness.credentialStore.listAuthCredentials("mock");
-		const [otherProviderCredential] = harness.credentialStore.upsertAuthCredentialForProvider("other", {
+		const [otherProviderCredential] = await harness.credentialStore.upsertAuthCredential("other", {
 			type: "api_key",
 			key: "other-key",
 		});
@@ -424,9 +420,13 @@ describe("auth-gateway management HTTP", () => {
 		const currentHarness = harness;
 		if (!currentHarness) throw new Error("expected gateway harness");
 		const remoteStore = currentHarness.credentialStore as RemoteUpsertStore;
-		remoteStore.upsertAuthCredentialRemote = async (provider, credential) => {
+		// The broker-delegated writer is now the store's `upsertAuthCredential`;
+		// capture the original before patching so the hook delegates instead of
+		// recursing into itself.
+		const upsertLocally = remoteStore.upsertAuthCredential.bind(remoteStore);
+		remoteStore.upsertAuthCredential = async (provider, credential) => {
 			uploadCalled = true;
-			return currentHarness.credentialStore.upsertAuthCredentialForProvider(provider, credential);
+			return upsertLocally(provider, credential);
 		};
 		response = await requestJson(currentHarness.handle.url, "POST", "/v1/admin/credentials", admin.token.value, {
 			provider: "mock",
@@ -438,7 +438,7 @@ describe("auth-gateway management HTTP", () => {
 		expect(body.credentials).toBeArray();
 		expect(JSON.stringify(body)).not.toContain("uploaded-api-key-secret");
 
-		remoteStore.upsertAuthCredentialRemote = async () => {
+		remoteStore.upsertAuthCredential = async () => {
 			throw new Error("uploaded-api-key-secret should not leak");
 		};
 		response = await requestJson(harness.handle.url, "POST", "/v1/admin/credentials", admin.token.value, {
@@ -463,7 +463,7 @@ describe("auth-gateway management HTTP", () => {
 		const apiKeyRow = rows.find(row => row.credential.type === "api_key");
 		if (!oauthRow || !apiKeyRow) throw new Error("expected seeded credential rows");
 		const refreshStorage = harness.storage as RefreshPatchedStorage;
-		refreshStorage.refreshCredentialById = async id => ({
+		refreshStorage.oauth.refresh = async id => ({
 			id,
 			provider: "mock",
 			identityKey: "mock:alice@example.com",
@@ -554,7 +554,7 @@ describe("auth-gateway management HTTP", () => {
 
 	test("redeems a saved reset for one Codex OAuth credential and preserves business outcomes", async () => {
 		harness = await createGatewayHarness();
-		const [credential] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
+		const [credential] = await harness.credentialStore.upsertAuthCredential("openai-codex", {
 			type: "oauth",
 			access: "codex-access",
 			refresh: "codex-refresh",
@@ -563,7 +563,7 @@ describe("auth-gateway management HTTP", () => {
 			accountId: "acct-codex",
 		});
 		if (!credential) throw new Error("expected Codex credential");
-		await harness.storage.reload();
+		await harness.storage.credentials.reload();
 		let redeemedTarget: ResetCreditTarget | undefined;
 		let outcome: ResetCreditRedeemOutcome = {
 			ok: true,
@@ -573,7 +573,7 @@ describe("auth-gateway management HTTP", () => {
 			creditId: "credit-1",
 		};
 		const storage = harness.storage as ResetPatchedStorage;
-		storage.redeemResetCredit = async options => {
+		storage.resets.redeem = async options => {
 			redeemedTarget = options.target;
 			return outcome;
 		};
@@ -603,19 +603,19 @@ describe("auth-gateway management HTTP", () => {
 
 	test("rejects reset activation for non-Codex and API-key credentials", async () => {
 		harness = await createGatewayHarness();
-		const [anthropic] = harness.credentialStore.upsertAuthCredentialForProvider("anthropic", {
+		const [anthropic] = await harness.credentialStore.upsertAuthCredential("anthropic", {
 			type: "oauth",
 			access: "anthropic-access",
 			refresh: "anthropic-refresh",
 			expires: 1_900_000_000_000,
 			email: "anthropic@example.com",
 		});
-		const [apiKey] = harness.credentialStore.upsertAuthCredentialForProvider("openai-codex", {
+		const [apiKey] = await harness.credentialStore.upsertAuthCredential("openai-codex", {
 			type: "api_key",
 			key: "codex-key",
 		});
 		if (!anthropic || !apiKey) throw new Error("expected reset-ineligible credentials");
-		await harness.storage.reload();
+		await harness.storage.credentials.reload();
 
 		for (const credentialId of [anthropic.id, apiKey.id]) {
 			const response = await requestJson(
@@ -680,10 +680,12 @@ describe("auth-gateway management HTTP", () => {
 			]);
 		}
 
-		const otherProviderRow = harness.credentialStore.upsertAuthCredentialForProvider("other", {
-			type: "api_key",
-			key: "wrong-provider-secret",
-		})[0];
+		const otherProviderRow = (
+			await harness.credentialStore.upsertAuthCredential("other", {
+				type: "api_key",
+				key: "wrong-provider-secret",
+			})
+		)[0];
 		if (!otherProviderRow) throw new Error("expected other provider credential row");
 		harness.accessStore.addPoolCredential(pool.id, otherProviderRow.id);
 		response = await requestJson(harness.handle.url, "PATCH", `/v1/pools/${pool.id}/members`, admin.token.value, {

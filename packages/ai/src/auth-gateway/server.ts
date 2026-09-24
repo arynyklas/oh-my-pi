@@ -179,6 +179,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
+	if (options.userProfileId !== undefined) opts.userProfileId = options.userProfileId;
 	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
@@ -328,7 +329,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 		const retryAfterMs = extractProviderRetryHint(provider, message);
-		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
@@ -361,7 +362,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		onCredential(next.credential);
 		return next.apiKey;
 	}
-	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal, selection });
+	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal, selection });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
 		format,
 		provider,
@@ -518,7 +519,7 @@ function poolFailureResponse(
 }
 
 function credentialIdsForProvider(storage: AuthStorage, provider: string): Set<number> {
-	return new Set(storage.listStoredCredentials(provider).map(row => row.id));
+	return new Set(storage.credentials.list(provider).map(row => row.id));
 }
 
 const BUNDLED_MODEL_PROVIDERS = new Set<string>(getBundledProviders());
@@ -1708,7 +1709,7 @@ async function handleUsage(
 			},
 		});
 	}
-	const reports = (await storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
+	const reports = (await storage.usage.reports?.({ signal: req.signal })) ?? [];
 	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
 	return json(200, {
 		generatedAt: Date.now(),
@@ -1784,7 +1785,7 @@ async function handleCredentialsCheck(
 			for (const credentialId of poolSelection.credentialIds) eligible.add(credentialId);
 		}
 
-		const credentials = await storage.checkCredentials({ signal, credentialIds: [...eligible] });
+		const credentials = await storage.health.check({ signal, credentialIds: [...eligible] });
 		const filtered = credentials
 			.slice()
 			.sort((a, b) => a.provider.localeCompare(b.provider) || a.type.localeCompare(b.type) || a.id - b.id);
@@ -1811,7 +1812,7 @@ async function handleCredentialsCheck(
 			}),
 		});
 	}
-	const credentials = await storage.checkCredentials({ signal });
+	const credentials = await storage.health.check({ signal });
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 

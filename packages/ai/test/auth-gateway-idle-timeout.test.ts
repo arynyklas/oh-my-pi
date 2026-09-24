@@ -23,7 +23,7 @@ describe("auth-gateway quiet inference", () => {
 			registerMockApi();
 			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-idle-"));
 			const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-			storage.setRuntimeApiKey("openrouter", "test-key");
+			storage.keys.setRuntime("openrouter", "test-key");
 			const mock = createMockModel({ provider: "openrouter", id: "quiet-model" });
 			mock.push({ delayMs: 6000, content: ["completed after silence"], stopReason: "stop" });
 			const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(options => {

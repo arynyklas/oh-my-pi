@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.3.0-fork.1] - 2026-09-24
+
+### Changed
+
+- Re-based the fork onto upstream v18.3.0. The fork's default-account, account-priority, account-selection journal, and gateway pool-selection features now run on upstream's namespaced `AuthStorage` alongside upstream's per-account OAuth policies; `omp usage` shows both the configured default account and the policy line.
+
+### Fixed
+
+- Models discovered from an omp auth gateway (`discovery: proxy`) now offer the served model's own reasoning levels, so Claude Opus 4.7+ exposes `xhigh`/`max` instead of the generic `minimal`–`high` ladder.
+
 ## [18.2.9-fork.1] - 2026-09-23
 
 ### Added
@@ -12,12 +22,86 @@
 
 - Re-based the fork onto upstream v18.2.9, whose TUI components moved into `@oh-my-pi/pi-tui`. The gateway connection-profile editor is now injected into the settings selector and the status line resolves the active-account chip through its host, so both keep working from the relocated components.
 
+## [18.3.0] - 2026-09-24
+
+### Breaking Changes
+
+- The `hub` tool is deprecated; use `wait`, `write`, and the `proc://` protocols instead.
+- The `irc.timeoutMs` configuration setting has been removed.
+- The edit mode syntax now uses `*** Edit File:`, `*** Find`, and `*** Replace` headers instead of `SM:` headers.
+- Cancelling a process through `write` now requires an explicit `proc://<id>/kill` target; other write targets validate content normally.
+
+### Added
+
+- Added `omp://` documentation scopes for `find` and `omp find`. Search all embedded harness documentation with `omp://` or a specific document with `omp://<file>.md`; results are returned as canonical URLs that `read` can open, including range selectors.
+- Added extension support for ephemeral, `/btw`-style side turns through `ctx.runEphemeralTurn()`, with optional tool suppression and output/context limits without adding the turn to session history.
+- Added background job and service management through the `wait` tool and `proc://` URLs, including supervised services in `bash` and direct agent messaging through `agent://` write targets.
+- Added `*** Insert Before` and `*** Insert After` edit operations for adding lines without replacing existing code.
+- Added the `toks` command for offline token counting, including support for Jev (TypeSafe Jev 1.13) encodings.
+- Added automatic discovery of Apple Foundation Models on supported Apple silicon devices.
+- Added `/changelog last [N]` for viewing the latest release or a selected number of recent releases.
+- Added terminal-based OAuth authentication with `omp login`, including browser-assisted login, account and organization details, and automatic model discovery refresh. Added provider support for `org-scoped-identity`, `oauth-token-env`, and per-account OAuth priority/reserve policies through `auth.accountPolicies`, with policy state shown by `omp usage`.
+- Added the `daybreak` badge to `omp usage` for enabled accounts.
+- Added `/export` and `/usage` to focused subagent views for exporting a focused transcript and viewing account usage without returning to the main session.
+- Pasted clipboard images are now saved in the session artifact directory, allowing agents to read, copy, or upload them by file path.
+- Added `/annotate` for attaching notes to diffs, replies, session messages, files, or quoted text and inserting or sending those notes in prompts and reviews.
+- Added configurable MCP startup behavior through `MCP_STARTUP_TIMEOUT_MS`/`mcp.startupTimeoutMs` and `OMP_MCP_REQUIRE_READY=1`, allowing headless runs to require MCP servers to become ready before the first turn.
+- Added native judgment usage reporting, including error stop reasons and messages, and added `openrouter/~typesafe/jev-latest` as a native judge candidate.
+
+### Changed
+
+- Session compaction now supports native Anthropic snapshot branches and rewinds.
+- The default `bash.autoBackground.strategy` is now `catalog`.
+- The `Launch` configuration group has been renamed to `Services`.
+- Terminal OAuth behavior is now consistent between `omp login` and `omp auth-broker login`.
+- Judgment fallback now uses only native candidates, preventing prompted models from replacing failed native judges.
+- Browser screenshot comparisons now tolerate minor rasterizer differences.
+
+### Fixed
+
+- Fixed credential-aware API key resolution during authentication rotation.
+- Fixed comma-separated line selectors in `read`, `grep` paths, and `fetch`; selectors now read the requested range, while a bare number selects only that line.
+- Fixed `write` reporting JavaScript character counts instead of UTF-8 byte counts.
+- Fixed background job and service status reporting, including incorrect durations, reused job IDs, stale logs after named-service restarts, and foreground calls incorrectly appearing as background jobs.
+- Fixed `wait` and agent messaging so completed subagent results and peer messages are delivered reliably, including when a wait is interrupted by an incoming message.
+- Fixed headless print mode dropping or silently ignoring MCP servers that start slowly; it now waits within the configured timeout and warns when a server is not ready.
+- Fixed reader-mode `fetch` sending inline SVG icons and base64 images as unreadable model input; alt text is retained instead.
+- Fixed long non-Latin judged TTSR output exceeding token limits by applying token-aware truncation.
+
+## [18.2.11] - 2026-09-23
+
+### Fixed
+
+- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
+- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
+- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
+- Fixed plural browser queries when compiled binaries provide shallow stack traces.
+- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
+- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
+- `/shake thinking` now reports the number of tokens freed.
+
+## [18.2.10] - 2026-09-22
+
+### Added
+
+- Added live benchmark results table with real-time model ranking and per-kind performance metrics
+- Added dedicated prefill throughput reporting for prefill-focused benchmarks
+- Added `/record` slash command to capture terminal sessions as replayable `.ompcast` files
+- Added `omp play` CLI for terminal-based playback of session recordings
+- Added intent descriptions to judgment batching
+- Added live progress tracking for judgment batches in the TUI
+
+### Changed
+
+- Refined AI-assisted git staging verification to reduce false positives
+- Updated `omp bench` default profile to `chat` and improved CLI flag documentation
+- Coalesced judgment batch drain operations for better performance under high load
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
 
 - Added Claude saved resets to usage views and `/usage reset`, with automatic blocked-limit recovery and expiring-reset redemption controlled by `claudeResets`.
-
 - Added support for searching embedded harness documentation with `find` and `omp find` using `omp://` scopes, including file-specific searches and `:start-end` selectors; results open directly through canonical `omp://` URLs.
 
 ### Changed
@@ -17244,3 +17328,4 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@95fc652ddfbd](
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@f7051d9e7377](https://github.com/can1357/oh-my-pi/blob/f7051d9e73773b4f471ceccc8f92fd3822730b58/packages/coding-agent/CHANGELOG.md).
 Older entries are archived in [packages\coding-agent\CHANGELOG.md@9effebbb192e](https://github.com/can1357/oh-my-pi/blob/9effebbb192e415c32939b4946caf6bb6b7811f1/packages\coding-agent\CHANGELOG.md).
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@da359efe2858](https://github.com/can1357/oh-my-pi/blob/da359efe2858f68baa4ae290574c7c4c9c8da3c3/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@3642216898e4](https://github.com/can1357/oh-my-pi/blob/3642216898e473f6a4472e78f792e641891c6d62/packages/coding-agent/CHANGELOG.md).

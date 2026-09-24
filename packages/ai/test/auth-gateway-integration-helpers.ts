@@ -40,12 +40,9 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 	registerMockApi();
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-gateway-step4-"));
 	const credentialStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "credentials.db"));
-	credentialStore.replaceAuthCredentialsForProvider(
-		"mock",
-		options.credentials ?? [{ type: "api_key", key: "key-a" }],
-	);
+	await credentialStore.replaceAuthCredentials("mock", options.credentials ?? [{ type: "api_key", key: "key-a" }]);
 	const storage = new AuthStorage(credentialStore);
-	await storage.reload();
+	await storage.credentials.reload();
 	const accessStore = await SqliteAuthGatewayAccessStore.open(path.join(tempDir, "access.db"));
 	const models = new Map<string, MockModel>();
 	const modelById = new Map<string, MockModel>();

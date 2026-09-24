@@ -101,9 +101,9 @@ async function addProviderCredential(
 	provider: string,
 	key: string,
 ): Promise<{ id: number; provider: string }> {
-	const [row] = harness.credentialStore.upsertAuthCredentialForProvider(provider, { type: "api_key", key });
+	const [row] = await harness.credentialStore.upsertAuthCredential(provider, { type: "api_key", key });
 	if (!row) throw new Error(`expected ${provider} credential row`);
-	await harness.storage.reload();
+	await harness.storage.credentials.reload();
 	return row;
 }
 
@@ -356,8 +356,8 @@ describe("auth-gateway credential pools", () => {
 		harness.accessStore.addPoolCredential(pool.id, row.id);
 		await grantModelAccess(harness.accessStore, user.user.id, pool.id);
 
-		expect(harness.storage.disableCredentialById(row.id, "oauth refresh failed: invalid_grant")).toBe(true);
-		harness.storage.upsertCredential("mock", {
+		expect(await harness.storage.credentials.disable(row.id, "oauth refresh failed: invalid_grant")).toBe(true);
+		harness.storage.credentials.upsert("mock", {
 			type: "oauth",
 			access: "oauth-after",
 			refresh: "refresh-after",

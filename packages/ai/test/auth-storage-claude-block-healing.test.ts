@@ -53,7 +53,7 @@ describe("Claude stale quota block recovery", () => {
 			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
 			defaultAccounts: { [PROVIDER]: EMAIL },
 		});
-		await storage.set(
+		await storage.credentials.set(
 			PROVIDER,
 			[EMAIL, "sibling@example.com"].map(email => ({
 				type: "oauth" as const,
@@ -84,7 +84,7 @@ describe("Claude stale quota block recovery", () => {
 	test("a resumed sibling pin does not report exhaustion of an unblocked default", async () => {
 		const sessionId = "resumed-sibling";
 		const siblingId = store.listAuthCredentials(PROVIDER)[1]!.id;
-		storage.pinSessionOAuthAccount(PROVIDER, sessionId, siblingId);
+		storage.sessions.pin(PROVIDER, sessionId, siblingId);
 		const persisted = db.serialize();
 		storage.close();
 		db = Database.deserialize(persisted);
@@ -93,7 +93,7 @@ describe("Claude stale quota block recovery", () => {
 			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
 			defaultAccounts: { [PROVIDER]: EMAIL },
 		});
-		await storage.reload();
+		await storage.credentials.reload();
 
 		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
 			"access-sibling@example.com",
@@ -101,7 +101,7 @@ describe("Claude stale quota block recovery", () => {
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
 		// The explicit session command can select the recovered default without
 		// changing other sessions or pretending the previous pin was exhausted.
-		storage.pinSessionOAuthAccount(PROVIDER, sessionId, credentialId);
+		storage.sessions.pin(PROVIDER, sessionId, credentialId);
 		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
 	});
@@ -113,7 +113,7 @@ describe("Claude stale quota block recovery", () => {
 			"access-sibling@example.com",
 		);
 		store.deleteCredentialBlock(credentialId, PROVIDER_KEY, "");
-		storage.pinSessionOAuthAccount(PROVIDER, sessionId, credentialId);
+		storage.sessions.pin(PROVIDER, sessionId, credentialId);
 
 		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
@@ -133,7 +133,7 @@ describe("Claude stale quota block recovery", () => {
 
 	test("usage refresh clears a stale persisted block and restores the default account", async () => {
 		block();
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBeUndefined();
 		expect(await storage.getApiKey(PROVIDER, "after-usage", { modelId: "claude-opus-4-8" })).toBe(`access-${EMAIL}`);
 		expect(storage.consumeDefaultAccountFallover(PROVIDER, "after-usage")).toBeUndefined();
@@ -149,7 +149,7 @@ describe("Claude stale quota block recovery", () => {
 
 	test("model usage health rechecks a recovered account instead of reporting depleted", async () => {
 		block();
-		const health = await storage.getModelUsageHealth(PROVIDER, {
+		const health = await storage.health.model(PROVIDER, {
 			modelId: "claude-fable-5",
 			reserveFraction: 0.1,
 		});
@@ -176,14 +176,14 @@ describe("Claude stale quota block recovery", () => {
 		} finally {
 			response.resolve(report);
 			await pending;
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 		}
 	});
 
 	test("a sibling removed during a healing probe cannot replace the default by index", async () => {
 		const rows = store.listAuthCredentials(PROVIDER);
-		await storage.remove(PROVIDER);
-		await storage.set(PROVIDER, [
+		await storage.credentials.remove(PROVIDER);
+		await storage.credentials.set(PROVIDER, [
 			rows[1]!.credential,
 			rows[0]!.credential,
 			{
@@ -207,7 +207,7 @@ describe("Claude stale quota block recovery", () => {
 		});
 		const pending = storage.getApiKey(PROVIDER, "reindexed-probe", { modelId: "claude-fable-5" });
 		await entered.promise;
-		await storage.removeCredential(PROVIDER, reordered[0]!.id);
+		await storage.credentials.removeById(PROVIDER, reordered[0]!.id);
 		response.resolve(report);
 		expect(await pending).toBe(`access-${EMAIL}`);
 	});
@@ -216,7 +216,7 @@ describe("Claude stale quota block recovery", () => {
 		block("tier:fable");
 		block("tier:mythos");
 		report!.limits.push(limit("7d", 1, "mythos"));
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBeUndefined();
 		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:mythos")).toBe(deadline);
 		expect(await storage.getApiKey(PROVIDER, "fable-recovered", { modelId: "claude-fable-5" })).toBe(
@@ -230,13 +230,13 @@ describe("Claude stale quota block recovery", () => {
 	test("a healthy tier cannot clear a block while the shared weekly limit is exhausted", async () => {
 		block("tier:fable");
 		report!.limits[1] = limit("7d", 1);
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBe(deadline);
 	});
 
 	test("a recent rate-limit block survives a lagging healthy report", async () => {
 		block("", 0);
-		await storage.fetchUsageReports();
+		await storage.usage.reports();
 		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBe(deadline);
 	});
 
@@ -264,7 +264,7 @@ describe("Claude stale quota block recovery", () => {
 						}),
 				},
 			);
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBeUndefined();
 			expect(await storage.getApiKey(PROVIDER, `extra-${extraUsage}`, { modelId: "claude-fable-5" })).toBe(
 				`access-${EMAIL}`,
@@ -296,7 +296,7 @@ describe("Claude stale quota block recovery", () => {
 						}),
 				},
 			);
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBe(deadline);
 		},
 	);
@@ -313,7 +313,7 @@ describe("Claude stale quota block recovery", () => {
 			if (reason === "missing tier") report!.limits.pop();
 			if (reason === "headers only") report!.metadata!.source = "ratelimit-headers";
 			if (reason === "failed fetch") report = null;
-			await storage.fetchUsageReports();
+			await storage.usage.reports();
 			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBe(deadline);
 		},
 	);
