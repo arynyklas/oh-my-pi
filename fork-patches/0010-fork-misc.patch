@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index 131675a..092b52a 100644
+index dd89b17..b1a1803 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -11,6 +11,7 @@ target/
@@ -11,10 +11,10 @@ index 131675a..092b52a 100644
  /result
  /result-*
 diff --git a/docs/models.md b/docs/models.md
-index 641a2f4..fac56d5 100644
+index 76199d1..f684055 100644
 --- a/docs/models.md
 +++ b/docs/models.md
-@@ -116,15 +116,28 @@ - `google-gemini-cli`
+@@ -140,15 +140,28 @@ - `google-gemini-cli`
  - `google-vertex`
  - `typesafe`
  - `openrouter-decisions`
@@ -36,17 +36,17 @@ index 641a2f4..fac56d5 100644
 +
  ### Allowed auth/discovery values
  
- - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
- - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, or `litellm`
+ - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
+ - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
  - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 -- `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 +- `transport`: `pi-native` only. When set, every chat model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; image, speech, and transcription runners go to the same gateway's `/v1/<task>` routes instead. `apiKey` is the gateway bearer.
  - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
  - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, and `glm5`. Omit it to use catalog identity policy; unknown models retain the fast local estimate.
  
-@@ -348,6 +361,8 @@ - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
+@@ -467,6 +480,8 @@ - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
  - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
- - otherwise -> falls back to provider-level `api` if set, else dropped
+ - otherwise -> falls back to provider-level `api`, or `openai-completions` when it is omitted
  
 +Rows an omp auth-gateway marks with a non-chat `kind` skip that routing and use the gateway's task route instead: `image` → `openai-images` (`image` role), `tts` → `openai-speech` (`speech` role), `stt` → `openai-transcriptions` (`dictation` role). Other runner kinds are not offered as chat models.
 +
@@ -54,7 +54,7 @@ index 641a2f4..fac56d5 100644
  per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
  from `baseUrl` before appending `/v1/messages`, so a single discovery `baseUrl`
 diff --git a/packages/ai/src/auth/affinity.ts b/packages/ai/src/auth/affinity.ts
-index 6c86d4e..c7087ed 100644
+index c5fcce0..478f1c5 100644
 --- a/packages/ai/src/auth/affinity.ts
 +++ b/packages/ai/src/auth/affinity.ts
 @@ -1,6 +1,9 @@
@@ -68,7 +68,7 @@ index 6c86d4e..c7087ed 100644
  import type { AuthCredentialStore } from "./store";
  import type { CredentialPool } from "./pool";
  import type { KeyOverrides } from "./cascade";
-@@ -12,29 +15,76 @@ /** A session's pinned credential (resolved index + durable row id). */
+@@ -27,31 +30,78 @@ /** A session's pinned credential (resolved index + durable row id). */
  export type SessionCredential = {
  	type: AuthCredential["type"];
  	index: number;
@@ -115,6 +115,8 @@ index 6c86d4e..c7087ed 100644
  	#sessionLastCredential: Map<string, Map<string, SessionCredential>> = new Map();
 +	/** `storageKey\0sessionId` -> credential a pin/priority edit released, pending the next selection's journal entry. */
 +	#releasedSessionCredentials: Map<string, number> = new Map();
+ 	/** Persisted sticky rows keyed by cache key, so unchanged re-records skip the write. */
+ 	#persistedSticky: Map<string, PersistedSticky> = new Map();
  	#store: AuthCredentialStore;
  	#pool: CredentialPool;
  	#overrides: KeyOverrides;
@@ -147,10 +149,10 @@ index 6c86d4e..c7087ed 100644
 +			}
 +			this.#sessionLastCredential.delete(key);
 +		}
- 		try {
- 			this.#store.deleteCachePrefix?.(`${SESSION_STICKY_CACHE_PREFIX}${provider}:`);
- 		} catch (err) {
-@@ -44,13 +94,18 @@ export class SessionAffinity implements SessionsApi {
+ 		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
+ 		for (const cacheKey of this.#persistedSticky.keys()) {
+ 			if (cacheKey.startsWith(prefix)) this.#persistedSticky.delete(cacheKey);
+@@ -65,13 +115,18 @@ export class SessionAffinity implements SessionsApi {
  
  	/** Drop only this in-memory session pin after OAuth selection falls through. */
  	forget(provider: string, sessionId: string): void {
@@ -171,9 +173,9 @@ index 6c86d4e..c7087ed 100644
 +	 * resume); it defaults to now for live selections. `options.reason` is the
 +	 * cause shown by `/account`'s session log. Automatic re-recording of the same
  	 * durable row preserves an explicit user pin.
- 	 */
- 	record(
-@@ -58,18 +113,25 @@ export class SessionAffinity implements SessionsApi {
+ 	 *
+ 	 * The in-memory sticky is always exact. The persisted row is rewritten only
+@@ -84,18 +139,25 @@ export class SessionAffinity implements SessionsApi {
  		sessionId: string | undefined,
  		type: AuthCredential["type"],
  		index: number,
@@ -208,7 +210,7 @@ index 6c86d4e..c7087ed 100644
  		const sessionCredential: SessionCredential = {
  			type,
  			index,
-@@ -78,63 +140,80 @@ export class SessionAffinity implements SessionsApi {
+@@ -104,10 +166,22 @@ export class SessionAffinity implements SessionsApi {
  			...(isExplicit ? { explicit: true as const } : {}),
  		};
  		sessionMap.set(sessionId, sessionCredential);
@@ -228,20 +230,13 @@ index 6c86d4e..c7087ed 100644
 +			});
 +		}
  
- 		try {
--			if (credentialId !== undefined) {
--				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
--				// Expires in 30 days
--				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
--				this.#store.setCache(cacheKey, JSON.stringify(sessionCredential), expiresAtSec);
--			}
-+			const cacheKey = stickyCacheKey(provider, sessionId, selection);
-+			// Expires in 30 days
-+			const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
-+			this.#store.setCache(cacheKey, JSON.stringify(sessionCredential), expiresAtSec);
- 		} catch (err) {
- 			logger.debug("Failed to write session sticky credential to persistent store cache", { err });
- 		}
+-		if (credentialId === undefined) return;
+-		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
++		const cacheKey = stickyCacheKey(provider, sessionId, selection);
+ 		const expiresAtSec = Math.floor(nowMs / 1000) + SESSION_STICKY_TTL_SEC;
+ 		const persisted = this.#persistedSticky.get(cacheKey);
+ 		if (
+@@ -134,50 +208,56 @@ export class SessionAffinity implements SessionsApi {
  	}
  
  	/** Retrieves the last credential used by a session. */
@@ -291,6 +286,7 @@ index 6c86d4e..c7087ed 100644
 -					const stored = this.#pool.entries(provider);
 -					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
 -					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
+-						this.#persistedSticky.delete(cacheKey);
 -						this.#store.setCache(cacheKey, "", 0);
 -						return undefined;
 -					}
@@ -298,12 +294,14 @@ index 6c86d4e..c7087ed 100644
 -				} else {
 -					// Fallback: drop unsafe index-only cache rows to prevent wrong-account routing
 +				if (!isCredentialIdEligible(val.credentialId, selection)) {
+ 					this.#persistedSticky.delete(cacheKey);
  					this.#store.setCache(cacheKey, "", 0);
  					return undefined;
  				}
 +				const stored = this.#pool.entries(provider);
 +				const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
 +				if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
++					this.#persistedSticky.delete(cacheKey);
 +					this.#store.setCache(cacheKey, "", 0);
 +					return undefined;
 +				}
@@ -316,7 +314,7 @@ index 6c86d4e..c7087ed 100644
  				}
  				const sessionVal: SessionCredential = {
  					type: val.type,
-@@ -153,17 +232,18 @@ export class SessionAffinity implements SessionsApi {
+@@ -204,16 +284,17 @@ export class SessionAffinity implements SessionsApi {
  	}
  
  	/** Clears the last credential used by a session for a provider. */
@@ -333,13 +331,12 @@ index 6c86d4e..c7087ed 100644
 +				this.#sessionLastCredential.delete(key);
  			}
  		}
+-		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
++		const cacheKey = stickyCacheKey(provider, sessionId, selection);
+ 		this.#persistedSticky.delete(cacheKey);
  		try {
--			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
-+			const cacheKey = stickyCacheKey(provider, sessionId, selection);
  			this.#store.setCache(cacheKey, "", 0);
- 		} catch (err) {
- 			logger.debug("Failed to clear session sticky credential from persistent store cache", { err });
-@@ -222,7 +302,11 @@ export class SessionAffinity implements SessionsApi {
+@@ -274,7 +355,11 @@ export class SessionAffinity implements SessionsApi {
  		const target = stored[index];
  		if (target?.credential.type !== "oauth") return false;
  		const restoredAtMs = options?.restoredAtMs;
@@ -352,7 +349,7 @@ index 6c86d4e..c7087ed 100644
  		return true;
  	}
  
-@@ -240,14 +324,10 @@ export class SessionAffinity implements SessionsApi {
+@@ -292,14 +377,10 @@ export class SessionAffinity implements SessionsApi {
  		for (const provider of this.#pool.providers()) {
  			const credential = this.get(provider, sourceSessionId);
  			if (!credential) continue;
@@ -371,62 +368,24 @@ index 6c86d4e..c7087ed 100644
  			inherited += 1;
  		}
  		return inherited;
-diff --git a/packages/ai/src/auth/blocks.ts b/packages/ai/src/auth/blocks.ts
-index 03ffdac..6faa203 100644
---- a/packages/ai/src/auth/blocks.ts
-+++ b/packages/ai/src/auth/blocks.ts
-@@ -383,27 +383,6 @@ export class CredentialBlocks implements BlocksApi {
- 		return this.#deps.strategies(provider)?.healableBlockScopes !== undefined;
- 	}
- 
--	/**
--	 * Whether a fresh report could lift what currently blocks this credential.
--	 *
--	 * A strategy that names healable scopes can only vouch for those scopes, so
--	 * a live unscoped block — an Opus/Sonnet usage limit, a refresh failure —
--	 * keeps the credential unusable whatever the report says about a tier. A
--	 * probe then cannot change the outcome and must not be spent; the tier scope
--	 * heals on a later pass, once the block that actually holds the credential
--	 * has lifted.
--	 */
--	canHeal(
--		provider: Provider,
--		providerKey: string,
--		credentialIndex: number,
--		blockScopeOrScopes: string | readonly string[] | undefined,
--	): boolean {
--		if (!this.supportsHealing(provider)) return false;
--		if (this.blockedUntil(provider, providerKey, credentialIndex) !== undefined) return false;
--		return this.blockedUntil(provider, providerKey, credentialIndex, blockScopeOrScopes) !== undefined;
--	}
--
- 	/**
- 	 * Self-heal stale usage-limit blocks: when a fresh live usage report says a
- 	 * scope is below every limit gating it, drop its persisted and in-memory
 diff --git a/packages/ai/src/auth/cascade.ts b/packages/ai/src/auth/cascade.ts
-index d7dac79..f3a3da9 100644
+index 7912169..49d018a 100644
 --- a/packages/ai/src/auth/cascade.ts
 +++ b/packages/ai/src/auth/cascade.ts
-@@ -8,7 +8,17 @@ import { getEnvApiKey, getEnvApiKeyName } from "../stream";
+@@ -8,9 +8,12 @@ import { getEnvApiKey, getEnvApiKeyName } from "../stream";
  import type { SessionAffinity } from "./affinity";
  import type { CredentialPool } from "./pool";
  import type { CredentialSelector } from "./select";
--import type { AuthApiKeyOptions, AuthCredential, AuthSource, AuthSourceOptions, KeysApi, LimitsApi } from "./types";
 +import type { AccountPins } from "./pins";
-+import type {
-+	AuthApiKeyOptions,
+ import type {
+ 	AuthApiKeyOptions,
 +	AuthApiKeySelectionResult,
-+	AuthCredential,
+ 	AuthCredential,
 +	AuthCredentialSelectionPolicy,
-+	AuthSource,
-+	AuthSourceOptions,
-+	KeysApi,
-+	LimitsApi,
-+} from "./types";
- 
- /**
-  * Default config value resolver that checks env vars and treats as literal.
-@@ -107,6 +117,7 @@ export interface KeyCascadeDeps {
+ 	AuthSource,
+ 	AuthSourceOptions,
+ 	KeysApi,
+@@ -134,6 +137,7 @@ export interface KeyCascadeDeps {
  	overrides: KeyOverrides;
  	selector: CredentialSelector;
  	affinity: SessionAffinity;
@@ -434,7 +393,7 @@ index d7dac79..f3a3da9 100644
  	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
  	rotate: LimitsApi["rotate"];
  	sourceLabel?: string;
-@@ -280,20 +291,31 @@ export class KeyCascade implements KeysApi {
+@@ -313,20 +317,31 @@ export class KeyCascade implements KeysApi {
  	}
  
  	/**
@@ -447,14 +406,14 @@ index d7dac79..f3a3da9 100644
 +	 *
  	 * Priority (first match wins): runtime override, config override, OAuth,
 -	 * login API key, environment variable, then another stored API key.
-+	 * login-persisted API key, environment variable, then another stored API key.
++	 * login-persisted API key, config fallback, environment variable, then another stored API key.
  	 */
 -	async get(
 +	async resolveApiKeySelection(
  		provider: string,
  		sessionId?: string,
  		options?: AuthApiKeyOptions,
--		onCredentialId?: (id: number) => void,
+-		onCredentialId?: (id: number, identity?: OAuthRequestIdentity) => void,
 -	): Promise<string | undefined> {
 +	): Promise<AuthApiKeySelectionResult> {
 +		const selection = options?.selection;
@@ -472,7 +431,7 @@ index d7dac79..f3a3da9 100644
  		}
  
  		// Config override: explicit apiKey pinned in models.yml beats the broker's
-@@ -303,16 +325,27 @@ export class KeyCascade implements KeysApi {
+@@ -336,19 +351,29 @@ export class KeyCascade implements KeysApi {
  		// won't accept.
  		const configKey = this.#deps.overrides.configKey(provider);
  		if (configKey !== undefined) {
@@ -487,8 +446,12 @@ index d7dac79..f3a3da9 100644
  		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
  		const oauthResolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
  		if (oauthResolved) {
--			if (oauthResolved.credentialId !== undefined) onCredentialId?.(oauthResolved.credentialId);
+-			if (onCredentialId && oauthResolved.credentialId !== undefined) {
+-				const { orgId, region, inferenceRegion } = oauthResolved.credential;
+-				onCredentialId(oauthResolved.credentialId, { orgId, region, inferenceRegion });
+-			}
 -			return oauthResolved.apiKey;
++			const { orgId, region, inferenceRegion } = oauthResolved.credential;
 +			return {
 +				ok: true,
 +				credential: {
@@ -496,6 +459,7 @@ index d7dac79..f3a3da9 100644
 +					credentialId: oauthResolved.credentialId,
 +					credentialType: "oauth",
 +					source: "oauth",
++					oauthIdentity: { orgId, region, inferenceRegion },
 +				},
 +			};
  		}
@@ -503,7 +467,7 @@ index d7dac79..f3a3da9 100644
  		const loginApiKeySelection = await this.#deps.selector.selectApiKey(
  			provider,
  			sessionId,
-@@ -320,22 +353,30 @@ export class KeyCascade implements KeysApi {
+@@ -356,25 +381,37 @@ export class KeyCascade implements KeysApi {
  			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
  		);
  		if (loginApiKeySelection) {
@@ -537,6 +501,14 @@ index d7dac79..f3a3da9 100644
 +		// suppress account_uuid for this session.
 +		if (sessionId) this.#deps.affinity.clear(provider, sessionId);
  
+ 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
++		if (fallbackKey !== undefined) {
++			const resolvedFallbackKey = await this.#deps.overrides.resolve(fallbackKey);
++			if (!resolvedFallbackKey) return { ok: false, reason: "no_credential" };
++			return { ok: true, credential: { apiKey: resolvedFallbackKey, source: "config" } };
++		}
+ 
  		const envKey = getEnvApiKey(provider);
 -		if (envKey) return envKey;
 +		if (envKey) return { ok: true, credential: { apiKey: envKey, source: "env" } };
@@ -544,7 +516,7 @@ index d7dac79..f3a3da9 100644
  		const apiKeySelection = await this.#deps.selector.selectApiKey(
  			provider,
  			sessionId,
-@@ -343,13 +384,43 @@ export class KeyCascade implements KeysApi {
+@@ -382,13 +419,44 @@ export class KeyCascade implements KeysApi {
  			credential => credential.source !== "login",
  		);
  		if (apiKeySelection) {
@@ -575,7 +547,7 @@ index d7dac79..f3a3da9 100644
 +	/**
 +	 * Get API key for a provider.
 +	 * Priority (first match wins): runtime override, config override, OAuth,
-+	 * login API key, environment variable, then another stored API key.
++	 * login API key, config fallback, environment variable, then another stored API key.
 +	 * Delegates to {@link resolveApiKeySelection} so the durable-row journaling,
 +	 * default-account fallover notices, and selection-policy restriction apply
 +	 * to every resolve path, not only the gateway's.
@@ -584,16 +556,17 @@ index d7dac79..f3a3da9 100644
 +		provider: string,
 +		sessionId?: string,
 +		options?: AuthApiKeyOptions,
-+		onCredentialId?: (id: number) => void,
++		onCredentialId?: (id: number, identity?: OAuthRequestIdentity) => void,
 +	): Promise<string | undefined> {
 +		const result = await this.resolveApiKeySelection(provider, sessionId, options);
 +		if (!result.ok) return undefined;
-+		if (result.credential.credentialId !== undefined) onCredentialId?.(result.credential.credentialId);
++		const { credentialId, oauthIdentity } = result.credential;
++		if (credentialId !== undefined) onCredentialId?.(credentialId, oauthIdentity);
 +		return result.credential.apiKey;
  	}
  
  	/**
-@@ -361,16 +432,26 @@ export class KeyCascade implements KeysApi {
+@@ -400,16 +468,26 @@ export class KeyCascade implements KeysApi {
  	 * - step (c) `lastChance` → rotate to a sibling and re-resolve, unless quota exhaustion has no sibling.
  	 *
  	 * Used by web-search providers and other consumers that hold a KeyCascade
@@ -623,54 +596,35 @@ index d7dac79..f3a3da9 100644
  				});
  			}
  			if (lastChance) {
-@@ -379,6 +460,7 @@ export class KeyCascade implements KeysApi {
+@@ -418,6 +496,7 @@ export class KeyCascade implements KeysApi {
  					modelId,
  					signal,
  					apiKey: previousKey,
 +					selection,
  				});
- 				if (!switched) {
+ 				if (!rotation.switched) {
  					const status = AIError.status(error);
-@@ -392,6 +474,7 @@ export class KeyCascade implements KeysApi {
+@@ -431,6 +510,7 @@ export class KeyCascade implements KeysApi {
  					baseUrl,
  					modelId,
  					signal,
 +					selection,
  				});
+ 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
  			}
- 			return this.getWithCredential(provider, sessionId, {
-@@ -399,6 +482,7 @@ export class KeyCascade implements KeysApi {
- 				modelId,
+@@ -440,6 +520,7 @@ export class KeyCascade implements KeysApi {
  				forceRefresh: true,
+ 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
  				signal,
 +				selection,
  			});
  		};
  	}
 diff --git a/packages/ai/src/auth/health.ts b/packages/ai/src/auth/health.ts
-index 257fc66..ccb222f 100644
+index cab5f0a..d93b4a9 100644
 --- a/packages/ai/src/auth/health.ts
 +++ b/packages/ai/src/auth/health.ts
-@@ -143,11 +143,13 @@ export class CredentialHealth implements HealthApi {
- 				const credentialType = entry.credential.type;
- 				const providerKey = providerTypeKey(provider, credentialType);
- 				let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
--				// A block under a scope the strategy can vouch for must still fetch
--				// a probe report, or it outlives the recovery that report would
--				// prove: no report means no reconciliation, so the credential idles
--				// until the clock runs out even after quota is restored.
--				if (blockedUntil !== undefined && !this.#deps.blocks.canHeal(provider, providerKey, index, blockScopes)) {
-+				// A block must still fetch a probe report, or it outlives the recovery
-+				// that report would prove: no report means no reconciliation, so the
-+				// credential idles until the clock runs out even after quota is
-+				// restored. The probe is spent for any healable provider rather than
-+				// only for scoped blocks, because our strategies also vouch for the
-+				// unscoped block (`blockScope: ""`) a legacy usage limit leaves behind.
-+				if (blockedUntil !== undefined && !this.#deps.blocks.supportsHealing(provider)) {
- 					return {
- 						credentialId: entry.id,
- 						credentialType,
-@@ -267,8 +269,9 @@ export class CredentialHealth implements HealthApi {
+@@ -270,8 +270,9 @@ export class CredentialHealth implements HealthApi {
  	 */
  	async check(options?: CheckCredentialsOptions): Promise<CredentialHealthResult[]> {
  		options?.signal?.throwIfAborted();
@@ -761,10 +715,10 @@ index 0000000..742e2b6
 +	return { provider: storageProvider, credential };
 +}
 diff --git a/packages/ai/src/auth/oauth.ts b/packages/ai/src/auth/oauth.ts
-index 4b6630c..b948f79 100644
+index 1131114..999f2e7 100644
 --- a/packages/ai/src/auth/oauth.ts
 +++ b/packages/ai/src/auth/oauth.ts
-@@ -1,18 +1,20 @@
+@@ -1,19 +1,20 @@
 -import { untilAborted } from "@oh-my-pi/pi-utils";
  import * as AIError from "../error";
 -import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -783,20 +737,12 @@ index 4b6630c..b948f79 100644
  import type {
  	AuthAccountPolicy,
  	AuthApiKeyOptions,
-+	AuthCredentialSnapshotEntry,
+ 	AuthCredentialSnapshotEntry,
 +	AuthCredentialSelectionPolicy,
  	OAuthAccess,
  	OAuthAccessResolution,
  	OAuthAccountIdentity,
-@@ -23,7 +25,6 @@ import type {
- 	OAuthLoginIdentity,
- 	StoredOAuthRefreshOptions,
- 	StoredOAuthRefreshResult,
--	AuthCredentialSnapshotEntry,
- } from "./types";
- 
- type StoredOAuthSelection = {
-@@ -57,55 +58,27 @@ export class OAuthAccounts implements OAuthApi {
+@@ -58,55 +59,27 @@ export class OAuthAccounts implements OAuthApi {
  	 * login registered.
  	 */
  	async login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined> {
@@ -864,7 +810,7 @@ index 4b6630c..b948f79 100644
  		return {
  			type: "oauth",
  			email: newCredential.email,
-@@ -131,10 +104,9 @@ export class OAuthAccounts implements OAuthApi {
+@@ -132,10 +105,9 @@ export class OAuthAccounts implements OAuthApi {
  	 * OAuth with an explicit API key.
  	 */
  	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
@@ -878,7 +824,7 @@ index 4b6630c..b948f79 100644
  			return undefined;
  		}
  		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
-@@ -153,8 +125,12 @@ export class OAuthAccounts implements OAuthApi {
+@@ -156,8 +128,12 @@ export class OAuthAccounts implements OAuthApi {
  		};
  	}
  
@@ -893,7 +839,7 @@ index 4b6630c..b948f79 100644
  		return this.#deps.pool
  			.entries(provider)
  			.map((entry, index) => ({
-@@ -162,7 +138,10 @@ export class OAuthAccounts implements OAuthApi {
+@@ -165,7 +141,10 @@ export class OAuthAccounts implements OAuthApi {
  				credential: entry.credential,
  				index,
  			}))
@@ -905,7 +851,7 @@ index 4b6630c..b948f79 100644
  	}
  
  	/** Refresh one stored OAuth selection and shape it as an {@link OAuthAccessResolution}. */
-@@ -261,12 +240,12 @@ export class OAuthAccounts implements OAuthApi {
+@@ -271,12 +250,12 @@ export class OAuthAccounts implements OAuthApi {
  	 * exercise each stored account exactly once.
  	 */
  	async accessAll(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
@@ -920,7 +866,7 @@ index 4b6630c..b948f79 100644
  				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
  			),
  		);
-@@ -288,10 +267,10 @@ export class OAuthAccounts implements OAuthApi {
+@@ -298,10 +277,10 @@ export class OAuthAccounts implements OAuthApi {
  		credentialId: number,
  		options?: AuthApiKeyOptions,
  	): Promise<OAuthAccessResolution | undefined> {
@@ -933,7 +879,7 @@ index 4b6630c..b948f79 100644
  			candidate => candidate.credentialId === credentialId,
  		);
  		if (!selection) return undefined;
-@@ -299,6 +278,27 @@ export class OAuthAccounts implements OAuthApi {
+@@ -309,6 +288,27 @@ export class OAuthAccounts implements OAuthApi {
  		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
  	}
  
@@ -961,7 +907,7 @@ index 4b6630c..b948f79 100644
  	/**
  	 * Get the OAuth account identity for a provider, preferring the credential that
  	 * is session-sticky for `sessionId`. This is a read-only lookup for display and
-@@ -307,24 +307,7 @@ export class OAuthAccounts implements OAuthApi {
+@@ -317,24 +317,7 @@ export class OAuthAccounts implements OAuthApi {
  	identity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
  		const preferred = this.#deps.affinity.activeOAuth(provider, sessionId);
  		if (!preferred) return undefined;
@@ -989,10 +935,10 @@ index 4b6630c..b948f79 100644
  	/**
 diff --git a/packages/ai/src/auth/pins.ts b/packages/ai/src/auth/pins.ts
 new file mode 100644
-index 0000000..4ea20b9
+index 0000000..5390254
 --- /dev/null
 +++ b/packages/ai/src/auth/pins.ts
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,428 @@
 +/**
 + * Per-provider account pinning: the `providers.defaultAccount` /
 + * `providers.accountPriority` configuration, the durable selector matching it
@@ -1126,6 +1072,16 @@ index 0000000..4ea20b9
 +		for (const pendingKey of this.#pendingDefaultFallovers.keys()) {
 +			if (pendingKey.startsWith(`${provider}\0`)) this.#pendingDefaultFallovers.delete(pendingKey);
 +		}
++	}
++
++	/**
++	 * Carry the configured default/priority selectors over from the pins of a
++	 * replaced credential store. Fallover notices, log de-duplication, and the
++	 * journal reference the old store's row ids, so they start fresh.
++	 */
++	adoptSelectors(previous: AccountPins): void {
++		this.#defaultAccountSelectors = new Map(previous.#defaultAccountSelectors);
++		this.#accountPrioritySelectors = new Map(previous.#accountPrioritySelectors);
 +	}
 +
 +	/** True when `selector` (already lowercased/trimmed) identifies `entry`. */
@@ -1412,10 +1368,10 @@ index 0000000..4ea20b9
 +	}
 +}
 diff --git a/packages/ai/src/auth/pool.ts b/packages/ai/src/auth/pool.ts
-index 5244fad..7cfd745 100644
+index f8858ef..e7c0e0b 100644
 --- a/packages/ai/src/auth/pool.ts
 +++ b/packages/ai/src/auth/pool.ts
-@@ -304,6 +304,8 @@ export class CredentialPool implements CredentialsApi {
+@@ -334,6 +334,8 @@ export class CredentialPool implements CredentialsApi {
  	 */
  	replace(provider: string, credentials: StoredCredential[]): void {
  		const current = this.#data.get(provider) ?? [];
@@ -1424,7 +1380,7 @@ index 5244fad..7cfd745 100644
  		if (storedCredentialArraysEqual(current, credentials)) return;
  		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
  		if (trackedBearerFingerprints) {
-@@ -321,6 +323,11 @@ export class CredentialPool implements CredentialsApi {
+@@ -351,6 +353,11 @@ export class CredentialPool implements CredentialsApi {
  			this.#data.set(provider, credentials);
  		}
  		this.bump("credentials");
@@ -1436,7 +1392,7 @@ index 5244fad..7cfd745 100644
  	}
  
  	noteBearer(provider: string, bearer: string, credentialId: number | undefined): void {
-@@ -570,6 +577,32 @@ export class CredentialPool implements CredentialsApi {
+@@ -607,6 +614,32 @@ export class CredentialPool implements CredentialsApi {
  		return rows;
  	}
  
@@ -1469,7 +1425,7 @@ index 5244fad..7cfd745 100644
  	async upsertOAuth(provider: string, credential: OAuthCredential): Promise<void> {
  		const prospectiveCredentials = this.dedupe(provider, [
  			...this.#store.listAuthCredentials(provider).map(entry => entry.credential),
-@@ -756,6 +789,23 @@ export class CredentialPool implements CredentialsApi {
+@@ -793,6 +826,23 @@ export class CredentialPool implements CredentialsApi {
  		});
  	}
  
@@ -1494,7 +1450,7 @@ index 5244fad..7cfd745 100644
  	 * Find the stored credential id matching a {@link UsageCredential} so the
  	 * refresh override can address the row. Mirrors the matching logic in
 diff --git a/packages/ai/src/auth/rank.ts b/packages/ai/src/auth/rank.ts
-index 1eddd60..29747d3 100644
+index d4d0372..e276174 100644
 --- a/packages/ai/src/auth/rank.ts
 +++ b/packages/ai/src/auth/rank.ts
 @@ -8,8 +8,8 @@ export type CredentialSelection<T extends AuthCredential> = {
@@ -1508,9 +1464,9 @@ index 1eddd60..29747d3 100644
  
  /** Selected credential with its observed usage. */
  export type UsageCandidate<T extends AuthCredential> = {
-@@ -40,6 +40,12 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
- 	accountPriority: number;
+@@ -46,6 +46,12 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
  	hasPriorityBoost: boolean;
+ 	allowanceSpent: boolean;
  	usageMeasured: boolean;
 +	/**
 +	 * Position in the configured `providers.accountPriority` order (0 = pinned
@@ -1521,9 +1477,9 @@ index 1eddd60..29747d3 100644
  	planPriority: number;
  	secondaryUsed: number;
  	secondaryRequiredDrain: number;
-@@ -91,6 +97,13 @@ ): number {
- 		return left.planPriority - right.planPriority;
- 	}
+@@ -100,6 +106,13 @@ ): number {
+ 	// allowance yields to any sibling whose renewable allowance is left (#13889).
+ 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
  	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
 +	// The configured account order (`providers.accountPriority`, whose head is
 +	// `providers.defaultAccount`) outranks usage ranking once the plan filter
@@ -1536,10 +1492,10 @@ index 1eddd60..29747d3 100644
  	// Short-window guard: candidates whose primary (e.g. 5h) window is
  	// nearly exhausted rank behind cool ones regardless of drain urgency —
 diff --git a/packages/ai/src/auth/rotation.ts b/packages/ai/src/auth/rotation.ts
-index 08a5326..874e81f 100644
+index 764af96..295745a 100644
 --- a/packages/ai/src/auth/rotation.ts
 +++ b/packages/ai/src/auth/rotation.ts
-@@ -15,8 +15,10 @@ import type { KeyOverrides } from "./cascade";
+@@ -18,8 +18,10 @@ import type { KeyOverrides } from "./cascade";
  import type { SessionAffinity } from "./affinity";
  import type { CredentialPool } from "./pool";
  import type { AuthCredentialStore } from "./store";
@@ -1547,10 +1503,10 @@ index 08a5326..874e81f 100644
  import type {
  	AuthCredential,
 +	AuthCredentialSelectionPolicy,
+ 	CredentialRotation,
  	InvalidateCredentialMatchingOptions,
  	LimitsApi,
- 	MarkUsageLimitOptions,
-@@ -63,7 +65,12 @@ export class RateLimits implements LimitsApi {
+@@ -77,7 +79,12 @@ export class RateLimits implements LimitsApi {
  	async #resolveCredentialTarget(
  		provider: string,
  		sessionId: string | undefined,
@@ -1564,7 +1520,7 @@ index 08a5326..874e81f 100644
  	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
  		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
  		if (explicit) {
-@@ -77,13 +84,19 @@ export class RateLimits implements LimitsApi {
+@@ -91,13 +98,19 @@ export class RateLimits implements LimitsApi {
  			const stored = this.#deps.pool.entries(provider);
  			const index = stored.findIndex(entry => entry.id === options.credentialId);
  			const entry = index === -1 ? undefined : stored[index];
@@ -1586,7 +1542,7 @@ index 08a5326..874e81f 100644
  					return { type: entry.credential.type, index, explicit: true };
  				}
  			}
-@@ -91,14 +104,14 @@ export class RateLimits implements LimitsApi {
+@@ -105,14 +118,14 @@ export class RateLimits implements LimitsApi {
  			if (options.allowStaleOAuthBearer && options.credentialId === undefined) {
  				const credentialId = this.#deps.pool.idForBearer(provider, options.apiKey);
  				const index =
@@ -1603,7 +1559,7 @@ index 08a5326..874e81f 100644
  		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
  	}
  	#credentialBlockRouting(
-@@ -125,6 +138,14 @@ export class RateLimits implements LimitsApi {
+@@ -139,6 +152,14 @@ export class RateLimits implements LimitsApi {
  			siblingBlockScopes,
  		};
  	}
@@ -1618,7 +1574,7 @@ index 08a5326..874e81f 100644
  	#blockCredentialForRotation(
  		provider: string,
  		credentialType: AuthCredential["type"],
-@@ -132,7 +153,9 @@ export class RateLimits implements LimitsApi {
+@@ -146,7 +167,9 @@ export class RateLimits implements LimitsApi {
  		blockedUntil: number,
  		routing: CredentialBlockRouting,
  		providerTimed: boolean,
@@ -1628,7 +1584,7 @@ index 08a5326..874e81f 100644
  		// Snapshot the live block deadline BEFORE this call's mark: the merged
  		// value below masks a pre-existing block shorter than this call's own
  		// request (longest-wins), and recovery that replaces this call's
-@@ -170,11 +193,13 @@ export class RateLimits implements LimitsApi {
+@@ -184,11 +207,13 @@ export class RateLimits implements LimitsApi {
  				: blockedUntil;
  
  		const remainingCredentials = this.#deps.pool
@@ -1646,7 +1602,7 @@ index 08a5326..874e81f 100644
  			);
  
  		let retryAtMs: number | undefined;
-@@ -183,7 +208,7 @@ export class RateLimits implements LimitsApi {
+@@ -197,7 +222,7 @@ export class RateLimits implements LimitsApi {
  			// this reports a sibling as free that selection will then refuse.
  			const candidateBlockedUntil = this.#deps.blocks.blockedUntil(
  				provider,
@@ -1655,7 +1611,7 @@ index 08a5326..874e81f 100644
  				candidate.index,
  				routing.siblingBlockScopes,
  			);
-@@ -218,9 +243,11 @@ export class RateLimits implements LimitsApi {
+@@ -232,9 +257,11 @@ export class RateLimits implements LimitsApi {
  		options?: MarkUsageLimitOptions,
  	): Promise<UsageLimitMarkResult> {
  		await this.#deps.pool.adoptExternalChanges();
@@ -1667,7 +1623,7 @@ index 08a5326..874e81f 100644
  			allowStaleOAuthBearer: true,
  		});
  		if (!sessionCredential) return { switched: false };
-@@ -283,6 +310,7 @@ export class RateLimits implements LimitsApi {
+@@ -297,6 +324,7 @@ export class RateLimits implements LimitsApi {
  			blockedUntil,
  			routing,
  			providerTimed,
@@ -1675,7 +1631,7 @@ index 08a5326..874e81f 100644
  		);
  		return {
  			...rotation,
-@@ -314,11 +342,16 @@ export class RateLimits implements LimitsApi {
+@@ -328,11 +356,16 @@ export class RateLimits implements LimitsApi {
  	): Promise<boolean> {
  		const signal = options?.signal;
  		const sessionId = options?.sessionId;
@@ -1693,7 +1649,7 @@ index 08a5326..874e81f 100644
  				matched = { id: entry.id, type: entry.credential.type, index };
  				break;
  			}
-@@ -329,7 +362,7 @@ export class RateLimits implements LimitsApi {
+@@ -343,7 +376,7 @@ export class RateLimits implements LimitsApi {
  			return false;
  		}
  
@@ -1702,34 +1658,34 @@ index 08a5326..874e81f 100644
  		this.#deps.blocks.mark(
  			provider,
  			providerTypeKey(provider, matched.type),
-@@ -377,6 +410,7 @@ export class RateLimits implements LimitsApi {
- 	 */
- 	async rotate(provider: string, sessionId: string | undefined, options?: RotateCredentialOptions): Promise<boolean> {
+@@ -399,6 +432,7 @@ export class RateLimits implements LimitsApi {
+ 		options?: RotateCredentialOptions,
+ 	): Promise<CredentialRotation> {
  		await this.#deps.pool.adoptExternalChanges();
 +		const selection = options?.selection;
  		const error = options?.error;
  		const status = AIError.status(error);
  		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-@@ -395,6 +429,7 @@ export class RateLimits implements LimitsApi {
- 					apiKey: options?.apiKey,
- 					credentialId: options?.credentialId,
- 					signal: options?.signal,
-+					selection,
- 				})
- 			).switched;
+@@ -416,6 +450,7 @@ export class RateLimits implements LimitsApi {
+ 				apiKey: options?.apiKey,
+ 				credentialId: options?.credentialId,
+ 				signal: options?.signal,
++				selection,
+ 			});
+ 			return awaitSiblingUnblock(mark, options?.signal);
  		}
-@@ -406,6 +441,7 @@ export class RateLimits implements LimitsApi {
+@@ -427,6 +462,7 @@ export class RateLimits implements LimitsApi {
  		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
  			credentialId: options?.credentialId,
  			apiKey: options?.apiKey,
 +			selection,
  			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
  		});
- 		if (!sessionCredential) return false;
-@@ -426,12 +462,12 @@ export class RateLimits implements LimitsApi {
+ 		if (!sessionCredential) return { switched: false };
+@@ -447,12 +483,12 @@ export class RateLimits implements LimitsApi {
  			);
  			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
- 			routing.blockScope = modelPolicyScope;
+ 			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
 -			const sticky = this.#deps.affinity.get(provider, sessionId);
 +			const sticky = this.#deps.affinity.get(provider, sessionId, selection);
  			if (
@@ -1739,17 +1695,17 @@ index 08a5326..874e81f 100644
 -				this.#deps.affinity.clear(provider, sessionId);
 +				this.#deps.affinity.clear(provider, sessionId, selection);
  			}
- 			return this.#blockCredentialForRotation(
+ 			const mark = this.#blockCredentialForRotation(
  				provider,
-@@ -440,6 +476,7 @@ export class RateLimits implements LimitsApi {
+@@ -461,6 +497,7 @@ export class RateLimits implements LimitsApi {
  				Date.now() + DEFAULT_BLOCK_MS,
  				routing,
  				false,
 +				selection,
- 			).switched;
+ 			);
+ 			return awaitSiblingUnblock(mark, options?.signal);
  		}
- 
-@@ -447,20 +484,21 @@ export class RateLimits implements LimitsApi {
+@@ -469,20 +506,21 @@ export class RateLimits implements LimitsApi {
  		// Snapshot sibling availability before mutating so a soft-deleting
  		// suspect hook can't reindex the answer out from under us.
  		const hasSibling = this.#deps.pool
@@ -1774,26 +1730,31 @@ index 08a5326..874e81f 100644
 -			this.#deps.affinity.clear(provider, sessionId);
 +			this.#deps.affinity.clear(provider, sessionId, selection);
  		}
- 		this.#deps.blocks.mark(provider, providerKey, sessionCredential.index, Date.now() + DEFAULT_BLOCK_MS);
- 
+ 		this.#deps.blocks.mark(
+ 			provider,
 diff --git a/packages/ai/src/auth/select.ts b/packages/ai/src/auth/select.ts
-index af62d61..84b36db 100644
+index 567a461..537b5a5 100644
 --- a/packages/ai/src/auth/select.ts
 +++ b/packages/ai/src/auth/select.ts
-@@ -5,9 +5,12 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+@@ -5,6 +5,7 @@ import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
  import type { Provider } from "../types";
  import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
  import type { RankingStrategyResolver } from "../usage/registry";
 +import { raceSignal } from "./abort";
  import type { SessionAffinity } from "./affinity";
- import { credentialBlockScopesForRequest, DEFAULT_BLOCK_MS, providerTypeKey, type CredentialBlocks } from "./blocks";
+ import {
+ 	AUTH_BLOCK_SCOPE,
+@@ -13,7 +14,9 @@ import {
+ 	providerTypeKey,
+ 	type CredentialBlocks,
+ } from "./blocks";
 +import type { KeyOverrides } from "./cascade";
  import type { AccountPolicies } from "./policy";
 +import { AccountPins } from "./pins";
  import { authCredentialEquals, type CredentialPool } from "./pool";
  import {
  	orderUsageRankedCandidates,
-@@ -21,8 +24,18 @@ import {
+@@ -27,8 +30,18 @@ import {
  	type UsageRankingResult,
  } from "./rank";
  import { mergeRefreshedCredential, OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
@@ -1813,7 +1774,7 @@ index af62d61..84b36db 100644
  import type { UsageService } from "./usage";
  import {
  	isUsageLimitReached,
-@@ -39,6 +52,15 @@ export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+@@ -45,6 +58,15 @@ export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
  /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
  export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
  
@@ -1829,7 +1790,7 @@ index af62d61..84b36db 100644
  /** Options for CredentialSelector.tryOAuth when evaluating one OAuth credential. */
  export type TryOAuthOptions = {
  	checkUsage: boolean;
-@@ -60,10 +82,12 @@ export interface CredentialSelectorDeps {
+@@ -66,10 +88,12 @@ export interface CredentialSelectorDeps {
  	store: AuthCredentialStore;
  	pool: CredentialPool;
  	policies: AccountPolicies;
@@ -1842,7 +1803,7 @@ index af62d61..84b36db 100644
  	strategies: RankingStrategyResolver;
  }
  
-@@ -77,10 +101,10 @@ export class CredentialSelector {
+@@ -83,10 +107,10 @@ export class CredentialSelector {
  		this.#deps = deps;
  	}
  
@@ -1855,7 +1816,7 @@ index af62d61..84b36db 100644
  				this.#providerRoundRobinIndex.delete(key);
  			}
  		}
-@@ -125,47 +149,75 @@ export class CredentialSelector {
+@@ -131,47 +155,75 @@ export class CredentialSelector {
  		return order;
  	}
  
@@ -1953,15 +1914,15 @@ index af62d61..84b36db 100644
  	}
  
  	async #rankApiKeySelections(args: {
-@@ -262,6 +314,7 @@ export class CredentialSelector {
- 				inReserve: false,
+@@ -269,6 +321,7 @@ export class CredentialSelector {
  				accountPriority: 0,
+ 				allowanceSpent: remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0,
  				usageMeasured,
 +				priorityRank: Number.POSITIVE_INFINITY,
  				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
  				planPriority: 0,
  				secondaryUsed: normalizeUsageFraction(secondary),
-@@ -281,8 +334,8 @@ export class CredentialSelector {
+@@ -288,8 +341,8 @@ export class CredentialSelector {
  		filter?: (credential: ApiKeyCredential) => boolean,
  	): Promise<ApiKeySelection | undefined> {
  		const credentials = this.#deps.pool
@@ -1972,7 +1933,7 @@ index af62d61..84b36db 100644
  			.filter((entry): entry is ApiKeySelection => {
  				if (entry.credential.type !== "api_key") return false;
  				return filter?.(entry.credential) ?? true;
-@@ -292,10 +345,15 @@ export class CredentialSelector {
+@@ -299,10 +352,15 @@ export class CredentialSelector {
  		if (credentials.length === 1) return credentials[0];
  
  		const providerKey = providerTypeKey(provider, "api_key");
@@ -1990,7 +1951,7 @@ index af62d61..84b36db 100644
  			for (const idx of order) {
  				const candidate = credentials[idx];
  				if (!this.#deps.blocks.isBlocked(provider, providerKey, candidate.index)) {
-@@ -321,7 +379,11 @@ export class CredentialSelector {
+@@ -328,7 +386,11 @@ export class CredentialSelector {
  			blockScope,
  			blockScopes,
  		});
@@ -2003,7 +1964,7 @@ index af62d61..84b36db 100644
  	}
  
  	async #rankOAuthSelections(args: {
-@@ -337,6 +399,8 @@ export class CredentialSelector {
+@@ -344,6 +406,8 @@ export class CredentialSelector {
  		blockScope?: string;
  		/** Scopes a block may live under for this request; reads honour all of them. */
  		blockScopes?: readonly string[];
@@ -2012,38 +1973,15 @@ index af62d61..84b36db 100644
  	}): Promise<OAuthCandidate[]> {
  		const nowMs = Date.now();
  		const { strategy } = args;
-@@ -358,15 +422,13 @@ export class CredentialSelector {
- 				);
- 				let usage: UsageReport | null = null;
- 				let usageChecked = false;
--				if (
--					blockedUntil !== undefined &&
--					this.#deps.blocks.canHeal(
--						args.provider,
--						args.providerKey,
--						selection.index,
--						args.blockScopes ?? args.blockScope,
--					)
--				) {
-+				// A block must still fetch a probe report, or it outlives the recovery
-+				// that report would prove: no report means no reconciliation, so the
-+				// credential idles until the clock runs out even after quota is
-+				// restored. The probe is spent for any healable provider rather than
-+				// only for scoped blocks, because our strategies also vouch for the
-+				// unscoped block (`blockScope: ""`) a legacy usage limit leaves behind.
-+				if (blockedUntil !== undefined && this.#deps.blocks.supportsHealing(args.provider)) {
- 					usage = await this.#deps.usage.report(args.provider, selection.credential, {
- 						...args.options,
- 						timeoutMs: this.#deps.usage.requestTimeoutMs,
-@@ -464,6 +526,7 @@ export class CredentialSelector {
- 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
+@@ -472,6 +536,7 @@ export class CredentialSelector {
  				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
+ 				allowanceSpent: remainingFraction === 0,
  				usageMeasured,
 +				priorityRank: AccountPins.priorityRankOf(args.priorityIndices, selection.index),
  				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
  				planPriority: planPriority(args.planGate, usage),
  				secondaryUsed: strategy ? normalizeUsageFraction(secondary) : 0,
-@@ -502,20 +565,51 @@ export class CredentialSelector {
+@@ -510,20 +575,51 @@ export class CredentialSelector {
  		options?: AuthApiKeyOptions,
  	): Promise<OAuthResolutionResult | undefined> {
  		await this.#deps.pool.adoptExternalChanges();
@@ -2102,7 +2040,7 @@ index af62d61..84b36db 100644
  		const strategy = this.#deps.strategies(provider);
  		const rankingContext: CredentialRankingContext = {
  			modelId: options?.modelId,
-@@ -540,8 +634,9 @@ export class CredentialSelector {
+@@ -548,8 +644,9 @@ export class CredentialSelector {
  		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
  		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
  		const checkUsage =
@@ -2114,7 +2052,7 @@ index af62d61..84b36db 100644
  		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
  		const sessionPreferredCredential =
  			sessionPreferredIndex !== undefined
-@@ -555,10 +650,12 @@ export class CredentialSelector {
+@@ -563,10 +660,12 @@ export class CredentialSelector {
  		// cache may still be warm. Providers without a verified idle boundary retain indefinite
  		// stickiness rather than risk switching while their prompt cache remains warm. New sessions
  		// (no preference), blocked pins, and sessions idle past the provider's sticky window still
@@ -2128,21 +2066,10 @@ index af62d61..84b36db 100644
  			strategy?.stickyWarmMs === undefined ||
  			sessionPreferredLastUsedAtMs === undefined ||
  			Date.now() - sessionPreferredLastUsedAtMs < strategy.stickyWarmMs;
-@@ -567,19 +664,56 @@ export class CredentialSelector {
+@@ -575,42 +674,101 @@ export class CredentialSelector {
  			sessionPreferredCanRefreshOrUse &&
  			!this.#deps.blocks.isBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
  		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
--		const shouldRank =
--			checkUsage &&
--			(!sessionPreferredIsAvailable ||
--				!sessionPreferredIsWarm ||
--				hasPlanRequirement ||
--				(policyReserveEnabled && !sessionPinIsExplicit));
--		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
--		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
--		// sibling — this respects the residual value of a same-account shared static prefix that other
--		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
--		const baseRankingOrder = credentials.map((_credential, index) => index);
 +		const shouldKeepOAuthSticky =
 +			selectionPolicy === undefined ||
 +			selectionPolicy.strategy === "sticky-session" ||
@@ -2191,42 +2118,76 @@ index af62d61..84b36db 100644
 +		// Accounts configured with an explicit routing priority lead the order
 +		// even when nothing is pinned, so reserve/priority policies take effect
 +		// on the non-ranking path too.
- 		const policyOrder = hasPriorityPolicy
--			? [...baseRankingOrder].sort((leftIndex, rightIndex) => {
++		const policyOrder = hasPriorityPolicy
 +			? [...order].sort((leftIndex, rightIndex) => {
- 					const leftPriority =
- 						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
- 					const rightPriority =
-@@ -587,7 +721,27 @@ export class CredentialSelector {
- 					return rightPriority - leftPriority || leftIndex - rightIndex;
- 				})
- 			: order;
--		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
++					const leftPriority =
++						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
++					const rightPriority =
++						this.#deps.policies.forCredential(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
++					return rightPriority - leftPriority || leftIndex - rightIndex;
++				})
++			: order;
 +
 +		// A pinned credential only suppresses ranking while it is both usable and prompt-cache warm.
 +		const sessionPreferredIsSticky = sessionPreferredIsAvailable && sessionPreferredIsWarm;
-+		const shouldRank =
+ 		const rankDespitePin =
+-			!sessionPreferredIsAvailable ||
+-			!sessionPreferredIsWarm ||
+-			hasPlanRequirement ||
+-			(policyReserveEnabled && !sessionPinIsExplicit);
++			!sessionPreferredIsSticky || hasPlanRequirement || (policyReserveEnabled && !sessionPinIsExplicit);
++		// A configured default account never ranks (a user decision, like an
++		// explicit pin), and fixed-order policies only rank for plan gates.
++		const fixedOrder =
++			(hasDefault && !hasPlanRequirement) ||
++			selectionPolicy?.strategy === "round-robin" ||
++			selectionPolicy?.strategy === "failover";
+ 		// A warm automatic pin whose allowance is spent keeps serving on paid overage
+ 		// (Codex credits) and is never blocked, so check it and rank when spent: a
+ 		// sibling with renewable allowance left must take over (#13889). tryOAuth
+ 		// reads this same report for the pin, so it is handed on below.
+ 		const sessionPreferredUsage =
+-			checkUsage && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
++			checkUsage && !fixedOrder && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
+ 				? await this.#deps.usage.report(provider, sessionPreferredCredential, {
+ 						...options,
+ 						timeoutMs: this.#deps.usage.requestTimeoutMs,
+ 					})
+ 				: undefined;
+ 		const shouldRank =
+-			checkUsage &&
+-			(rankDespitePin ||
+-				(sessionPreferredUsage !== undefined &&
+-					remainingUsageFraction(strategy, sessionPreferredUsage, rankingContext, Date.now()) === 0));
 +			hasDefault && !hasPlanRequirement
 +				? false
 +				: checkUsage &&
-+					(selectionPolicy?.strategy === "least-used"
-+						? !sessionPreferredIsSticky || hasPlanRequirement || (policyReserveEnabled && !sessionPinIsExplicit)
-+						: selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
-+							? hasPlanRequirement
-+							: !sessionPreferredIsSticky ||
-+								hasPlanRequirement ||
-+								(policyReserveEnabled && !sessionPinIsExplicit));
-+		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
-+		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
-+		// sibling — this respects the residual value of a same-account shared static prefix that other
-+		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
-+		const baseRankingOrder = credentials.map((_credential, index) => index);
++					(selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
++						? hasPlanRequirement
++						: rankDespitePin ||
++							(sessionPreferredUsage !== undefined &&
++								remainingUsageFraction(strategy, sessionPreferredUsage, rankingContext, Date.now()) === 0));
+ 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
+ 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
+ 		// sibling — this respects the residual value of a same-account shared static prefix that other
+ 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
+ 		const baseRankingOrder = credentials.map((_credential, index) => index);
+-		const policyOrder = hasPriorityPolicy
+-			? [...baseRankingOrder].sort((leftIndex, rightIndex) => {
+-					const leftPriority =
+-						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
+-					const rightPriority =
+-						this.#deps.policies.forCredential(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
+-					return rightPriority - leftPriority || leftIndex - rightIndex;
+-				})
+-			: order;
+-		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
 +		let rankingOrder =
 +			shouldRank && sessionId && selectionPolicy?.strategy !== "least-used" ? baseRankingOrder : policyOrder;
  		const sessionPreferredRankingPos =
  			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
  				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
-@@ -598,7 +752,7 @@ export class CredentialSelector {
+@@ -621,7 +779,7 @@ export class CredentialSelector {
  				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
  			];
  		}
@@ -2235,7 +2196,7 @@ index af62d61..84b36db 100644
  			? await this.#rankOAuthSelections({
  					providerKey,
  					provider,
-@@ -611,10 +765,11 @@ export class CredentialSelector {
+@@ -634,10 +792,11 @@ export class CredentialSelector {
  					rankingContext,
  					blockScope,
  					blockScopes,
@@ -2245,21 +2206,21 @@ index af62d61..84b36db 100644
  					.map(idx => credentials[idx])
 -					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
 +					.filter((selection): selection is NonNullable<typeof selection> => Boolean(selection))
- 					.map(selection => ({
- 						selection,
- 						usage: null,
-@@ -641,7 +796,10 @@ export class CredentialSelector {
- 		const reserveWouldEvictBeforePreflight = reserveWouldEvictAutomaticPin(false);
- 		// A warm automatic pin normally wins. Reserve is the one policy allowed
- 		// to evict it, and only while a sibling is confirmed outside reserve.
+ 					.map(selection =>
+ 						selection.index === sessionPreferredIndex && sessionPreferredUsage !== undefined
+ 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
+@@ -675,7 +834,10 @@ export class CredentialSelector {
+ 				);
+ 			});
+ 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
 +		// An explicit selection policy other than sticky/round-robin/least-used
 +		// owns the order, so do not hoist the sticky past it.
  		if (
 +			shouldKeepOAuthSticky &&
  			!hasPlanRequirement &&
  			sessionPreferredCandidate > 0 &&
- 			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !reserveWouldEvictBeforePreflight))
-@@ -652,14 +810,20 @@ export class CredentialSelector {
+ 			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !pinEvictedBeforePreflight))
+@@ -686,14 +848,20 @@ export class CredentialSelector {
  		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
  		// the session-preferred credential (or the first candidate when no
  		// session preference exists yet) even if its cached token still looks
@@ -2285,7 +2246,7 @@ index af62d61..84b36db 100644
  				let syncedPeerCredential = false;
  				if (initialCredentialId !== undefined) {
  					const beforeSync = candidate.selection.credential;
-@@ -677,7 +841,7 @@ export class CredentialSelector {
+@@ -711,7 +879,7 @@ export class CredentialSelector {
  					candidate.selection.credential = latestCredential;
  					return;
  				}
@@ -2294,7 +2255,7 @@ index af62d61..84b36db 100644
  				try {
  					// Hand the refresher a stale clone (expires:0) so its
  					// not-yet-expired short-circuit doesn't suppress the forced
-@@ -698,7 +862,7 @@ export class CredentialSelector {
+@@ -742,7 +910,7 @@ export class CredentialSelector {
  						const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
  						if (idx !== -1) candidate.selection.index = idx;
  					} else {
@@ -2303,7 +2264,7 @@ index af62d61..84b36db 100644
  						if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
  					}
  				} catch (error) {
-@@ -716,8 +880,8 @@ export class CredentialSelector {
+@@ -760,8 +928,8 @@ export class CredentialSelector {
  						// A dead grant discovered during preflight must be disabled here too —
  						// the final candidate pass below skips every `preflightFailures` entry,
  						// so if this branch only blocked the row (like the transient case), the
@@ -2314,15 +2275,15 @@ index af62d61..84b36db 100644
  						const outcome = await this.#deps.refresher.disableDefinitiveFailure(
  							provider,
  							credentialId,
-@@ -760,6 +924,7 @@ export class CredentialSelector {
+@@ -804,6 +972,7 @@ export class CredentialSelector {
  
- 		const reserveWouldEvictAfterPreflight = reserveWouldEvictAutomaticPin(true);
+ 		const pinEvictedAfterPreflight = automaticPinWouldBeEvicted(true);
  		if (
 +			shouldKeepOAuthSticky &&
  			!hasPlanRequirement &&
  			preferredCandidate !== undefined &&
  			!preflightFailures.has(preferredCandidate) &&
-@@ -779,6 +944,22 @@ export class CredentialSelector {
+@@ -823,6 +992,22 @@ export class CredentialSelector {
  		// by allowing the normal candidate fallback to attempt the request.
  		const enforcePlanRequirement =
  			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
@@ -2345,7 +2306,7 @@ index af62d61..84b36db 100644
  
  		// Plan-gated models rank on every resolve to re-verify account tiers,
  		// so the drain-urgency order can flip between two eligible accounts as their
-@@ -796,19 +977,26 @@ export class CredentialSelector {
+@@ -840,19 +1025,26 @@ export class CredentialSelector {
  			}
  		}
  
@@ -2377,7 +2338,7 @@ index af62d61..84b36db 100644
  				if (preflightFailures.has(candidate)) continue;
  				const candidateAccountId = candidate.selection.credential.accountId;
  				if (pass.enforceAccounts && (candidateAccountId === undefined || !accountIds?.has(candidateAccountId)))
-@@ -824,14 +1012,22 @@ export class CredentialSelector {
+@@ -868,14 +1060,22 @@ export class CredentialSelector {
  					rankingContext,
  					blockScope,
  					blockScopes,
@@ -2402,14 +2363,17 @@ index af62d61..84b36db 100644
  	#syncOAuthSelectionFromStore(
  		provider: string,
  		selection: { credential: OAuthCredential; index: number },
-@@ -893,7 +1089,24 @@ export class CredentialSelector {
+@@ -937,7 +1137,27 @@ export class CredentialSelector {
  			!allowBlocked &&
  			this.#deps.blocks.isBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
  		) {
 -			return undefined;
 +			// Default-account and sticky selection can bypass ranking. Give a
 +			// healable block the same usage probe before skipping this credential.
-+			if (!usagePrechecked && this.#deps.blocks.supportsHealing(provider)) {
++			if (
++				!usagePrechecked &&
++				this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes ?? blockScope)
++			) {
 +				const targetId = this.#credentialIdAt(provider, selection.index);
 +				if (targetId === undefined) return undefined;
 +				await raceSignal(
@@ -2428,7 +2392,7 @@ index af62d61..84b36db 100644
  		}
  
  		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
-@@ -903,7 +1116,7 @@ export class CredentialSelector {
+@@ -947,7 +1167,7 @@ export class CredentialSelector {
  		// resynced selection.index from the store. A concurrent disable during the
  		// usage/refresh awaits below can shift positional indices, so every later
  		// refresh / persist / CAS-disable addresses the row by this stable id.
@@ -2437,7 +2401,7 @@ index af62d61..84b36db 100644
  
  		const planGate = providedPlanGate ?? this.#deps.strategies(provider)?.planGate?.({ modelId: options?.modelId });
  		const hasPlanRequirement = planGate !== undefined;
-@@ -979,7 +1192,7 @@ export class CredentialSelector {
+@@ -1023,7 +1243,7 @@ export class CredentialSelector {
  				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
  				if (idx !== -1) selection.index = idx;
  			} else {
@@ -2446,7 +2410,7 @@ index af62d61..84b36db 100644
  				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
  			}
  			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
-@@ -1011,7 +1224,17 @@ export class CredentialSelector {
+@@ -1055,7 +1275,17 @@ export class CredentialSelector {
  				}
  			}
  			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
@@ -2465,7 +2429,7 @@ index af62d61..84b36db 100644
  			return { apiKey: result.apiKey, credential: updated, credentialId };
  		} catch (error) {
  			const errorMsg = String(error);
-@@ -1055,4 +1278,201 @@ export class CredentialSelector {
+@@ -1100,4 +1330,201 @@ export class CredentialSelector {
  
  		return undefined;
  	}
@@ -2502,9 +2466,19 @@ index af62d61..84b36db 100644
 +			kind: "target",
 +			credentialId: row.id,
 +		});
-+		return resolved
-+			? { apiKey: resolved.apiKey, credentialId: resolved.credentialId, credentialType: "oauth", source: "oauth" }
-+			: undefined;
++		return resolved ? this.#resolvedOAuthCredential(resolved) : undefined;
++	}
++
++	/** Shape an OAuth resolution as a selection credential carrying its non-secret account scope. */
++	#resolvedOAuthCredential(resolved: ResolvedOAuthSelection): ResolvedAuthCredential {
++		const { orgId, region, inferenceRegion } = resolved.credential;
++		return {
++			apiKey: resolved.apiKey,
++			credentialId: resolved.credentialId,
++			credentialType: "oauth",
++			source: "oauth",
++			oauthIdentity: { orgId, region, inferenceRegion },
++		};
 +	}
 +
 +	/** True when the row a session sticky points at still exists, matches type, and is unblocked. */
@@ -2631,17 +2605,7 @@ index af62d61..84b36db 100644
 +				kind: "live-usage",
 +				attemptedCredentialIds,
 +			});
-+			if (oauthResolved) {
-+				return {
-+					ok: true,
-+					credential: {
-+						apiKey: oauthResolved.apiKey,
-+						credentialId: oauthResolved.credentialId,
-+						credentialType: "oauth",
-+						source: "oauth",
-+					},
-+				};
-+			}
++			if (oauthResolved) return { ok: true, credential: this.#resolvedOAuthCredential(oauthResolved) };
 +			for (const credentialId of liveCredentialIds) {
 +				if (attemptedCredentialIds.has(credentialId)) continue;
 +				const resolved = await tryCredential(credentialId);
@@ -2751,10 +2715,10 @@ index 0000000..3d44a5c
 +	return selection.eligibleCredentialIds.filter(id => currentIds.has(id));
 +}
 diff --git a/packages/ai/src/auth/store.ts b/packages/ai/src/auth/store.ts
-index b37d0a9..bda58c6 100644
+index 1145adc..fd01e12 100644
 --- a/packages/ai/src/auth/store.ts
 +++ b/packages/ai/src/auth/store.ts
-@@ -34,6 +34,12 @@ export interface CredentialRowStore {
+@@ -35,6 +35,12 @@ export interface CredentialRowStore {
  	/** Record the current auth revision after a local mutation already notified consumers. */
  	acknowledgeLocalChanges?(): void;
  	listAuthCredentials(provider?: string): StoredAuthCredential[];
@@ -2768,10 +2732,10 @@ index b37d0a9..bda58c6 100644
  	 * Optional store hook to re-hydrate the credential snapshot from its
  	 * backing source. Remote broker stores re-fetch `GET /v1/snapshot` so a
 diff --git a/packages/ai/src/auth/types.ts b/packages/ai/src/auth/types.ts
-index 9e02c6f..fe6ed7d 100644
+index 89fc287..dad678f 100644
 --- a/packages/ai/src/auth/types.ts
 +++ b/packages/ai/src/auth/types.ts
-@@ -45,6 +45,89 @@ export type AuthCredentialEntry = AuthCredential | AuthCredential[];
+@@ -45,6 +45,91 @@ export type AuthCredentialEntry = AuthCredential | AuthCredential[];
  /** Provider-to-credential snapshot returned by the storage facade. */
  export type AuthStorageData = Record<string, AuthCredentialEntry>;
  
@@ -2809,6 +2773,8 @@ index 9e02c6f..fe6ed7d 100644
 +	credentialId?: number;
 +	credentialType?: AuthCredential["type"];
 +	source: CredentialOriginKind;
++	/** Non-secret account scope of the OAuth credential that answered, when one did. */
++	oauthIdentity?: OAuthRequestIdentity;
 +}
 +
 +/** Outcome of an explicit credential-selection resolve. */
@@ -2861,7 +2827,7 @@ index 9e02c6f..fe6ed7d 100644
  /** Identity fields matched by an account routing policy. */
  export interface AuthAccountSelector {
  	readonly email?: string;
-@@ -239,6 +322,8 @@ export interface CheckCredentialsOptions {
+@@ -242,6 +327,8 @@ export interface CheckCredentialsOptions {
  	timeoutMs?: number;
  	/** Provider → base URL override, same shape as {@link AuthStorage.usage.reports}. */
  	baseUrlResolver?: (provider: Provider) => string | undefined;
@@ -2870,7 +2836,7 @@ index 9e02c6f..fe6ed7d 100644
  	/**
  	 * Optional end-to-end probe. When provided, `checkCredentials` invokes it
  	 * for every credential where a usable bearer is available (API key, or
-@@ -319,6 +404,22 @@ export type AuthStorageOptions = {
+@@ -335,6 +422,22 @@ export type AuthStorageOptions = {
  	accountPolicies?: AuthAccountPolicies;
  	/** Global reserve fallback for accounts without a matching reservePct policy. */
  	defaultReservePct?: number;
@@ -2893,7 +2859,7 @@ index 9e02c6f..fe6ed7d 100644
  	usageFetch?: typeof fetch;
  	usageRequestTimeoutMs?: number;
  	usageLogger?: UsageLogger;
-@@ -364,16 +465,13 @@ export type AuthStorageOptions = {
+@@ -384,16 +487,13 @@ export type AuthStorageOptions = {
  };
  
  /**
@@ -2917,18 +2883,18 @@ index 9e02c6f..fe6ed7d 100644
   *
   * `blockedUntilMs` (epoch ms) is the just-blocked credential's own unblock
   * deadline — the later of the caller's retry-after and any exhausted window
-@@ -465,6 +563,8 @@ export type AuthApiKeyOptions = {
+@@ -485,6 +585,8 @@ export type AuthApiKeyOptions = {
  	 * that a peer/broker rotated out from under us is replaced before retrying.
  	 */
  	forceRefresh?: boolean;
 +	/** Credential-selection policy restricting resolution to a caller-owned pool. */
 +	selection?: AuthCredentialSelectionPolicy;
+ 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
+ 	refreshReason?: OAuthRefreshReason;
  };
- 
- /**
-@@ -551,10 +651,11 @@ export interface OAuthAccountSummary {
- 	/** True when this account is the session-sticky OAuth credential requested by `listOAuthAccounts`. */
- 	active: boolean;
+@@ -584,10 +686,11 @@ export interface OAuthAccountSummary {
+ 	/** Last use recorded on the session sticky; set only on the `active` account. */
+ 	lastUsedAtMs?: number;
  }
 -/** Scope a matching-key invalidation to a session or signal. */
 +/** Scope a matching-key invalidation to a session, signal, or credential pool. */
@@ -2939,7 +2905,7 @@ index 9e02c6f..fe6ed7d 100644
  }
  
  /** Options for refreshing one stored OAuth row through durable ownership. */
-@@ -680,6 +781,8 @@ export type MarkUsageLimitOptions = {
+@@ -717,6 +820,8 @@ export type MarkUsageLimitOptions = {
  	apiKey?: string;
  	credentialId?: number;
  	signal?: AbortSignal;
@@ -2948,7 +2914,7 @@ index 9e02c6f..fe6ed7d 100644
  };
  
  /** Resolve a failed request to its credential and rotate if possible. */
-@@ -689,6 +792,8 @@ export type RotateCredentialOptions = {
+@@ -726,6 +831,8 @@ export type RotateCredentialOptions = {
  	apiKey?: string;
  	credentialId?: number;
  	signal?: AbortSignal;
@@ -2956,8 +2922,8 @@ index 9e02c6f..fe6ed7d 100644
 +	selection?: AuthCredentialSelectionPolicy;
  };
  
- /** Filter saved reset credits by provider and session. */
-@@ -840,6 +945,17 @@ export interface KeysApi {
+ /**
+@@ -892,6 +999,17 @@ export interface KeysApi {
  	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
  	 */
  	get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined>;
@@ -2975,7 +2941,7 @@ index 9e02c6f..fe6ed7d 100644
  	/** Resolve a bearer together with its durable stored credential row id, when known. */
  	getWithCredential(
  		provider: string,
-@@ -924,7 +1040,10 @@ export interface KeysApi {
+@@ -980,7 +1098,10 @@ export interface KeysApi {
  	 * Used by web-search providers and other consumers that hold an AuthStorage
  	 * directly (no ModelRegistry in scope).
  	 */
@@ -2986,8 +2952,8 @@ index 9e02c6f..fe6ed7d 100644
 +	): ApiKeyResolver;
  }
  
- /** OAuth login, access, account identity, and refresh operations. */
-@@ -977,6 +1096,17 @@ export interface OAuthApi {
+ /** Controls whether a row-id refresh may reuse a token minted by this refresher. */
+@@ -1043,6 +1164,17 @@ export interface OAuthApi {
  		credentialId: number,
  		options?: AuthApiKeyOptions,
  	): Promise<OAuthAccessResolution | undefined>;
@@ -3005,176 +2971,33 @@ index 9e02c6f..fe6ed7d 100644
  	/**
  	 * Read-only list of stored OAuth accounts for `provider` in stable storage
  	 * order, WITHOUT refreshing any token. The array position (0-based) is the
+diff --git a/packages/ai/test/auth-broker-refresh-backoff.test.ts b/packages/ai/test/auth-broker-refresh-backoff.test.ts
+index 2821926..ed9293d 100644
+--- a/packages/ai/test/auth-broker-refresh-backoff.test.ts
++++ b/packages/ai/test/auth-broker-refresh-backoff.test.ts
+@@ -175,7 +175,7 @@ describe("auth broker OAuth refresh backoff", () => {
+ 		if (!brokerStorage) throw new Error("test setup failed");
+ 		const model = { provider: PROVIDER, id: "gateway-model", api: "openai-responses", baseUrl: "http://gateway" };
+ 		const resolve = buildGatewayApiKeyResolver(
+-			brokerStorage,
++			{ storage: brokerStorage, resolveModel: () => undefined },
+ 			model as Model<Api>,
+ 			"gateway",
+ 			{ apiKey: "access-0" },
 diff --git a/packages/ai/test/claude-block-healing.test.ts b/packages/ai/test/claude-block-healing.test.ts
-index 81a97d7..335fad0 100644
+index 641e0e4..0c34fc2 100644
 --- a/packages/ai/test/claude-block-healing.test.ts
 +++ b/packages/ai/test/claude-block-healing.test.ts
-@@ -217,26 +217,6 @@ describe("claude usage-block healing", () => {
- 		expect(await storage.keys.get("anthropic", "s-partial", { modelId: "claude-fable-5-1" })).toBe("access-2");
+@@ -304,7 +304,6 @@ describe("claude usage-block healing", () => {
+ 		});
+ 		expect(blocks.get("1:tier:fable")).toBeLessThan(Date.now() + 120_000);
  	});
- 
--	it("spends no usage request on a block its scopes cannot heal", async () => {
--		// An unscoped block (Opus/Sonnet usage limit, refresh failure) is outside
--		// every scope the strategy vouches for, so probing cannot change it.
--		const { storage, clearedScopes, probeCount } = makeHarness(
--			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
--			"",
--		);
--		storages.push(storage);
--		await storage.credentials.reload();
--
--		const health = await storage.health.model("anthropic", {
--			modelId: "claude-fable-5-1",
--			reserveFraction: 0.1,
--		});
--
--		expect(probeCount()).toBe(0);
--		expect(clearedScopes).toEqual([]);
--		expect(health.accounts[0]?.state).toBe("depleted");
--	});
 -
  	it("keeps the block when the report predates it", async () => {
  		// A broker serves its retained last-good report for hours after `/usage`
  		// starts failing; those healthy limits describe the account before the
-@@ -254,24 +234,4 @@ describe("claude usage-block healing", () => {
- 		expect(clearedScopes).not.toContain("tier:fable");
- 		expect(await storage.keys.get("anthropic", "s-stale", { modelId: "claude-fable-5-1" })).toBe("access-2");
- 	});
--
--	it("spends no probe while an unscoped block also holds the credential", async () => {
--		// A tier block written after a global one carries the later deadline, but
--		// the global block still makes the credential unusable, so clearing the
--		// tier early buys nothing and the request must not be spent.
--		const { storage, probeCount, blocks } = makeHarness(
--			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
--		);
--		storages.push(storage);
--		blocks.set("1:", Date.now() + 60 * 60_000);
--		await storage.credentials.reload();
--
--		const health = await storage.health.model("anthropic", {
--			modelId: "claude-fable-5-1",
--			reserveFraction: 0.1,
--		});
--
--		expect(probeCount()).toBe(0);
--		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("depleted");
--	});
- });
-diff --git a/packages/catalog/src/compat/rules.json b/packages/catalog/src/compat/rules.json
-index 6754cde4e5aa4eb313586d1d2bf4895dffe70485..60a96bfe7b39a3f338bd5be17bb75dff0c0253a1 100644
-GIT binary patch
-delta 886
-zcmbNXQ~2I4;SF*38BHfQJ`<ljUzTs$D@HX&)9DwP7-c3uye&07bt#kT^a(7CVv`FV
-zrc8eMSZ8_yC!@gheg`Iw$yyKirw8;ga!fXObZzp>$1an-AJ3bd{X=^ChGr)5>1Q<<
-zd8SWrU}8sBS2Q{ANeWDj&}4<%9Ft|A2u${VY&Ch_Q;_+slk1<UPyTS1d-8%O{}?SM
-z7d}j${O_;k^aIUI>_|p>Kel4Dn9O)rZMvO5Bj@Dx&$^f_jV3ofQ{9~K+>VjS(h|g;
-zobWtyvfRrWCPM>|QYcqz^1nAclLKC@Vlp&=s&bor?v32^I3Gs-=`zlYs+0fy)t=n&
-zfpxONSKa9aC5(cTW(!Qez|JH*{emDP$K-%7{ESAE3m>XYPIwN|d5O_z^TM|ZjFTUK
-zFrWP6-D4(WnC$|Sf4tL~Z1-U)lL;t*RVODr7nm&daU+wd(d5K06>uA6CKr5K#bjzZ
-zIq}Q1$pNo8C+oh?n(oldC^Ef4nNb{M;bg}DkWe}BKyvclH-%8=<xIByZZrAcU&-kL
-zjZFNLKYYz#w4BU%SATN+51z>{A4`FR1;L>_|3?{<g~4RQA6Anqzi(qSnr!gn3A2%b
-z<z&Mj&Xc2lu46I*2jAp^KgN>{?g>r5z{I$L$;2ESKm~tXCinl|#bjy>;%+YZ<IBio
-z29p9SpRD&*X7c}sLen2GGMZ0s;9x9bHZljR1{nxX58Qx(<tK0XU&LeqvrcL<?+a;=
-zJNc(hWV|%JftfLTa>57p=~o#Udzma@W=KueeXk346r<(#MrKA;MrLCJNc0u_K^QUF
-z;U3rxjm*XdkVt^YYQxhH#0elL7Bd;b{2(=*pPg|plM&oaAifkR947bw-Z@>8i&1L&
-z0TxCLSo+^Jy@H!ja`Jpx&gnK>j7^LtlNs--PQM__Bs~2)7h@xnsljwbE+*CK0#Zz(
-X?OV7R+qZBtwQu2O-oAyK<<$iMMs{`0
-
-delta 800
-zcmcY%OL*Q+;SF*3CmTFUp4{-@EThR}#=C}->mP2IEb|~`vi48u=>;uJ;?sLI8F{7$
-zI5M$Me))iZx<Ef8$K>~qiYEI$1gn|+;Bm@i{YNR28y@IPR=CYE`OcHT$%&6sChz;F
-zJ$cX5g_B*LfY_ST8(Nsyk<8+HVm(>!soL~^{*0WH^PYDxSr|<=e55+r;4k0g{#V|U
-zUuN-5ZhLW^$-)vzxOBS08z!FVXE_)-CQHAvW3-&icvlUiWpn>4ZAK;o6PVh~?_V1+
-zG8#@ccm$T7{Qh;=<TY=%FdA-7e5b(3WMm3cIQhZ{z3C4`8967veZP*$2w~ZU50@u5
-zzBiwI>*Gcy6QjwBUn{1|`7-iPzvIj(GuhztDkc-l$%<d6O%`|!(wa4`g;8X>g9@Yg
-zWPz{zjHa6vzUnYCnHfy}_`_=QzJHR_FEldoPu}n?gVAC#<6Zs9@;`YduXrK_5*7r9
-zTKvz_$==^=CtLp5#%MVC!;dG-hL)C-KmKr@EcI(0lQAr8j3*o16PiAOnQ;S?u{qQa
-zE|dNL>|!!825~nV{PksIGKEQjl}~>6R%W^!7o+EN2TsN!W+OAO%E<<Qjp6ajJ$(Ta
-zqxsYl#v&$jm{ovDO@8}c8stF!>4A)lml(~bJF+llO;-5GK7A?^V=t2h%ovbDU9g*`
-zD>E@>Pu}p2YjV_Yd#G)eus8uJgP1qj;hqr4!e&NTaD(Ku;VA^-8j${CCIgsPq^6%|
-zXWYwV2zMTcF9iyY$^L(KG8#`eY-O~Vyx<1s<P}eJrYmqU?wY=tlTmW=d|A%vf4CT%
-z7>y@0-c_AGL5@jy`gU%{#_6}X7$v7Surl(3#KhW5co^GDc$nHtc$l}B@UXnP000(N
-BPHX@G
-
-diff --git a/packages/catalog/src/compat/rules/classes/anthropic.kdl b/packages/catalog/src/compat/rules/classes/anthropic.kdl
-index 50339c5..75b3e2e 100644
---- a/packages/catalog/src/compat/rules/classes/anthropic.kdl
-+++ b/packages/catalog/src/compat/rules/classes/anthropic.kdl
-@@ -36,6 +36,16 @@ class "anthropic" {
- 			supports-server-compaction #true
- 		}
- 	}
-+	// Opus 5.5 rejects forced tool use with a 400 ("tool_choice: type \"tool\"
-+	// and \"any\" are not supported for this model"); verified 2026-09-24 against
-+	// api.anthropic.com, where Opus 5, Sonnet 5 and the 4.x line still accept it.
-+	// Transports downgrade any/tool to auto so the tool stays callable. The upper
-+	// bound keeps squashed Opus 4.5 ids (venice `claude-opus-45`, revision 45) out.
-+	family "opus" {
-+		revision ">=5.5 <45" {
-+			supports-forced-tool-choice #false
-+		}
-+	}
- 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
- 		family "fable" {
- 			revision ">=5" {
-diff --git a/packages/catalog/src/models.json b/packages/catalog/src/models.json
-index 68aa4d86af9a4e9a05c88f45fd25425630cffbd2..7bbad91a16b79ee2f84780c133a05e5372e3d5ad 100644
-GIT binary patch
-delta 1303
-zcmbNbXg}-fMf+JBS{PfHT9{i{T3B1yTG(4SS~y#{TDV(yT6kOdw(w85u>HtXei!EH
-z0bVSe?RPHox8J!e(0=E#VEdiRLhW}h3va)3S!B|g$rF0nr!V-q^z-zBt1j$d#na#Y
-z;^mrtcLzWF^Z+Ln&gph%`DEJHE);EFyHKos?LzVPwF@QM*DjRYzILIM(n^p4+b=Md
-z?`7OxAi~_lJiTCht>pBA1Hziq4IKH{+hYTy+hYS{+G7J`+hYUd+G7Lcx5ox3OfQ&j
-zIZxDNxxg(2CXf-RZs2G)IHJ&Qa73});E2+8gCojcOTfyv7l^5BW!%1hI=>&|^cY(e
-z&gordDq_=PZB;m?uQF2+pI$#*RCD?Sd6il1F}5o0F}AAhF}7;$F}CXMF}51*F}9l9
-zV{EmmOtw$Y(7MM6vKQUyiPPie7<Eja@N{Wjdq9;|dq9<Tdq9;=dq9<Ldq9<5dq9<b
-zdq9;zdq9<8dq9;@dq9<Odq9;*dq9<Gdq9<0dq9<Wdq9;%dq9<Cdq9;{dq9<Sdq9;<
-zdq9<Kdq9<4dq9<adq9=L_JAtKjsK=k&(M<GK4H1j5lpuns1+8Qrclj4{Xnau;Pe1(
-zY1U~9)$G%C6{<C+Pw;n$oE~7aNPl|34&MCfAG|g0f=pp!pKfqOfwR4!)2Y3n)49E%
-z)1|$j)3v>z)2+Rr)4jc*)1$qh)3d#x)2qFp)4RQ()2F?l)3?2#)33dt)4#o-GoZbo
-zGqAm&GpN0wGq}B=Go-zsGqk;+GpxO!GrYZ^GornqGqSy)GpfCyGrGN?Gp4<uGq$~;
-zGp@a$Grql`GoihpGqJs(GpW6xGr7H>Go`(tGqt^-Gp)U#Grhf_Go!trGqb&*GpoIz
-zGrPT@GpD_vGq=5<Gq1g%Grzr{v!K18v#`COv#7nGv$(yWv!uPCvvhkwXPHh6DE`By
-zE9_P%-acVlnLE?;1l8H{@I=c2@_E#Bh4p22(*w3w=}rG|O!&=o1!ora=?br0EVn;6
-zRc6B6{{L-R`~SD)?f>6awEurw+5Z1+Rr~+9)!YBSt*O`!N)6L5FqS{wp0KRenhS;d
-zmv#CAtz|y#XSdh3pWR;9es+6(``PUc?Ps?)wx8YJ)P8n*bNkutE$wHwx3-_%-qwD0
-zdwcuY?H%oBw|BOm-QLxHc6)dG+3h{;XSesZpWWWqes+6*``PUi+RtvE*nW2Vr1rDh
-zC%2#7K4tsa?Nfuo&{74+P5-waD4D9wGW~!si}v)hCUf|w-`AAln||J84(s%SZoq2A
-z+WSSPwfBooZ|@hK(cUjQv%Oz*R(rqb?Ct%cbJR4!UfIyZUow3|<LvtB4kpr~+Yj5%
-zsb)cwn4q=HcKWid!lBa_yqkS!`h%BcInxi+&*7QAAaIWN_5(o+jiI@_{-BfQ^s@IN
-z($fVxg+-=MxW})7P0RERMttmB&(E=Co*rPjjJy4v|D5)B{&U;k`Oj;A=Rd#wo&SRN
-zcm508-}x_Uf9Jor{hj}k?eF}TuDA(u*Y*WJm$ERnFVI@nzCdev`vR>M?F+P4wlC0H
-c)xJP$b^8LXHSG(u*0wLuTDN_H*819I0ER1Ag#Z8m
-
-delta 1330
-zcmZ0yXg}-RMf+JBS{PfHT9{i{T3B1yTG(4SS~y#{TDV(yT6kOdw(w85Fx_F3u*G(V
-z*Zi@J(-YE!v!?H#&hIfjKyOafbcM(K-R*ZT^S9r<EYN=UvS9n&%R=pUFAHzKds$@C
-z8Hk#KRSIqG1q(&n3l@sC7c3NSFIXtiUa(Mdd%;4f#Fg6(CNjCPPOH?CXg3IuZZ`;!
-zX*URvZ8r#zYc~jx-)<0~aJ&HIfWqkuHk1`_&+k{rVT71#uw5Z*`UJUY9MkhUojBWV
-zk0`X;9#L$!J)*ST_K5PE61XnK?E--+oEUC5*sf48z1~KJvpvg3r9I0=wLQy5tv$;|
-zy*<lDqdm(;b9<JJR-q}#7`5#RqFQ|H?E;lr?E;nB?E;lL?E;m$?E;m0?E;nh?E;ks
-z?E;mC?E;lX?E;m??E;l1?E;mi?E;l%?E;nN?E;k+?E;mS?E;ln?E;n7?E;lH?E;my
-z?E;l{?E;nd?E;k!+XX5ezyAkYwpqY1h;iFp2^XgA6TUi?Gfz)waN?QHuTag=?%&|l
-z?%&|t?%&|j?%&|r?%&|n?%&|v?%&|i?%&|q?%&|m?%&|u?%&|k?%&|s?%&|o?%&|w
-z?%xp5?%xpD?%xp9?%xpH?%xp7?%xpF?%xpB?%xpJ?%xp6?%xpE?%xpA?%xpI?%xp8
-z?%xpG?%xpC?%xpK?%$Bm?%$Bu?%$Bq?%$By?%$Bo?%$Bw?%$Bs?%$B!?%$Bn?%$Bv
-z?%$Br?%$Bz?%$Bp?%$Bx?%$Bt?%$B#?%z<*?%z<@?%z<<?%z<{?%z<-?%z<l-M^tM
-zBo*Z8faw!fC@F0}@SyB46CzTl+a6H}oPOYPS<Z9=>uE95FSPJiO+Ro<A#D1A*}_mQ
-z3OlQIGqt@dYkODT_O7DsU1i(5s<wC4+uqgGZ{N1Op^|a?gt;|AtkWN~GICEpkgp}N
-zJ#S5|84J49v`Vdn>Hlpe&Y$kU#~(C(fpwqLbcd(4Inys#EEe7-Qu~o(`Un3xoYMoE
-zw0x&eV6Neu{-C(73gWB>f=;f}4W8E4Oy6L{$G%<RQq5n8>h{L7we5{(>)IR7*0(pF
-zZD?;i+t}WCwyC}GY;$|#*_QUkv#sroXWQBv&$hQWp6zIFJlomcc($v(@oaZ{<Jq3}
-z#<RWcjc5DX8_)K)H=do)-gtImd*j(j?Tu$Aw>O@hvc2)_)D;fX9X1K8!4gdy<MsfD
-znc6JV=l`6_KfP9T8vFG7CUZEZ+rN<HX|ENX)?O<*y}ed+MtiO3%=TK*S?#r=v$xlZ
-z&T-b<9-udepK<#I`#DuCAT}rCbb(4O-RaA>3WrVytl`JJMu=wvCeMy-7jU1`F5o`5
-zUBG=_yMX)rb^-SV?E>x#+XdVgwF|f}ZWnN0vR%M^>EuV?tUB%H><J*Ve5U6eQBat!
-z@O!DlbcGUOJ&1wuNZo#5wy-TTJeWPF`@bv0u6jZiZ_W0Cg~H-s)rQme+^AKY&bN~v
-zO?Be-f-hy7jN1j~2)|{TzTsW1&-4lJP!xT*D6HK+&3ak;H0$N<)2vstPqSXxKFxYn
-c`!ws-?bEE+v`@2M+dj>D-S%nL>!(fy0KG>(4gdfE
-
 diff --git a/packages/catalog/test/build.test.ts b/packages/catalog/test/build.test.ts
-index 1fd3bcd..766a421 100644
+index 4f8b656..3b8a3da 100644
 --- a/packages/catalog/test/build.test.ts
 +++ b/packages/catalog/test/build.test.ts
 @@ -674,6 +674,29 @@ describe("openai-completions wire-quirk compat detection", () => {

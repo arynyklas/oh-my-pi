@@ -1,8 +1,8 @@
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index 997507c..fc79092 100644
+index ee2c879..4a2057e 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -23,8 +23,6 @@ import { HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
+@@ -21,8 +21,6 @@ import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
  
  const MAX_ATTEMPTS = 3;
  const BASE_RETRY_DELAY_MS = 500;
@@ -11,7 +11,7 @@ index 997507c..fc79092 100644
  
  const CLAUDE_USAGE_BETAS =
  	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-@@ -918,33 +916,62 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+@@ -939,40 +937,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	/**
  	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
  	 * Anthropic can restore the tier earlier (plan change, corrected counter),
@@ -19,12 +19,12 @@ index 997507c..fc79092 100644
 -	 * against the limits that actually gate a request of that kind — its own
 -	 * weekly row plus the shared umbrella windows — so a healthy report lifts
 -	 * the block while a spent shared 5-hour wall keeps it.
--	 *
--	 * Only Fable/Mythos appear: {@link blockScope} scopes reactive blocks for
--	 * those tiers alone, so no other scope can exist to heal.
 +	 * and the block then idles a usable account for days. A report may only lift
 +	 * a block when it proves recovery: partial evidence, malformed counters, or a
 +	 * still-spent shared wall keep it.
+ 	 *
+ 	 * Legacy and shared quota errors also leave account-wide blocks. Only a
+ 	 * complete report with every reported quota healthy can heal that scope.
  	 */
  	healableBlockScopes(report) {
 -		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
@@ -89,10 +89,17 @@ index 997507c..fc79092 100644
 +			const limits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier === tier);
 +			if (limits.every(isHealthy)) scopes.push({ blockScope: `tier:${tier}`, limits });
  		}
--		return [...tiers].map(tier => ({
--			blockScope: `tier:${tier}`,
--			limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
--		}));
+-		return [
+-			{
+-				blockScope: "",
+-				limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
+-				healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
+-			},
+-			...[...tiers].map(tier => ({
+-				blockScope: `tier:${tier}`,
+-				limits: [...sharedLimits, ...report.limits.filter(limit => limit.scope.tier === tier)],
+-			})),
+-		];
 +		return scopes;
  	},
  	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
@@ -592,19 +599,18 @@ index 0000000..e368867
 +	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 +}
 diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/src/cli/stats-cli.ts
-index 410e0ce..4d60432 100644
+index db1bd56..70bff4c 100644
 --- a/packages/coding-agent/src/cli/stats-cli.ts
 +++ b/packages/coding-agent/src/cli/stats-cli.ts
-@@ -5,7 +5,7 @@ /**
-  */
+@@ -6,6 +6,7 @@ /**
  
+ import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
  import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
--import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
-+import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
++import { formatBytes } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
- import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+ import { openStandaloneJudge } from "../judgment/standalone";
  import { openPath } from "../utils/open";
-@@ -15,7 +15,13 @@ /**
+@@ -15,7 +16,13 @@ /**
   * the final "Synced ..." summary still prints either way.
   */
  function createSyncProgressReporter(): {
@@ -619,7 +625,7 @@ index 410e0ce..4d60432 100644
  	finish: () => void;
  } {
  	const stream = process.stderr;
-@@ -32,7 +38,13 @@ function createSyncProgressReporter(): {
+@@ -32,7 +39,13 @@ function createSyncProgressReporter(): {
  			const label = chalk.dim(shortenSessionFile(event.sessionFile));
  			const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
  			const counter = chalk.cyan(`[${event.current}/${event.total}]`);
@@ -635,17 +641,16 @@ index 410e0ce..4d60432 100644
  			const trimmed = truncateToWidth(line, columns - 1);
  			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
-index 0631002..ba24d03 100644
+index ada0606..e2f7cf8 100644
 --- a/packages/coding-agent/src/cli/usage-cli.ts
 +++ b/packages/coding-agent/src/cli/usage-cli.ts
-@@ -7,30 +7,36 @@ /**
+@@ -7,39 +7,36 @@ /**
   * credentials produced no usage report are listed too, so the output
   * always covers the full credential pool.
   */
 -import {
 -	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 -	type AuthAccountPolicy,
--	type AuthStorage,
 -	type DisabledCredentialSummary,
 -	type OAuthAccountIdentity,
 -	resolveUsedFraction,
@@ -653,29 +658,29 @@ index 0631002..ba24d03 100644
 -	type UsageLimit,
 -	type UsageReport,
 -	type UsageUnit,
-+import type {
-+	AuthStorage,
-+	DisabledCredentialSummary,
-+	OAuthAccountIdentity,
-+	UsageHistoryEntry,
-+	UsageReport,
- } from "@oh-my-pi/pi-ai";
+-} from "@oh-my-pi/pi-ai";
++import type { DisabledCredentialSummary, OAuthAccountIdentity, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
  import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
  import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 -import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
--import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
-+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+-import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
++import { formatDuration, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { ModelRegistry } from "../config/model-registry";
  import { Settings } from "../config/settings";
- import { discoverAuthStorage } from "../sdk";
+ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 +import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
  import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 -import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
--
--const BAR_WIDTH = 28;
+-import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+ import {
+-	accountIdentityLabel,
+ 	collectStoredAccounts,
+ 	collectUnreportedAccounts,
+ 	selectReportableAccounts,
+ 	type UsageAccountIdentity,
+ } from "../slash-commands/helpers/usage-accounts";
 +import {
-+	collectUnreportedAccounts,
 +	computeProviderWindowStats,
 +	formatProviderName,
 +	formatUsageBreakdown,
@@ -683,38 +688,29 @@ index 0631002..ba24d03 100644
 +	type LimitStatus,
 +	type ProviderWindowStat,
 +	STATUS_COLOR,
-+	type UsageAccountIdentity,
 +	type UsagePolicyDiagnosticsOptions,
 +} from "../utils/usage-format";
-+
+ 
+ import { cfgRetryUsageReservePct } from "../session/settings";
+ 
+-const BAR_WIDTH = 28;
 +export * from "../utils/usage-format";
  
  export interface UsageCommandArgs {
  	action?: string;
-@@ -39,32 +45,10 @@ export interface UsageCommandArgs {
+@@ -48,7 +45,7 @@ export interface UsageCommandArgs {
  	redact?: boolean;
  	/** Show recorded usage-limit history instead of a live snapshot. */
  	history?: boolean;
 -	/** History window in days (with `history` or the `clients` action). */
 +	/** History window in days (with `history`). */
  	days?: number;
+ 	/** CLI `-e <path>` extension paths to load before fetching live reports. */
+ 	extensions?: string[];
+@@ -56,13 +53,6 @@ export interface UsageCommandArgs {
+ 	noExtensions?: boolean;
  }
  
--/** Identity slice of a stored credential, for "every account" coverage. */
--export interface UsageAccountIdentity {
--	provider: string;
--	type: "api_key" | "oauth";
--	email?: string;
--	accountId?: string;
--	projectId?: string;
--	enterpriseUrl?: string;
--	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
--	orgId?: string;
--	orgName?: string;
--	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
--	authorizedAt?: number;
--}
--
 -export interface UsagePolicyDiagnosticsOptions {
 -	/** Existing global fallback used when an account has no reserve override. */
 -	globalReservePct: number;
@@ -725,7 +721,7 @@ index 0631002..ba24d03 100644
  /**
   * Minimal-reveal masks for identity strings (`--redact`).
   *
-@@ -184,652 +168,6 @@ ): string[] {
+@@ -182,562 +172,6 @@ ): string[] {
  	return values;
  }
  
@@ -836,114 +832,9 @@ index 0631002..ba24d03 100644
 -	return `account ${index + 1}`;
 -}
 -
--/** Lowercased identity strings a report can be attributed to. */
--function reportIdentifiers(report: UsageReport): Set<string> {
--	const ids = new Set<string>();
--	const add = (value: unknown): void => {
--		if (typeof value === "string" && value) ids.add(value.toLowerCase());
--	};
--	const meta = report.metadata ?? {};
--	add(meta.email);
--	add(meta.accountId);
--	add(meta.projectId);
--	add(meta.orgId);
--	for (const limit of report.limits) {
--		add(limit.scope.accountId);
--		add(limit.scope.projectId);
--		add(limit.scope.orgId);
--	}
--	return ids;
--}
--
--/**
-- * Stored credentials that no usage report could be attributed to.
-- *
-- * Conservative on purpose: when a provider's reports carry no identity at
-- * all (or the credential is an API key alongside existing reports), we
-- * can't attribute, so we don't claim the account is missing.
-- */
--export function collectUnreportedAccounts(
--	reports: UsageReport[],
--	accounts: UsageAccountIdentity[],
--): UsageAccountIdentity[] {
--	const byProvider = new Map<string, UsageReport[]>();
--	for (const report of reports) {
--		const list = byProvider.get(report.provider) ?? [];
--		list.push(report);
--		byProvider.set(report.provider, list);
--	}
--	return accounts.filter(account => {
--		const providerReports = byProvider.get(account.provider) ?? [];
--		if (providerReports.length === 0) return true;
--		if (account.type === "api_key") return false;
--		// Org-decisive attribution when EITHER side carries an org (Anthropic
--		// multi-subscription): two orgs share every other identifier, so an
--		// org-scoped account is covered only by its own org's report, and an
--		// org-less legacy account is never covered by an org-attributed sibling
--		// report — its own fetch failing must surface as "no usage data". Its
--		// own ORG-LESS report still covers it, though: a mixed pool (fresh
--		// org-scoped logins beside pre-org-capture rows) must not duplicate
--		// every legacy account. The shared org is a GATE, not a match: two Team
--		// members share the org id while drawing on per-user pools, so coverage
--		// also requires the account's own base identity inside the same-org
--		// subset (an org-only account, with no base identifiers, is covered by
--		// any same-org report). The email/account fallback below applies only
--		// when both sides are org-less.
--		const accountOrg = account.orgId?.toLowerCase();
--		const ids = [account.email, account.accountId, account.projectId]
--			.filter((value): value is string => typeof value === "string" && value.length > 0)
--			.map(value => value.toLowerCase());
--		const sameOrgReports: UsageReport[] = [];
--		let sawReportOrg = false;
--		for (const report of providerReports) {
--			const metaOrg = report.metadata?.orgId;
--			if (typeof metaOrg === "string" && metaOrg) {
--				sawReportOrg = true;
--				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
--			}
--		}
--		if (accountOrg || sawReportOrg) {
--			const candidates = accountOrg
--				? sameOrgReports
--				: providerReports.filter(report => {
--						const metaOrg = report.metadata?.orgId;
--						return !(typeof metaOrg === "string" && metaOrg);
--					});
--			if (candidates.length === 0) return true;
--			if (ids.length === 0) return false;
--			return !candidates.some(report => {
--				const identifiers = reportIdentifiers(report);
--				return ids.some(id => identifiers.has(id));
--			});
--		}
--		if (ids.length === 0) return false;
--		const reported = new Set<string>();
--		let anyIdentified = false;
--		for (const report of providerReports) {
--			const identifiers = reportIdentifiers(report);
--			if (identifiers.size > 0) anyIdentified = true;
--			for (const id of identifiers) reported.add(id);
--		}
--		if (!anyIdentified) return false;
--		return !ids.some(id => reported.has(id));
--	});
--}
--
--/** Compose the account label from parts, masking each part individually so `--redact` cannot be bypassed by the composite string. */
--function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
--	if (account.type === "api_key") return "API key";
--	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
--	const masked = redaction?.get(base) ?? base;
--	// orgId fallback: the uuid is the actual scoped identity; a token response
--	// can carry it without a display name, and two same-email rows must still
--	// be tellable apart.
--	const org = account.orgName ?? account.orgId;
--	if (!org || org === base) return masked;
--	return `${masked} · ${redaction?.get(org) ?? org}`;
--}
--
 -function formatAccountHeader(
 -	report: UsageReport,
+-	peers: readonly UsageReport[],
 -	index: number,
 -	nowMs: number,
 -	redaction?: Map<string, string>,
@@ -952,14 +843,18 @@ index 0631002..ba24d03 100644
 -	const icon = STATUS_COLOR[status]("●");
 -	const label = reportAccountLabel(report, index);
 -	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
--	const metaOrgName = report.metadata?.orgName;
--	const metaOrgId = report.metadata?.orgId;
--	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
--	if (typeof org === "string" && org && org !== label) {
--		header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+-	if (report.provider === "openai-codex") {
+-		const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
+-		const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
+-		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
+-	} else {
+-		const metaOrgName = report.metadata?.orgName;
+-		const metaOrgId = report.metadata?.orgId;
+-		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+-		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+-		const plan = report.metadata?.planType;
+-		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
 -	}
--	const planType = report.metadata?.planType;
--	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
 -	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 -	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 -	if (resets && resets.bankedCount > 0) {
@@ -1044,10 +939,20 @@ index 0631002..ba24d03 100644
 -	remainingAccounts: number;
 -}
 -
+-/**
+- * Meter identity for a limit that holds its own quota pool inside a window. A model-scoped
+- * allowance is a separate pool from the umbrella window it caps - `claude.ts` marks the Fable
+- * weekly cap `tier` without `shared` precisely so it cannot gate Opus or Sonnet requests - and
+- * reporting it separately keeps a spent scoped cap visible next to the umbrella remainder.
+- * Only Anthropic and Codex use `tier` for such a pool; other providers (Copilot, Devin, Muse Code)
+- * put the subscription plan there, which must not split one window per plan. Codex meters that
+- * carry no tier fall back to the limit-id slug.
+- */
 -function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
--	if (report.provider !== "openai-codex") return undefined;
+-	if (report.provider !== "anthropic" && report.provider !== "openai-codex") return undefined;
 -	const tier = limit.scope.tier?.trim().toLowerCase();
 -	if (tier) return tier;
+-	if (report.provider !== "openai-codex") return undefined;
 -	const slug = limit.id.toLowerCase().split(":")[1];
 -	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
 -}
@@ -1056,8 +961,9 @@ index 0631002..ba24d03 100644
 - * Aggregate one provider's reports into per-window quota capacity stats.
 - *
 - * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
-- * account contributes its single highest used fraction. Codex keeps each meter
-- * in its own bucket because chat and Spark can share a window duration.
+- * account contributes its single highest used fraction. Limits that hold their
+- * own pool inside a window keep their own bucket: a model-scoped tier cap, and
+- * Codex chat versus Spark, which can share a window duration.
 - */
 -export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
 -	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
@@ -1316,7 +1222,7 @@ index 0631002..ba24d03 100644
 -		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
 -
 -		providerReports.forEach((report, index) => {
--			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+-			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 -			if (policyOptions && policyProviders.has(provider)) {
 -				lines.push(
 -					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
@@ -1378,7 +1284,7 @@ index 0631002..ba24d03 100644
  const HISTORY_SPARK_WIDTH = 48;
  const SPARK_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
  
-@@ -1298,8 +636,27 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+@@ -1164,8 +598,27 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
  			return;
  		}
  
@@ -1408,19 +1314,23 @@ index 0631002..ba24d03 100644
  	} finally {
  		authStorage.close();
 diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
-index 31b1167..23882cc 100644
+index 73d3a4e..06ed5fb 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
-@@ -3,7 +3,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
+@@ -3,7 +3,11 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
  import type { OAuthAccountIdentity } from "../../session/auth-storage";
  import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
  import type { SlashCommandRuntime } from "../types";
--import { reportMatchesActiveAccount } from "./active-oauth-account";
-+import { formatActiveAccountLabel, reportMatchesActiveAccount } from "./active-oauth-account";
+-import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
++import {
++	formatActiveAccountLabel,
++	formatCodexUsageReportLabel,
++	reportMatchesActiveAccount,
++} from "./active-oauth-account";
  import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
  
  function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
-@@ -57,6 +57,7 @@ function renderUsageReports(
+@@ -55,6 +59,7 @@ function renderUsageReports(
  	reports: UsageReport[],
  	nowMs: number,
  	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
@@ -1428,7 +1338,7 @@ index 31b1167..23882cc 100644
  	usageModelSelectors: readonly string[] = [],
  ): string {
  	const displayReports = collapseSharedUsageReports(reports);
-@@ -79,6 +80,10 @@ ): string {
+@@ -77,6 +82,10 @@ ): string {
  			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
  		}
  		const activeAccount = resolveActiveAccount?.(provider);
@@ -1439,20 +1349,22 @@ index 31b1167..23882cc 100644
  		// Provider-wide disclaimers render once per provider, not per limit.
  		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
  		for (const note of providerNotes)
-@@ -179,6 +184,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+@@ -181,6 +190,9 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
  				reports,
  				Date.now(),
  				providerId => (providerId === currentProvider ? activeAccount : undefined),
-+				providerId => runtime.session.modelRegistry.authStorage.getDefaultAccountIdentity(providerId),
++				// Like the active-account lookup above, touch the registry only when the
++				// runtime carries one; report-only runtimes render without default labels.
++				providerId => runtime.session.modelRegistry?.authStorage.getDefaultAccountIdentity(providerId),
  				usageModelSelectors,
  			);
  		}
 diff --git a/packages/coding-agent/src/utils/usage-format.ts b/packages/coding-agent/src/utils/usage-format.ts
 new file mode 100644
-index 0000000..fa84a4e
+index 0000000..456a7ae
 --- /dev/null
 +++ b/packages/coding-agent/src/utils/usage-format.ts
-@@ -0,0 +1,713 @@
+@@ -0,0 +1,638 @@
 +import {
 +	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 +	type AuthAccountPolicy,
@@ -1463,26 +1375,13 @@ index 0000000..fa84a4e
 +import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 +import chalk from "@oh-my-pi/pi-utils/chalk";
 +import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
++import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
++import { collectUnreportedAccounts, type UsageAccountIdentity } from "../slash-commands/helpers/usage-accounts";
 +
 +const BAR_WIDTH = 28;
 +
 +function sanitizeUsageText(value: string): string {
 +	return sanitizeText(value.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "));
-+}
-+
-+/** Identity slice of a stored credential, for "every account" coverage. */
-+export interface UsageAccountIdentity {
-+	provider: string;
-+	type: "api_key" | "oauth";
-+	email?: string;
-+	accountId?: string;
-+	projectId?: string;
-+	enterpriseUrl?: string;
-+	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
-+	orgId?: string;
-+	orgName?: string;
-+	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
-+	authorizedAt?: number;
 +}
 +
 +export interface UsagePolicyDiagnosticsOptions {
@@ -1608,86 +1507,6 @@ index 0000000..fa84a4e
 +	return `account ${index + 1}`;
 +}
 +
-+/** Lowercased identity strings a report can be attributed to. */
-+function reportIdentifiers(report: UsageReport): Set<string> {
-+	const ids = new Set<string>();
-+	const add = (value: unknown): void => {
-+		if (typeof value === "string" && value) ids.add(value.toLowerCase());
-+	};
-+	const meta = report.metadata ?? {};
-+	add(meta.email);
-+	add(meta.accountId);
-+	add(meta.projectId);
-+	add(meta.orgId);
-+	for (const limit of report.limits) {
-+		add(limit.scope.accountId);
-+		add(limit.scope.projectId);
-+		add(limit.scope.orgId);
-+	}
-+	return ids;
-+}
-+
-+/**
-+ * Stored credentials that no usage report could be attributed to.
-+ *
-+ * Conservative on purpose: when a provider's reports carry no identity at
-+ * all (or the credential is an API key alongside existing reports), we
-+ * can't attribute, so we don't claim the account is missing.
-+ */
-+export function collectUnreportedAccounts(
-+	reports: UsageReport[],
-+	accounts: UsageAccountIdentity[],
-+): UsageAccountIdentity[] {
-+	const byProvider = new Map<string, UsageReport[]>();
-+	for (const report of reports) {
-+		const list = byProvider.get(report.provider) ?? [];
-+		list.push(report);
-+		byProvider.set(report.provider, list);
-+	}
-+	return accounts.filter(account => {
-+		const providerReports = byProvider.get(account.provider) ?? [];
-+		if (providerReports.length === 0) return true;
-+		if (account.type === "api_key") return false;
-+		const accountOrg = account.orgId?.toLowerCase();
-+		const ids = [account.email, account.accountId, account.projectId]
-+			.filter((value): value is string => typeof value === "string" && value.length > 0)
-+			.map(value => value.toLowerCase());
-+		const sameOrgReports: UsageReport[] = [];
-+		let sawReportOrg = false;
-+		for (const report of providerReports) {
-+			const metaOrg = report.metadata?.orgId;
-+			if (typeof metaOrg === "string" && metaOrg) {
-+				sawReportOrg = true;
-+				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
-+			}
-+		}
-+		if (accountOrg || sawReportOrg) {
-+			const candidates = accountOrg
-+				? sameOrgReports
-+				: providerReports.filter(report => {
-+						const metaOrg = report.metadata?.orgId;
-+						return !(typeof metaOrg === "string" && metaOrg);
-+					});
-+			if (candidates.length === 0) return true;
-+			if (ids.length === 0) return false;
-+			return !candidates.some(report => {
-+				const identifiers = reportIdentifiers(report);
-+				return ids.some(id => identifiers.has(id));
-+			});
-+		}
-+		if (ids.length === 0) return false;
-+		const reported = new Set<string>();
-+		let anyIdentified = false;
-+		for (const report of providerReports) {
-+			const identifiers = reportIdentifiers(report);
-+			if (identifiers.size > 0) anyIdentified = true;
-+			for (const id of identifiers) reported.add(id);
-+		}
-+		if (!anyIdentified) return false;
-+		return !ids.some(id => reported.has(id));
-+	});
-+}
-+
 +function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
 +	if (account.type === "api_key") return "API key";
 +	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
@@ -1699,6 +1518,7 @@ index 0000000..fa84a4e
 +
 +function formatAccountHeader(
 +	report: UsageReport,
++	peers: readonly UsageReport[],
 +	index: number,
 +	nowMs: number,
 +	redaction?: Map<string, string>,
@@ -1708,14 +1528,20 @@ index 0000000..fa84a4e
 +	const rawLabel = reportAccountLabel(report, index);
 +	const label = redaction?.get(rawLabel) ?? sanitizeUsageText(rawLabel);
 +	let header = `${icon} ${chalk.bold(label)}`;
-+	const metaOrgName = report.metadata?.orgName;
-+	const metaOrgId = report.metadata?.orgId;
-+	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-+	if (typeof org === "string" && org && org !== rawLabel) {
-+		header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
++	if (report.provider === "openai-codex") {
++		const identity = sanitizeText((redaction?.get(rawLabel) ?? rawLabel).replace(/[\r\n\t]+/g, " "));
++		const rendered = formatCodexUsageReportLabel(report, peers, rawLabel, redaction, true, "inline");
++		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
++	} else {
++		const metaOrgName = report.metadata?.orgName;
++		const metaOrgId = report.metadata?.orgId;
++		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
++		if (typeof org === "string" && org && org !== rawLabel) {
++			header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
++		}
++		const plan = report.metadata?.planType;
++		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${sanitizeUsageText(plan.trim())}`);
 +	}
-+	const planType = report.metadata?.planType;
-+	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
 +	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 +	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 +	if (resets && resets.bankedCount > 0) {
@@ -1803,7 +1629,7 @@ index 0000000..fa84a4e
 +	if (options.includeNotes !== false) {
 +		for (const note of report.notes ?? []) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
 +	}
-+	lines.push(`  ${formatAccountHeader(report, options.index ?? 0, nowMs, options.redaction)}`);
++	lines.push(`  ${formatAccountHeader(report, providerReports, options.index ?? 0, nowMs, options.redaction)}`);
 +	if (options.policyLine) lines.push(`      ${chalk.dim(options.policyLine)}`);
 +	if (report.limits.length === 0) {
 +		lines.push(`      ${chalk.dim("no limits reported")}`);
@@ -1837,10 +1663,20 @@ index 0000000..fa84a4e
 +	remainingAccounts: number;
 +}
 +
++/**
++ * Meter identity for a limit that holds its own quota pool inside a window. A model-scoped
++ * allowance is a separate pool from the umbrella window it caps - `claude.ts` marks the Fable
++ * weekly cap `tier` without `shared` precisely so it cannot gate Opus or Sonnet requests - and
++ * reporting it separately keeps a spent scoped cap visible next to the umbrella remainder.
++ * Only Anthropic and Codex use `tier` for such a pool; other providers (Copilot, Devin, Muse Code)
++ * put the subscription plan there, which must not split one window per plan. Codex meters that
++ * carry no tier fall back to the limit-id slug.
++ */
 +function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
-+	if (report.provider !== "openai-codex") return undefined;
++	if (report.provider !== "anthropic" && report.provider !== "openai-codex") return undefined;
 +	const tier = limit.scope.tier?.trim().toLowerCase();
 +	if (tier) return tier;
++	if (report.provider !== "openai-codex") return undefined;
 +	const slug = limit.id.toLowerCase().split(":")[1];
 +	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
 +}
@@ -1849,8 +1685,9 @@ index 0000000..fa84a4e
 + * Aggregate one provider's reports into per-window quota capacity stats.
 + *
 + * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
-+ * account contributes its single highest used fraction. Codex keeps each meter
-+ * in its own bucket because chat and Spark can share a window duration.
++ * account contributes its single highest used fraction. Limits that hold their
++ * own pool inside a window keep their own bucket: a model-scoped tier cap, and
++ * Codex chat versus Spark, which can share a window duration.
 + */
 +export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
 +	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
@@ -2167,18 +2004,19 @@ index 0000000..fa84a4e
 +	return lines.join("\n");
 +}
 diff --git a/packages/coding-agent/test/modes/controllers/usage-command.test.ts b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
-index 5f0fcda..48a4412 100644
+index 37b08d7..9861d7e 100644
 --- a/packages/coding-agent/test/modes/controllers/usage-command.test.ts
 +++ b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
-@@ -1,10 +1,27 @@
--import { beforeAll, describe, expect, it } from "bun:test";
-+import { beforeAll, describe, expect, it, vi } from "bun:test";
- import { stripVTControlCharacters } from "node:util";
- import type { UsageReport } from "@oh-my-pi/pi-ai";
--import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-+import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+@@ -3,13 +3,30 @@ import { stripVTControlCharacters } from "node:util";
+ import { AuthStorage, type UsageReport } from "@oh-my-pi/pi-ai";
+ import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 +import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+ import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
+ import { visibleWidth } from "@oh-my-pi/pi-tui";
+ import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
  import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
+ import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
  
 -describe("renderUsageReports content", () => {
 +interface RenderableBlock {
@@ -2201,7 +2039,7 @@ index 5f0fcda..48a4412 100644
  	beforeAll(async () => {
  		const darkTheme = await getThemeByName("dark");
  		if (!darkTheme) throw new Error("Expected dark theme");
-@@ -169,4 +186,489 @@ describe("renderUsageReports content", () => {
+@@ -174,6 +191,492 @@ describe("renderUsageReports content", () => {
  		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
  		expect(output.match(/Gemini/g)).toHaveLength(2);
  	});
@@ -2690,12 +2528,15 @@ index 5f0fcda..48a4412 100644
 +			fetchSpy.mockRestore();
 +		}
 +	});
- });
++
+ 	it("shows the current Codex plan in interactive account and reset rows without a single-account UUID", () => {
+ 		const now = Date.now();
+ 		const report: UsageReport = {
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
-index bb7bce6..eafa57e 100644
+index a9d5080..38b6b4f 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
 +++ b/packages/coding-agent/test/usage-cli.test.ts
-@@ -601,6 +601,33 @@ describe("formatUsageBreakdown", () => {
+@@ -735,6 +735,33 @@ describe("formatUsageBreakdown", () => {
  		expect(text).toContain("✗ truly-dead@example.test — disabled");
  	});
  
@@ -2730,10 +2571,10 @@ index bb7bce6..eafa57e 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index 2a08941..629bd68 100644
+index 3d65e59..0b9d94e 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -35,6 +35,13 @@ - Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
+@@ -77,6 +77,13 @@ - Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -2748,18 +2589,18 @@ index 2a08941..629bd68 100644
  
  ### Changed
 diff --git a/packages/stats/src/aggregator.ts b/packages/stats/src/aggregator.ts
-index 0a51ff9..4ad0342 100644
+index 702453d..58212d6 100644
 --- a/packages/stats/src/aggregator.ts
 +++ b/packages/stats/src/aggregator.ts
 @@ -1,6 +1,6 @@
  import * as fs from "node:fs";
  import * as path from "node:path";
--import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
-+import { getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
+-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
++import { getAgentDbPath, getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import {
- 	applySessionParseResult,
-@@ -74,7 +74,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>): Promise<T> {
+ 	applySessionParseResults,
+@@ -81,7 +81,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>): Promise<T> {
  }
  
  /**
@@ -2768,8 +2609,8 @@ index 0a51ff9..4ad0342 100644
 + * each committed chunk of a file large enough to be parsed in several passes.
   * `current` is the number of files completed (skipped + parsed),
   * `total` is the size of the work set. `processed` is the running total
-  * of inserted rows.
-@@ -84,6 +85,10 @@ export interface SyncProgress {
+  * of inserted rows. Parsed files are reported only after their batch commits.
+@@ -91,6 +92,10 @@ export interface SyncProgress {
  	total: number;
  	processed: number;
  	sessionFile: string;
@@ -2780,9 +2621,46 @@ index 0a51ff9..4ad0342 100644
  }
  
  export interface SyncOptions {
-@@ -260,13 +265,28 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
- 	};
- 	if (files.length === 0) return finish();
+@@ -289,6 +294,28 @@ async function orderForIngest(files: string[]): Promise<string[]> {
+ 	return ranked.map(entry => entry.file);
+ }
+ 
++/** One parse pass over a transcript, run inline or on a sync worker. */
++type ParseChunk = (
++	sessionFile: string,
++	fromOffset: number,
++	state: SessionParserState | undefined,
++	replay: boolean,
++) => Promise<ParseSessionResult>;
++
++/** A parsed transcript chunk awaiting its batch commit. */
++interface PendingChunk extends ParsedSession {
++	/** Offset this chunk was parsed from; a chunk that is not `done` must end past it. */
++	fromOffset: number;
++	/** Transcript size when its sync started (`SyncProgress.fileBytes`). */
++	fileBytes: number;
++}
++
++/** First parse pass of one transcript; `chunk` is null when it is unchanged, missing, or unreadable. */
++interface PreparedFile {
++	fileBytes: number;
++	chunk: PendingChunk | null;
++}
++
+ async function syncAllSessionsLocked(
+ 	opts?: SyncOptions,
+ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+@@ -301,34 +328,57 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+ 	let completed = 0;
+ 	let cursor = 0;
+ 	let reconcile = false;
+-	let pending: ParsedSession[] = [];
++	let pending: PendingChunk[] = [];
+ 	let pendingRows = 0;
+ 	let failed = false;
+ 	let metadataStart = 0;
+ 	let metadataEnd = 0;
+ 	let metadata: Promise<{ fileStats?: fs.Stats; stored?: FileOffset }[]> = Promise.resolve([]);
  
 -	const report = (sessionFile: string) => {
 +	const report = (sessionFile: string, fileBytes: number) => {
@@ -2794,9 +2672,11 @@ index 0a51ff9..4ad0342 100644
  			sessionFile,
 +			fileOffset: fileBytes,
 +			fileBytes,
-+		});
-+	};
-+
+ 		});
+ 	};
+ 
+-	const flush = () => {
+-		if (pending.length === 0) return;
 +	// Intra-file movement: emitted between chunks of a multi-gigabyte
 +	// transcript so the bar does not look frozen. Does not advance `completed`.
 +	const reportChunk = (sessionFile: string, fileOffset: number, fileBytes: number) => {
@@ -2807,112 +2687,213 @@ index 0a51ff9..4ad0342 100644
 +			sessionFile,
 +			fileOffset,
 +			fileBytes,
- 		});
++		});
++	};
++
++	/**
++	 * Commit queued chunks and report them. `countFiles: false` keeps a transcript
++	 * an earlier chunk already counted from counting twice.
++	 */
++	const flush = (countFiles = true): number => {
++		if (pending.length === 0) return 0;
+ 		const batch = pending;
+ 		const applied = applySessionParseResults(batch);
+ 		pending = [];
+ 		pendingRows = 0;
+ 		totalProcessed += applied.processed;
+-		filesProcessed += applied.files;
++		if (countFiles) filesProcessed += applied.files;
+ 		reconcile ||= applied.reconcile;
+ 		// Report only durable progress: callbacks may interrupt the sync.
+-		for (const { sessionFile } of batch) report(sessionFile);
++		for (const { sessionFile, result, fileBytes } of batch) {
++			if (result.done) report(sessionFile, fileBytes);
++			else reportChunk(sessionFile, result.newOffset, fileBytes);
++		}
++		return applied.files;
  	};
  
-@@ -275,15 +295,15 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
- 		parse: (
- 			sessionFile: string,
- 			fromOffset: number,
+ 	const finish = () => {
+@@ -342,15 +392,7 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+ 	};
+ 	if (files.length === 0) return finish();
+ 
+-	const prepareFile = async (
+-		index: number,
+-		parse: (
+-			sessionFile: string,
+-			fromOffset: number,
 -			state?: SessionParserState,
 -			replay?: boolean,
-+			state: SessionParserState | undefined,
-+			replay: boolean,
- 		) => Promise<ParseSessionResult>,
- 	): Promise<void> => {
- 		let fileStats: fs.Stats;
- 		try {
- 			fileStats = await fs.promises.stat(sessionFile);
- 		} catch {
--			report(sessionFile);
-+			report(sessionFile, 0);
- 			return;
- 		}
- 		const lastModified = fileStats.mtimeMs;
-@@ -295,28 +315,54 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+-		) => Promise<ParseSessionResult>,
+-	): Promise<ParsedSession | null> => {
++	const prepareFile = async (index: number, parse: ParseChunk): Promise<PreparedFile> => {
+ 		if (index >= metadataEnd) {
+ 			const batch = files.slice(index, index + SYNC_METADATA_FILES);
+ 			const offsets = getFileOffsets(batch);
+@@ -370,7 +412,9 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+ 		// Capture the position before awaiting: another worker can start the next metadata batch.
+ 		const metadataIndex = index - metadataStart;
+ 		const { fileStats, stored } = (await metadata)[metadataIndex];
+-		if (failed || !fileStats) return null;
++		if (!fileStats) return { fileBytes: 0, chunk: null };
++		const fileBytes = fileStats.size;
++		if (failed) return { fileBytes, chunk: null };
+ 		if (
+ 			!replay &&
+ 			stored?.parserState &&
+@@ -378,34 +422,89 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
  			stored.parserState.size === fileStats.size &&
  			matchesSessionFile(stored.parserState, fileStats)
  		) {
--			report(sessionFile);
-+			report(sessionFile, fileStats.size);
- 			return;
+-			return null;
++			return { fileBytes, chunk: null };
  		}
  
--		const unknownIdentity = stored !== null && !stored.parserState;
--		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
+ 		const sessionFile = files[index];
++		// A row without a cursor cannot prove its offset still points into this
++		// byte stream, so it is re-read from byte 0 and reconciled.
+ 		const unknownIdentity = stored !== undefined && !stored.parserState;
+ 		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
 -		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
--		if (unknownIdentity && result.parserState) result.reset = true;
--		const applied = applySessionParseResult(sessionFile, result, replay || !stored?.parserState);
--		const inserted = applied.processed;
--		if (applied.reconcile) reconcile = true;
--		if (inserted > 0) {
--			totalProcessed += inserted;
--			filesProcessed++;
++		let result: ParseSessionResult;
 +		try {
-+			// A row without a cursor cannot prove its offset still points into this
-+			// byte stream, so it is re-read from byte 0 and reconciled.
-+			const unknownIdentity = stored !== null && !stored.parserState;
-+			let offset = unknownIdentity ? 0 : (stored?.offset ?? 0);
-+			let state = unknownIdentity ? undefined : stored?.parserState;
-+			// Only the first pass may replay from byte 0 or rebuild the file's rows;
-+			// a later chunk of the same file must append to what it just committed.
-+			let firstPass = true;
-+			let countedFile = false;
-+			while (true) {
-+				const result = await parse(sessionFile, offset, state, replay && firstPass);
-+				if (unknownIdentity && firstPass && result.parserState) result.reset = true;
-+				const applied = applySessionParseResult(sessionFile, result, firstPass && (replay || !stored?.parserState));
-+				if (applied.reconcile) reconcile = true;
-+				if (applied.processed > 0) {
-+					totalProcessed += applied.processed;
-+					countedFile = true;
-+				}
-+				const advanced = result.newOffset > offset;
-+				offset = result.newOffset;
-+				state = result.parserState;
-+				firstPass = false;
-+				if (result.done) break;
-+				if (!advanced) {
-+					logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset });
-+					break;
-+				}
-+				reportChunk(sessionFile, offset, fileStats.size);
-+			}
-+			if (countedFile) filesProcessed++;
++			result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
 +		} catch (err) {
 +			// One unreadable or corrupt transcript must not abort the whole sync.
 +			logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
- 		}
--		report(sessionFile);
-+		report(sessionFile, fileStats.size);
++			return { fileBytes, chunk: null };
++		}
+ 		if (unknownIdentity && result.parserState) result.reset = true;
+ 		return {
+-			sessionFile,
+-			result,
+-			// During a full replay, a changed file can be a rewrite even if its old tail checkpoint matches.
+-			rebuild:
+-				!stored?.parserState ||
+-				(replay &&
+-					(result.parserState?.size !== stored.parserState.size ||
+-						result.parserState?.mtimeMs !== stored.parserState.mtimeMs)),
+-			replay,
++			fileBytes,
++			chunk: {
++				sessionFile,
++				result,
++				// During a full replay, a changed file can be a rewrite even if its old tail checkpoint matches.
++				rebuild:
++					!stored?.parserState ||
++					(replay &&
++						(result.parserState?.size !== stored.parserState.size ||
++							result.parserState?.mtimeMs !== stored.parserState.mtimeMs)),
++				replay,
++				fromOffset,
++				fileBytes,
++			},
+ 		};
  	};
+ 
+-	const acceptFile = (sessionFile: string, parsed: ParsedSession | null) => {
+-		if (!parsed) {
+-			report(sessionFile);
++	/**
++	 * Ingest a transcript too large for one parse pass. Each chunk commits on its
++	 * own, after every transcript queued before it, so peak memory stays bounded
++	 * and an interrupted sync resumes from the last committed chunk. Only the
++	 * first pass may replay from byte 0 or rebuild the file's rows; a later chunk
++	 * appends to what the previous one committed.
++	 */
++	const commitChunks = async (first: PendingChunk, parse: ParseChunk): Promise<void> => {
++		let chunk = first;
++		let counted = false;
++		while (true) {
++			// Earlier transcripts commit first, preserving fork ownership order.
++			flush();
++			pending.push(chunk);
++			if (flush(!counted) > 0) counted = true;
++			const { sessionFile, result, fromOffset, fileBytes } = chunk;
++			if (result.done) return;
++			if (result.newOffset <= fromOffset) {
++				logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset: result.newOffset });
++				report(sessionFile, fileBytes);
++				return;
++			}
++			let next: ParseSessionResult;
++			try {
++				next = await parse(sessionFile, result.newOffset, result.parserState, false);
++			} catch (err) {
++				// One unreadable or corrupt transcript must not abort the whole sync.
++				logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
++				report(sessionFile, fileBytes);
++				return;
++			}
++			if (failed) return;
++			chunk = { sessionFile, result: next, rebuild: false, replay: false, fromOffset: result.newOffset, fileBytes };
++		}
++	};
++
++	const acceptFile = async (sessionFile: string, prepared: PreparedFile, parse: ParseChunk): Promise<void> => {
++		const { chunk } = prepared;
++		if (!chunk) {
++			report(sessionFile, prepared.fileBytes);
++			return;
++		}
++		if (!chunk.result.done) {
++			await commitChunks(chunk, parse);
+ 			return;
+ 		}
+-		pending.push(parsed);
+-		const { result } = parsed;
++		pending.push(chunk);
++		const { result } = chunk;
+ 		pendingRows +=
+ 			result.stats.length +
+ 			result.userStats.length +
+@@ -417,17 +516,19 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
  
  	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
  	if (requestedWorkers === 1) {
- 		for (const sessionFile of files) {
--			await processFile(sessionFile, parseSessionFile);
-+			await processFile(sessionFile, (file, fromOffset, state, replayFile) =>
-+				parseSessionFile(file, { fromOffset, state, replay: replayFile }),
-+			);
++		const parseInline: ParseChunk = (file, fromOffset, state, replayFile) =>
++			parseSessionFile(file, { fromOffset, state, replay: replayFile });
+ 		for (let start = 0; start < files.length; start += SYNC_INLINE_READS) {
+ 			const results = await Promise.allSettled(
+ 				Array.from({ length: Math.min(SYNC_INLINE_READS, files.length - start) }, (_, offset) =>
+-					prepareFile(start + offset, parseSessionFile),
++					prepareFile(start + offset, parseInline),
+ 				),
+ 			);
+ 			// Preserve fork ownership order and drain reads before a callback can release the sync lock.
+ 			for (let offset = 0; offset < results.length; offset++) {
+ 				const result = results[offset];
+ 				if (result.status === "rejected") throw result.reason;
+-				acceptFile(files[start + offset], result.value);
++				await acceptFile(files[start + offset], result.value, parseInline);
+ 			}
  		}
  		return finish();
- 	}
-@@ -331,8 +377,8 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
- 			const idx = cursor++;
- 			if (idx >= files.length) return;
- 			const sessionFile = files[idx];
--			await processFile(sessionFile, (file, fromOffset, parserState, replay) =>
--				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
-+			await processFile(sessionFile, (file, fromOffset, parserState, replayFile) =>
-+				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile }),
- 			);
- 		}
- 	}
+@@ -438,14 +539,14 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+ 	const handles: WorkerHandle[] = [];
+ 
+ 	async function drain(handle: WorkerHandle): Promise<void> {
++		const parseInWorker: ParseChunk = (file, fromOffset, parserState, replayFile) =>
++			dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile });
+ 		try {
+ 			while (!failed) {
+ 				const idx = cursor++;
+ 				if (idx >= files.length) return;
+-				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) =>
+-					dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
+-				);
+-				if (!failed) acceptFile(files[idx], parsed);
++				const prepared = await prepareFile(idx, parseInWorker);
++				if (!failed) await acceptFile(files[idx], prepared, parseInWorker);
+ 			}
+ 		} catch (error) {
+ 			failed = true;
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index 61fa9f6..ea46c10 100644
+index a21878e..16966ab 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
-@@ -281,6 +281,11 @@ export async function initDb(): Promise<Database> {
+@@ -241,6 +241,11 @@ export async function initDb(): Promise<Database> {
  		);
  	`);
  
@@ -2924,45 +2905,47 @@ index 61fa9f6..ea46c10 100644
  	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
  	if (!offsetColumns.some(column => column.name === "parser_state")) {
  		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
-@@ -600,6 +605,11 @@ function backfillNoCacheInputCosts(database: Database): void {
- 
- /**
-  * Get the stored offset for a session file.
-+ *
-+ * `parserState` is absent for a row that predates cursor persistence or whose
-+ * JSON no longer matches `offset`; the parser then re-reads the file from byte
-+ * 0 instead of trusting the offset (and replays the prefix to recover the
-+ * service tier active there).
-  */
- export function getFileOffset(
- 	sessionFile: string,
-@@ -688,7 +698,11 @@ ): { processed: number; reconcile: boolean } {
- 		if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
- 		if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
- 		if (result.toolResults.length > 0) updateToolResults(result.toolResults);
--		setFileOffset(sessionFile, result.newOffset, parserState.mtimeMs, parserState);
-+		// A chunk that did not reach end of file must not record the file's own
-+		// mtime: the skip guard in `syncAllSessionsLocked` would then read the
-+		// partially ingested transcript as fully synced. Storing 0 keeps the
-+		// committed offset and its cursor while forcing the next sync to resume.
-+		setFileOffset(sessionFile, result.newOffset, result.done ? parserState.mtimeMs : 0, parserState);
- 		return { processed: result.stats.length + result.userStats.length, reconcile };
- 	})();
+@@ -571,6 +576,12 @@ /** Persisted transcript identity and parser cursor used to resume stats ingestion. */
+ export interface FileOffset {
+ 	offset: number;
+ 	lastModified: number;
++	/**
++	 * Absent for a row that predates cursor persistence or whose JSON no longer
++	 * matches `offset`; the parser then re-reads the file from byte 0 instead of
++	 * trusting the offset (and replays the prefix to recover the service tier
++	 * active there).
++	 */
+ 	parserState?: SessionParserState;
  }
+ 
+@@ -785,7 +796,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
+ 		updateToolResults(parsedRows(writes, result => result.toolResults));
+ 		for (const { sessionFile, result } of sessions) {
+ 			if (result.parserState) {
+-				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
++				// A chunk that did not reach end of file must not record the file's own
++				// mtime: the skip guard in `syncAllSessionsLocked` would then read the
++				// partially ingested transcript as fully synced. Storing 0 keeps the
++				// committed offset and its cursor while forcing the next sync to resume.
++				const lastModified = result.done ? result.parserState.mtimeMs : 0;
++				setFileOffset(sessionFile, result.newOffset, lastModified, result.parserState);
+ 			}
+ 		}
+ 		if (reconcile) {
 diff --git a/packages/stats/src/index.ts b/packages/stats/src/index.ts
-index f47c0e8..8e72854 100755
+index 2ebe24b..b8cc20e 100755
 --- a/packages/stats/src/index.ts
 +++ b/packages/stats/src/index.ts
 @@ -1,7 +1,7 @@
  #!/usr/bin/env bun
  
  import { parseArgs } from "node:util";
--import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
-+import { formatBytes, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+-import { formatDuration, formatNumber, formatPercent, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
++import { formatBytes, formatDuration, formatNumber, formatPercent, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { formatErrorRate } from "./client/data/formatters";
  import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
- import { closeDb } from "./db";
- import { formatStatsDashboardUrl, startServer } from "./server";
-@@ -168,7 +168,11 @@ `);
+@@ -183,7 +183,11 @@ `);
  				const idx = event.sessionFile.indexOf(marker);
  				const short = idx >= 0 ? event.sessionFile.slice(idx + marker.length) : event.sessionFile;
  				const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
@@ -2976,7 +2959,7 @@ index f47c0e8..8e72854 100755
  				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
  				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
 diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
-index 06860b0..b8a9fa2 100644
+index 21f0829..ded50f0 100644
 --- a/packages/stats/src/parser.ts
 +++ b/packages/stats/src/parser.ts
 @@ -12,7 +12,7 @@ import {
@@ -2988,7 +2971,7 @@ index 06860b0..b8a9fa2 100644
  import type {
  	AgentType,
  	MessageStatsInput,
-@@ -432,56 +432,155 @@ const LF = 0x0a;
+@@ -435,53 +435,155 @@ const LF = 0x0a;
  const CR = 0x0d;
  const jsonLineDecoder = new TextDecoder();
  
@@ -3120,17 +3103,12 @@ index 06860b0..b8a9fa2 100644
 +	return { read, done: true };
  }
  
--function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
--	const entries: SessionEntry[] = [];
--	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
--	return { entries, read };
--}
 +const SERVICE_TIER_NEEDLE = Buffer.from('"service_tier_change"');
 +
  /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
  export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
--	return parseSessionEntriesLenient(bytes).entries;
-+	const entries: SessionEntry[] = [];
+ 	const entries: SessionEntry[] = [];
+-	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
 +	let cursor = 0;
 +	while (cursor < bytes.length) {
 +		const newline = bytes.indexOf(LF, cursor);
@@ -3141,7 +3119,7 @@ index 06860b0..b8a9fa2 100644
 +		if (!hasNewline) break;
 +		cursor = newline + 1;
 +	}
-+	return entries;
+ 	return entries;
  }
  
 -function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
@@ -3177,7 +3155,7 @@ index 06860b0..b8a9fa2 100644
  export interface SessionParserState {
  	version: 1;
  	offset: number;
-@@ -494,6 +593,28 @@ export interface SessionParserState {
+@@ -494,6 +596,28 @@ export interface SessionParserState {
  	serviceTier: ServiceTierByFamily | null;
  }
  
@@ -3206,7 +3184,7 @@ index 06860b0..b8a9fa2 100644
  export interface ParseSessionResult {
  	stats: MessageStatsInput[];
  	userStats: UserMessageStats[];
-@@ -501,85 +622,63 @@ export interface ParseSessionResult {
+@@ -501,43 +625,64 @@ export interface ParseSessionResult {
  	toolCalls: ToolCallStats[];
  	toolResults: ToolResultLink[];
  	newOffset: number;
@@ -3285,7 +3263,72 @@ index 06860b0..b8a9fa2 100644
 -	let info: nodeFs.Stats;
 -	let checkpoint: string;
 -	let read: number;
--	let entries: SessionEntry[];
++	const fromOffset = Math.max(0, options.fromOffset ?? 0);
++	const maxBytes = options.maxBytes ?? PARSE_CHUNK_BYTES;
++	const state = options.state;
++	const replay = options.replay === true;
++
+ 	const folder = extractFolderFromPath(sessionPath);
+ 	const agentType = classifyAgentType(sessionPath);
+ 	const stats: MessageStatsInput[] = [];
+@@ -545,109 +690,115 @@ ): Promise<ParseSessionResult> {
+ 	const userLinks: UserMessageLink[] = [];
+ 	const toolCalls: ToolCallStats[] = [];
+ 	const toolResults: ToolResultLink[] = [];
++	let currentServiceTier: ServiceTierByFamily | null | undefined;
++	let reset = false;
+ 
+-	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
+-	const visit = (entry: SessionEntry): void => {
+-		if (isServiceTierChange(entry)) {
+-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+-			return;
+-		}
+-		if (isUserMessage(entry)) {
+-			const userMsg = extractUserStats(sessionPath, folder, entry);
+-			if (userMsg) userStats.push(userMsg);
+-			return;
+-		}
+-		if (isToolResultMessage(entry)) {
+-			const link = extractToolResultLink(sessionPath, entry);
+-			if (link) toolResults.push(link);
+-			return;
+-		}
+-		if (isModelUsage(entry)) {
+-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+-			if (modelUsageStats) stats.push(modelUsageStats);
+-			return;
+-		}
+-		if (isAssistantMessage(entry)) {
+-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+-			if (msgStats) stats.push(msgStats);
+-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+-			// Persist links even when the user entry was ingested in an earlier tail read.
+-			const parentId = entry.parentId;
+-			const msg = entry.message;
+-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+-				userLinks.push({
+-					sessionFile: sessionPath,
+-					entryId: parentId,
+-					model: msg.model,
+-					provider: msg.provider,
+-				});
++	try {
++		const info = await fs.stat(sessionPath);
++		let resume = !replay && state?.version === 1 && state.offset === fromOffset;
++		if (resume && state) {
++			reset =
++				!matchesSessionFile(state, info) ||
++				info.size < state.size ||
++				(info.size === state.size && info.mtimeMs !== state.mtimeMs);
++			if (!reset) {
++				const previous = await readCheckpoint(sessionPath, fromOffset);
++				reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+ 			}
++			resume = !reset;
+ 		}
+-	};
+-
 -	try {
 -		const handle = await fs.open(sessionPath, "r");
 -		try {
@@ -3300,104 +3343,6 @@ index 06860b0..b8a9fa2 100644
 -				if (!reset) {
 -					const previous = await readCheckpoint(handle, fromOffset);
 -					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
--				}
--				resume = !reset;
--			}
--			if (fromOffset > info.size) reset = true;
--			if (replay) resume = false;
--			start = reset || replay ? 0 : Math.max(0, fromOffset);
--			const readStart = resume ? start : 0;
--			bytes = await file.slice(readStart, info.size).bytes();
--			currentServiceTier = resume
--				? (state?.serviceTier ?? undefined)
--				: scanLastServiceTier(bytes.subarray(0, start));
--			({ entries, read } = parseSessionEntriesLenient(bytes.subarray(start - readStart)));
--			const newOffset = start + read;
--			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
--			const previous =
--				checkpointStart >= readStart
--					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
--					: await readCheckpoint(handle, newOffset);
--			checkpoint = Bun.hash(previous).toString(16);
--		} finally {
--			await handle.close();
--		}
--	} catch (err) {
--		if (isEnoent(err))
--			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
--		throw err;
--	}
-+	const fromOffset = Math.max(0, options.fromOffset ?? 0);
-+	const maxBytes = options.maxBytes ?? PARSE_CHUNK_BYTES;
-+	const state = options.state;
-+	const replay = options.replay === true;
- 
- 	const folder = extractFolderFromPath(sessionPath);
- 	const agentType = classifyAgentType(sessionPath);
-@@ -588,77 +687,122 @@ ): Promise<ParseSessionResult> {
- 	const userLinks: UserMessageLink[] = [];
- 	const toolCalls: ToolCallStats[] = [];
- 	const toolResults: ToolResultLink[] = [];
--	const userByEntryId = new Map<string, UserMessageStats>();
--	for (const entry of entries) {
--		if (isServiceTierChange(entry)) {
--			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
--			continue;
--		}
--		if (isUserMessage(entry)) {
--			const userMsg = extractUserStats(sessionPath, folder, entry);
--			if (userMsg) {
--				userStats.push(userMsg);
--				userByEntryId.set(entry.id, userMsg);
-+	let currentServiceTier: ServiceTierByFamily | null | undefined;
-+	let reset = false;
-+
-+	try {
-+		const info = await fs.stat(sessionPath);
-+		let resume = !replay && state?.version === 1 && state.offset === fromOffset;
-+		if (resume && state) {
-+			reset =
-+				!matchesSessionFile(state, info) ||
-+				info.size < state.size ||
-+				(info.size === state.size && info.mtimeMs !== state.mtimeMs);
-+			if (!reset) {
-+				const previous = await readCheckpoint(sessionPath, fromOffset);
-+				reset = Bun.hash(previous).toString(16) !== state.checkpoint;
- 			}
--			continue;
--		}
--		if (isToolResultMessage(entry)) {
--			const link = extractToolResultLink(sessionPath, entry);
--			if (link) toolResults.push(link);
--			continue;
-+			resume = !reset;
- 		}
--		if (isModelUsage(entry)) {
--			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
--			if (modelUsageStats) stats.push(modelUsageStats);
--			continue;
--		}
--		if (isAssistantMessage(entry)) {
--			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
--			if (msgStats) stats.push(msgStats);
--			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
--			// Link assistant's responding model back to the user message it answered.
--			const parentId = (entry as SessionMessageEntry).parentId;
--			if (parentId) {
--				const msg = entry.message as AssistantMessage;
--				if (msg.model && msg.provider) {
--					// Emit unconditionally. The aggregator's UPDATE is guarded by
--					// `model IS NULL` so this is idempotent: a no-op for already
--					// linked rows, a fix-up for fresh inserts (which start NULL
--					// because the user row is recorded before its reply lands) and
--					// for cross-pass orphans whose parent was committed by an
--					// earlier incremental sync.
--					userLinks.push({
--						sessionFile: sessionPath,
--						entryId: parentId,
--						model: msg.model,
--						provider: msg.provider,
--					});
 +		if (fromOffset > info.size) reset = true;
 +		const start = reset || replay ? 0 : fromOffset;
 +
@@ -3411,6 +3356,7 @@ index 06860b0..b8a9fa2 100644
 +						? options.serviceTier
 +						: await scanServiceTierPrefix(sessionPath, start);
 +
++		// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 +		const { read, done } = await scanSessionLines(sessionPath, start, maxBytes, line => {
 +			const entry = parseJsonLine(line);
 +			if (!entry) return true;
@@ -3437,31 +3383,80 @@ index 06860b0..b8a9fa2 100644
 +				const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier ?? undefined, agentType);
 +				if (msgStats) stats.push(msgStats);
 +				toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-+				// Link assistant's responding model back to the user message it answered.
-+				const parentId = (entry as SessionMessageEntry).parentId;
-+				if (parentId) {
-+					const msg = entry.message as AssistantMessage;
-+					if (msg.model && msg.provider) {
-+						// Emit unconditionally. The aggregator's UPDATE is guarded by
-+						// `model IS NULL` so this is idempotent: a no-op for already
-+						// linked rows, a fix-up for fresh inserts (which start NULL
-+						// because the user row is recorded before its reply lands) and
-+						// for cross-pass orphans whose parent was committed by an
-+						// earlier incremental sync.
-+						userLinks.push({
-+							sessionFile: sessionPath,
-+							entryId: parentId,
-+							model: msg.model,
-+							provider: msg.provider,
-+						});
-+					}
++				// Persist links even when the user entry was ingested in an earlier tail read.
++				const parentId = entry.parentId;
++				const msg = entry.message;
++				if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
++					userLinks.push({
++						sessionFile: sessionPath,
++						entryId: parentId,
++						model: msg.model,
++						provider: msg.provider,
++					});
  				}
+-				resume = !reset;
  			}
+-			if (fromOffset > info.size) reset = true;
+-			if (replay) resume = false;
+-			start = reset || replay ? 0 : Math.max(0, fromOffset);
+-			const readStart = resume ? start : 0;
+-			bytes = await file.slice(readStart, info.size).bytes();
+-			currentServiceTier = resume
+-				? (state?.serviceTier ?? undefined)
+-				: scanLastServiceTier(bytes.subarray(0, start));
+-			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
+-			const newOffset = start + read;
+-			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
+-			const previous =
+-				checkpointStart >= readStart
+-					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
+-					: await readCheckpoint(handle, newOffset);
+-			checkpoint = Bun.hash(previous).toString(16);
+-		} finally {
+-			await handle.close();
 -		}
--	}
 +			return true;
 +		});
- 
++
++		const checkpoint = Bun.hash(await readCheckpoint(sessionPath, read)).toString(16);
++		return {
++			stats,
++			userStats,
++			userLinks,
++			toolCalls,
++			toolResults,
++			newOffset: read,
++			serviceTier: currentServiceTier ?? null,
++			done,
++			reset,
++			parserState: {
++				version: 1,
++				offset: read,
++				dev: info.dev,
++				ino: info.ino,
++				birthtimeMs: info.birthtimeMs,
++				size: info.size,
++				mtimeMs: info.mtimeMs,
++				checkpoint,
++				serviceTier: currentServiceTier ?? null,
++			},
++		};
+ 	} catch (err) {
+ 		if (isEnoent(err))
+-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
++			return {
++				stats: [],
++				userStats: [],
++				userLinks: [],
++				toolCalls: [],
++				toolResults: [],
++				newOffset: fromOffset,
++				serviceTier: currentServiceTier ?? null,
++				done: true,
++			};
+ 		throw err;
+ 	}
+-
 -	const newOffset = start + read;
 -	return {
 -		stats,
@@ -3480,49 +3475,13 @@ index 06860b0..b8a9fa2 100644
 -			size: info.size,
 -			mtimeMs: info.mtimeMs,
 -			checkpoint,
-+		const checkpoint = Bun.hash(await readCheckpoint(sessionPath, read)).toString(16);
-+		return {
-+			stats,
-+			userStats,
-+			userLinks,
-+			toolCalls,
-+			toolResults,
-+			newOffset: read,
- 			serviceTier: currentServiceTier ?? null,
+-			serviceTier: currentServiceTier ?? null,
 -		},
 -	};
-+			done,
-+			reset,
-+			parserState: {
-+				version: 1,
-+				offset: read,
-+				dev: info.dev,
-+				ino: info.ino,
-+				birthtimeMs: info.birthtimeMs,
-+				size: info.size,
-+				mtimeMs: info.mtimeMs,
-+				checkpoint,
-+				serviceTier: currentServiceTier ?? null,
-+			},
-+		};
-+	} catch (err) {
-+		if (isEnoent(err))
-+			return {
-+				stats: [],
-+				userStats: [],
-+				userLinks: [],
-+				toolCalls: [],
-+				toolResults: [],
-+				newOffset: fromOffset,
-+				serviceTier: currentServiceTier ?? null,
-+				done: true,
-+			};
-+		throw err;
-+	}
  }
  
  /**
-@@ -702,19 +846,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+@@ -691,19 +842,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
  }
  
  /**
@@ -3631,10 +3590,10 @@ index 0c43576..0c50852 100644
 +	});
  });
 diff --git a/packages/stats/test/priority-premium-requests.test.ts b/packages/stats/test/priority-premium-requests.test.ts
-index bf77453..58d3356 100644
+index 97b6f3e..c8a57fb 100644
 --- a/packages/stats/test/priority-premium-requests.test.ts
 +++ b/packages/stats/test/priority-premium-requests.test.ts
-@@ -187,9 +187,37 @@ describe("priority service-tier premium-request backfill", () => {
+@@ -188,9 +188,37 @@ describe("priority service-tier premium-request backfill", () => {
  		const tierLineEnd = bytes.indexOf(0x0a, bytes.indexOf(Buffer.from("service_tier_change"))) + 1;
  		expect(tierLineEnd).toBeGreaterThan(0);
  

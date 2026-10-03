@@ -1,9 +1,9 @@
 {
-	"base": "v18.3.0",
-	"baseCommit": "62bc57be1b03ef0802a33cf7f5f530e534527531",
+	"base": "v18.5.1",
+	"baseCommit": "d0cc52397dc2a68d39cba49b0009b9e50ffd643e",
 	"head": "HEAD",
-	"headCommit": "5742ed42675d54a5b5d2c766aa14aba42a973a8d",
-	"generated": "2026-09-24T12:39:44.608Z",
+	"headCommit": "e5eca3de9d7f5d82a88d3d01b8e6fd2e5b9317ab",
+	"generated": "2026-10-03T17:53:19.796Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -62,12 +62,14 @@
 				"packages/ai/test/auth-gateway-access-store.test.ts",
 				"packages/ai/test/auth-gateway-admin-client.test.ts",
 				"packages/ai/test/auth-gateway-audit.test.ts",
+				"packages/ai/test/auth-gateway-embeddings.test.ts",
 				"packages/ai/test/auth-gateway-graceful-shutdown.test.ts",
 				"packages/ai/test/auth-gateway-idle-timeout.test.ts",
 				"packages/ai/test/auth-gateway-integration-helpers.ts",
 				"packages/ai/test/auth-gateway-management.test.ts",
 				"packages/ai/test/auth-gateway-model-list.test.ts",
 				"packages/ai/test/auth-gateway-pools.test.ts",
+				"packages/ai/test/auth-gateway-provider-session-state.test.ts",
 				"packages/ai/test/auth-gateway-users.test.ts",
 				"packages/coding-agent/src/auth-gateway/profiles.ts",
 				"packages/coding-agent/src/auth-gateway/run-tui.ts",
@@ -157,7 +159,6 @@
 				"packages/coding-agent/src/config/model-registry.ts",
 				"packages/coding-agent/src/config/models-config-schema-bundle.ts",
 				"packages/coding-agent/src/config/resolve-config-value.ts",
-				"packages/coding-agent/src/config/settings-schema.ts",
 				"packages/coding-agent/test/model-registry-command-values.test.ts",
 				"packages/coding-agent/test/model-registry.test.ts"
 			]
@@ -176,6 +177,7 @@
 				"packages/coding-agent/src/modes/status-line-host.ts",
 				"packages/coding-agent/src/modes/types.ts",
 				"packages/coding-agent/src/session/agent-session.ts",
+				"packages/coding-agent/src/session/settings.ts",
 				"packages/coding-agent/src/slash-commands/builtin-modes.ts",
 				"packages/coding-agent/src/slash-commands/builtin-session.ts",
 				"packages/coding-agent/src/slash-commands/helpers/reset-usage.ts",
@@ -228,7 +230,6 @@
 				".gitignore",
 				"docs/models.md",
 				"packages/ai/src/auth/affinity.ts",
-				"packages/ai/src/auth/blocks.ts",
 				"packages/ai/src/auth/cascade.ts",
 				"packages/ai/src/auth/health.ts",
 				"packages/ai/src/auth/login.ts",
@@ -241,10 +242,8 @@
 				"packages/ai/src/auth/selection.ts",
 				"packages/ai/src/auth/store.ts",
 				"packages/ai/src/auth/types.ts",
+				"packages/ai/test/auth-broker-refresh-backoff.test.ts",
 				"packages/ai/test/claude-block-healing.test.ts",
-				"packages/catalog/src/compat/rules.json",
-				"packages/catalog/src/compat/rules/classes/anthropic.kdl",
-				"packages/catalog/src/models.json",
 				"packages/catalog/test/build.test.ts"
 			]
 		}

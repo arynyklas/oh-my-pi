@@ -254,28 +254,28 @@ index 0000000..9bf777b
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
 +connection profiles. Delete it separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index f7b0333..d275cd7 100644
+index 57eef58..4578cbe 100644
 --- a/package.json
 +++ b/package.json
 @@ -21,11 +21,11 @@ {
- 			"@oh-my-pi/pi-agent-core": "18.3.0",
- 			"@oh-my-pi/pi-ai": "18.3.0",
- 			"@oh-my-pi/pi-catalog": "18.3.0",
--			"@oh-my-pi/pi-coding-agent": "18.3.0",
-+			"@oh-my-pi/pi-coding-agent": "18.3.0-fork.3",
- 			"@oh-my-pi/pi-mnemopi": "18.3.0",
- 			"@oh-my-pi/pi-natives": "18.3.0",
- 			"@oh-my-pi/pi-tui": "18.3.0",
--			"@oh-my-pi/pi-utils": "18.3.0",
-+			"@oh-my-pi/pi-utils": "18.3.0-fork.3",
- 			"@oh-my-pi/pi-wire": "18.3.0",
- 			"@oh-my-pi/snapcompact": "18.3.0",
+ 			"@oh-my-pi/pi-agent-core": "18.5.1",
+ 			"@oh-my-pi/pi-ai": "18.5.1",
+ 			"@oh-my-pi/pi-catalog": "18.5.1",
+-			"@oh-my-pi/pi-coding-agent": "18.5.1",
++			"@oh-my-pi/pi-coding-agent": "18.5.1-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.5.1",
+ 			"@oh-my-pi/pi-natives": "18.5.1",
+ 			"@oh-my-pi/pi-tui": "18.5.1",
+-			"@oh-my-pi/pi-utils": "18.5.1",
++			"@oh-my-pi/pi-utils": "18.5.1-fork.1",
+ 			"@oh-my-pi/pi-wire": "18.5.1",
+ 			"@oh-my-pi/snapcompact": "18.5.1",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
-index 71d0690..febc589 100644
+index e9c269b..02a9c21 100644
 --- a/packages/ai/test/openai-compat-user-agent.test.ts
 +++ b/packages/ai/test/openai-compat-user-agent.test.ts
-@@ -150,7 +150,7 @@ describe("xAI stream User-Agent", () => {
+@@ -128,7 +128,7 @@ describe("xAI stream User-Agent", () => {
  		);
  		expect(captured.url).toBe("https://api.x.ai/v1/responses");
  		expect(captured.userAgent).toBe(USER_AGENT);
@@ -285,14 +285,14 @@ index 71d0690..febc589 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index a19549c..c6c4329 100644
+index 22ea017..85ce23f 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.3.0",
-+	"version": "18.3.0-fork.3",
+-	"version": "18.5.1",
++	"version": "18.5.1-fork.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -437,7 +437,7 @@ index 0000000..b935289
 +	return release;
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 55caf0c..636e78e 100644
+index dd97a07..05e12b4 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -9,7 +9,7 @@ import * as os from "node:os";
@@ -449,10 +449,10 @@ index 55caf0c..636e78e 100644
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import { $ } from "bun";
-@@ -21,8 +21,13 @@ import {
- 	unsupportedProxyMessage,
- 	withTimeoutSignal,
- } from "../utils/fetch-timeout";
+@@ -28,10 +28,15 @@ import {
+ 	type NpmRegistryResolver,
+ 	npmRegistryPackageUrl,
+ } from "./npm-registry";
 +import {
 +	buildBinaryDownloadUrl,
 +	getLatestReleaseForVersion,
@@ -460,11 +460,13 @@ index 55caf0c..636e78e 100644
 +	UPSTREAM_RELEASE_REPO,
 +} from "./release-info";
  
+ import { cfgUpdateChannel } from "../modes/settings";
+ 
 -const REPO = "can1357/oh-my-pi";
  const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
  const MISE_TOOL = "github:can1357/oh-my-pi";
-@@ -90,6 +95,11 @@ export interface ReleaseRename {
+@@ -87,6 +92,11 @@ export interface ReleaseRename {
  const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
  
  export interface ReleaseInfo {
@@ -476,15 +478,7 @@ index 55caf0c..636e78e 100644
  	tag: string;
  	version: string;
  	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
-@@ -97,7 +107,6 @@ export interface ReleaseInfo {
- 	/** npm names to install, resolved after following any `omp.rename` pointers. */
- 	packages: ReleasePackages;
- }
--
- export interface ReleaseBinaryAsset {
- 	url: string;
- 	size: number;
-@@ -194,7 +203,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
+@@ -199,7 +209,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
  		natives: typeof natives === "string" && natives.length > 0 ? natives : undefined,
  	};
  }
@@ -492,7 +486,7 @@ index 55caf0c..636e78e 100644
  function majorVersion(version: string): number {
  	const major = Number.parseInt(version, 10);
  	return Number.isNaN(major) ? 0 : major;
-@@ -222,6 +230,10 @@ ): boolean {
+@@ -227,6 +236,10 @@ ): boolean {
  /**
   * Select and validate the binary asset from GitHub release metadata.
   *
@@ -503,7 +497,7 @@ index 55caf0c..636e78e 100644
   * Draft releases are always rejected. Prereleases are rejected unless
   * `options.allowPrerelease` is set, which the canary channel passes: canary
   * GitHub releases are published as prereleases, and the exact-tag match below
-@@ -231,8 +243,9 @@ export function resolveReleaseBinaryAsset(
+@@ -236,8 +249,9 @@ export function resolveReleaseBinaryAsset(
  	release: unknown,
  	expectedTag: string,
  	binaryName: string,
@@ -514,7 +508,7 @@ index 55caf0c..636e78e 100644
  	if (!isRecord(release)) {
  		throw new Error("Invalid GitHub release metadata");
  	}
-@@ -269,7 +282,7 @@ ): ReleaseBinaryAsset {
+@@ -274,7 +288,7 @@ ): ReleaseBinaryAsset {
  		throw new Error(`GitHub release asset ${binaryName} has an unsupported digest`);
  	}
  
@@ -523,8 +517,17 @@ index 55caf0c..636e78e 100644
  	if (asset.browser_download_url !== expectedUrl) {
  		throw new Error(`GitHub release asset ${binaryName} has an unexpected download URL`);
  	}
-@@ -282,13 +295,13 @@ ): ReleaseBinaryAsset {
- }
+@@ -306,7 +320,7 @@ export function selectFallbackBinaryAsset(
+ 	releases: unknown,
+ 	binaryName: string,
+ 	minVersion: string,
+-	options: { allowPrerelease?: boolean } = {},
++	options: { repo?: string; allowPrerelease?: boolean } = {},
+ ): ReleaseBinaryAsset | undefined {
+ 	if (!Array.isArray(releases)) return undefined;
+ 	const candidates: Array<{ tag: string; release: unknown }> = [];
+@@ -359,28 +373,29 @@ /** Releases scanned when the requested tag has no GitHub release; one page spans months of releases. */
+ const RELEASE_LISTING_PAGE_SIZE = 30;
  
  async function getReleaseBinaryAsset(
 -	expectedVersion: string,
@@ -536,31 +539,42 @@ index 55caf0c..636e78e 100644
  ): Promise<ReleaseBinaryAsset> {
 -	const tag = `v${expectedVersion}`;
 +	const repo = release.repo ?? UPSTREAM_RELEASE_REPO;
- 	const resolvedGitHubToken = githubToken ?? (await resolveGitHubToken());
- 	const headers: Record<string, string> = {
- 		Accept: "application/vnd.github+json",
-@@ -298,7 +311,7 @@ ): Promise<ReleaseBinaryAsset> {
- 
- 	let response: Response;
- 	try {
--		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
-+		response = await fetchImpl(`${GITHUB_API}/repos/${repo}/releases/tags/${encodeURIComponent(release.tag)}`, {
- 			headers,
- 			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
- 		});
-@@ -318,7 +331,10 @@ ): Promise<ReleaseBinaryAsset> {
++	const tag = release.tag;
+ 	const token = githubToken ?? (await resolveGitHubToken());
+ 	const response = await fetchReleaseMetadata(
+-		`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`,
++		`${GITHUB_API}/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`,
+ 		fetchImpl,
+ 		token,
+ 	);
+ 	if (response.ok) {
+-		return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { allowPrerelease });
++		return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { repo, allowPrerelease });
+ 	}
+ 	if (response.status !== 404) {
  		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
  	}
  
--	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { allowPrerelease });
-+	return resolveReleaseBinaryAsset(await response.json(), release.tag, binaryName, {
-+		repo,
-+		allowPrerelease,
-+	});
- }
- 
- export interface VerifiedBinaryDownloadOptions {
-@@ -390,7 +406,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
+ 	const listing = await fetchReleaseMetadata(
+-		`${GITHUB_API}/repos/${REPO}/releases?per_page=${RELEASE_LISTING_PAGE_SIZE}`,
++		`${GITHUB_API}/repos/${repo}/releases?per_page=${RELEASE_LISTING_PAGE_SIZE}`,
+ 		fetchImpl,
+ 		token,
+ 	);
+@@ -389,10 +404,10 @@ ): Promise<ReleaseBinaryAsset> {
+ 			`GitHub release ${tag} is not published and listing published releases failed: ${listing.statusText}`,
+ 		);
+ 	}
+-	const fallback = selectFallbackBinaryAsset(await listing.json(), binaryName, VERSION, { allowPrerelease });
++	const fallback = selectFallbackBinaryAsset(await listing.json(), binaryName, VERSION, { repo, allowPrerelease });
+ 	if (!fallback) {
+ 		throw new Error(
+-			`npm advertises ${expectedVersion} but GitHub release ${tag} is not published, and no newer published release ships ${binaryName}; retry once the release finishes publishing, or reinstall with: ${installerHint()}`,
++			`npm advertises ${release.version} but GitHub release ${tag} is not published, and no newer published release ships ${binaryName}; retry once the release finishes publishing, or reinstall with: ${installerHint()}`,
+ 		);
+ 	}
+ 	console.log(
+@@ -472,7 +487,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
  		throw err;
  	}
  }
@@ -568,7 +582,7 @@ index 55caf0c..636e78e 100644
  /** Result from running the installed binary and parsing its reported version. */
  export interface InstalledVersionVerification {
  	ok: boolean;
-@@ -801,6 +816,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
+@@ -883,6 +897,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
  	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
  }
  
@@ -581,7 +595,7 @@ index 55caf0c..636e78e 100644
  /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
  const MAX_RENAME_HOPS = 3;
  
-@@ -1171,7 +1192,7 @@ /**
+@@ -1315,7 +1335,7 @@ /**
   * Resolve the path that `omp` maps to in the user's PATH.
   */
  function resolveOmpPath(): string | undefined {
@@ -590,7 +604,7 @@ index 55caf0c..636e78e 100644
  }
  
  /**
-@@ -1819,6 +1840,7 @@ export async function updateViaBinaryAt(
+@@ -1981,6 +2001,7 @@ export async function updateViaBinaryAt(
  		binaryName?: string;
  		fetchImpl?: Fetch;
  		githubToken?: string;
@@ -598,7 +612,7 @@ index 55caf0c..636e78e 100644
  		allowPrerelease?: boolean;
  		/** Refuse replacement unless the existing path is a non-script OMP executable. */
  		validateExistingTarget?: boolean;
-@@ -1827,6 +1849,12 @@ export async function updateViaBinaryAt(
+@@ -1989,6 +2010,13 @@ export async function updateViaBinaryAt(
  ): Promise<void> {
  	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);
  	const binaryName = options.binaryName ?? getBinaryName();
@@ -607,11 +621,12 @@ index 55caf0c..636e78e 100644
 +		tag: `v${expectedVersion}`,
 +		version: expectedVersion,
 +		packages: CURRENT_PACKAGES,
++		registry: DEFAULT_NPM_REGISTRY,
 +	};
  	// Unique per attempt so two overlapping `omp update` runs never share a temp
  	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
  	// pre-download unlink delete the first run's still-downloading temp file; the
-@@ -1840,7 +1868,7 @@ ): Promise<void> {
+@@ -2002,7 +2030,7 @@ ): Promise<void> {
  	const tempPath = `${targetPath}.${attempt}.new`;
  	const backupPath = `${targetPath}.${attempt}.bak`;
  	const asset = await getReleaseBinaryAsset(
@@ -620,7 +635,7 @@ index 55caf0c..636e78e 100644
  		binaryName,
  		options.fetchImpl,
  		options.githubToken,
-@@ -1923,17 +1951,24 @@ export async function updateViaShimTakeover(
+@@ -2085,17 +2113,25 @@ export async function updateViaShimTakeover(
  		binaryName?: string;
  		fetchImpl?: Fetch;
  		githubToken?: string;
@@ -635,6 +650,7 @@ index 55caf0c..636e78e 100644
 +		tag: `v${expectedVersion}`,
 +		version: expectedVersion,
 +		packages: CURRENT_PACKAGES,
++		registry: DEFAULT_NPM_REGISTRY,
 +	};
  	const launcherDir = path.dirname(shimPath);
  	const exePath = path.join(launcherDir, `${APP_NAME}.exe`);
@@ -646,7 +662,7 @@ index 55caf0c..636e78e 100644
  		binaryName,
  		options.fetchImpl,
  		options.githubToken,
-@@ -2064,6 +2099,7 @@ export async function runUpdateCommand(opts: {
+@@ -2226,6 +2262,7 @@ export async function runUpdateCommand(opts: {
  	check: boolean;
  	channel?: UpdateChannel;
  }): Promise<void> {
@@ -654,18 +670,18 @@ index 55caf0c..636e78e 100644
  	console.log(chalk.dim(`Current version: ${VERSION}`));
  	const persistedChannel = readPersistedChannel() ?? "stable";
  	const channel = opts.channel ?? persistedChannel;
-@@ -2073,7 +2109,9 @@ export async function runUpdateCommand(opts: {
+@@ -2235,7 +2272,9 @@ export async function runUpdateCommand(opts: {
  	// Check for updates
  	let release: ReleaseInfo;
  	try {
 -		release = await getLatestRelease({ channel });
 +		release = isForkBuild
-+			? { ...(await getLatestReleaseForVersion()), packages: CURRENT_PACKAGES }
++			? { ...(await getLatestReleaseForVersion()), packages: CURRENT_PACKAGES, registry: DEFAULT_NPM_REGISTRY }
 +			: await getLatestRelease({ channel });
  	} catch (err) {
  		console.error(chalk.red(`Failed to check for updates: ${err}`));
  		process.exit(1);
-@@ -2107,6 +2145,16 @@ export async function runUpdateCommand(opts: {
+@@ -2269,6 +2308,16 @@ export async function runUpdateCommand(opts: {
  		return;
  	}
  
@@ -682,7 +698,7 @@ index 55caf0c..636e78e 100644
  	// Choose update method based on the prioritized omp binary in PATH. For
  	// binary-only releases the package managers are never consulted: a bun/npm
  	// symlink resolves to method "binary" and is replaced in place, keeping the
-@@ -2152,6 +2200,7 @@ export async function runUpdateCommand(opts: {
+@@ -2314,6 +2363,7 @@ export async function runUpdateCommand(opts: {
  				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
  			}
  			await updateViaBinaryAt(target.path, release.version, {
@@ -749,10 +765,10 @@ index 0000000..4d0e6f5
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index c4c855b..5782d26 100644
+index 5b75e05..4ae14db 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -102,6 +102,118 @@ describe("update command plugin dispatch", () => {
+@@ -122,6 +122,118 @@ describe("update command plugin dispatch", () => {
  	});
  });
  
@@ -872,22 +888,22 @@ index c4c855b..5782d26 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 7c7e7ea..2a34d78 100644
+index 3747216..4c5f23f 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.3.0",
-+	"version": "18.3.0-fork.3",
+-	"version": "18.5.1",
++	"version": "18.5.1-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
 diff --git a/scripts/ci-release-publish.test.ts b/scripts/ci-release-publish.test.ts
-index 9da54a9..ff645af 100644
+index e406047..b1b6b2a 100644
 --- a/scripts/ci-release-publish.test.ts
 +++ b/scripts/ci-release-publish.test.ts
-@@ -46,7 +46,7 @@ describe("published legal payloads", () => {
+@@ -165,7 +165,7 @@ describe("published legal payloads", () => {
  		}
  	});
  

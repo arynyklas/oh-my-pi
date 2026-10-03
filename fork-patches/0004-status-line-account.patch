@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-index bf3d92b..81cb10c 100644
+index 6a54f8d..69a77c6 100644
 --- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 +++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 @@ -107,6 +107,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
@@ -36,18 +36,27 @@ index bf3d92b..81cb10c 100644
  		case "mode":
  			return [
 diff --git a/packages/coding-agent/test/modes/components/status-line/component.test.ts b/packages/coding-agent/test/modes/components/status-line/component.test.ts
-index 6125758..9f381b7 100644
+index ca1305c..4021217 100644
 --- a/packages/coding-agent/test/modes/components/status-line/component.test.ts
 +++ b/packages/coding-agent/test/modes/components/status-line/component.test.ts
-@@ -1,6 +1,6 @@
+@@ -1,9 +1,14 @@
  import { afterAll, beforeAll, describe, expect, it } from "bun:test";
- import { createGallerySegmentContext } from "../../../../src/cli/gallery-fixtures/segments";
 -import { Settings } from "../../../../src/config/settings";
 +import { Settings, settings } from "../../../../src/config/settings";
  import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
  import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
- import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
-@@ -276,4 +276,62 @@ describe("StatusLineComponent", () => {
+ import { loadTheme } from "@oh-my-pi/pi-tui/theme/loader";
+-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
++import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
++import {
++	cfgStatusLineLeftSegments,
++	cfgStatusLinePreset,
++	cfgStatusLineSegmentOptions,
++} from "../../../../src/modes/settings";
+ import type { AgentSession } from "../../../../src/session/agent-session";
+ import { StatusLineTestComponents } from "../../../helpers/status-line";
+ 
+@@ -241,4 +246,64 @@ describe("StatusLineComponent", () => {
  			setThemeInstance(baseTheme);
  		}
  	});
@@ -71,11 +80,13 @@ index 6125758..9f381b7 100644
 +			modelRegistry: {
 +				isUsingOAuth: () => true,
 +				authStorage: {
-+					listOAuthAccounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),
++					oauth: {
++						accounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),
++						// Read by the usage-refresh cache key, unrelated to the chip.
++						identity: () => undefined,
++					},
 +					// anthropic serves its pinned default; openai-codex fell over to a sibling.
 +					getDefaultAccountCredentialId: (provider: string) => (provider === "anthropic" ? 11 : 21),
-+					// Read by the usage-refresh cache key, unrelated to the chip.
-+					getOAuthAccountIdentity: () => undefined,
 +				},
 +			},
 +			getAdvisorAccountBindings: () => [
@@ -84,9 +95,9 @@ index 6125758..9f381b7 100644
 +		};
 +		session.state.model = { name: "Opus", contextWindow: 128000, provider: "anthropic" } as never;
 +
-+		settings.set("statusLine.preset", "custom");
-+		settings.set("statusLine.leftSegments", ["model"]);
-+		settings.set("statusLine.segmentOptions", { model: { showAccount: true } });
++		cfgStatusLinePreset.set(settings, "custom");
++		cfgStatusLineLeftSegments.set(settings, ["model"]);
++		cfgStatusLineSegmentOptions.set(settings, { model: { showAccount: true } });
 +		try {
 +			const custom = statusLines.track(new StatusLineComponent(session as unknown as AgentSession, statusLineHost));
 +			const stripped = Bun.stripANSI(custom.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
@@ -98,15 +109,15 @@ index 6125758..9f381b7 100644
 +
 +			// The chip is a custom-preset knob: the same option under a built-in
 +			// preset renders nothing.
-+			settings.set("statusLine.preset", "default");
++			cfgStatusLinePreset.set(settings, "default");
 +			const builtin = statusLines.track(new StatusLineComponent(session as unknown as AgentSession, statusLineHost));
 +			const builtinStripped = Bun.stripANSI(builtin.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
 +			expect(builtinStripped).not.toContain("primary@example.com");
 +			expect(builtinStripped).not.toContain("codex-sibling@example.com");
 +		} finally {
-+			settings.set("statusLine.preset", "default");
-+			settings.set("statusLine.leftSegments", []);
-+			settings.set("statusLine.segmentOptions", {});
++			cfgStatusLinePreset.set(settings, "default");
++			cfgStatusLineLeftSegments.set(settings, []);
++			cfgStatusLineSegmentOptions.set(settings, {});
 +		}
 +	});
  });

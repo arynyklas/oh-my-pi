@@ -1,8 +1,8 @@
 diff --git a/packages/ai/src/auth-broker/discover.ts b/packages/ai/src/auth-broker/discover.ts
-index 12bbc58..9ca34d6 100644
+index 7e7ab6c..1cf5b7f 100644
 --- a/packages/ai/src/auth-broker/discover.ts
 +++ b/packages/ai/src/auth-broker/discover.ts
-@@ -48,6 +48,10 @@ export interface DiscoverAuthStorageOptions {
+@@ -50,6 +50,10 @@ export interface DiscoverAuthStorageOptions {
  	accountPool?: AuthBrokerAccountPool;
  	accountPolicies?: AuthAccountPolicies;
  	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
@@ -13,7 +13,7 @@ index 12bbc58..9ca34d6 100644
  }
  
  /** Path to the local bearer token file. Created by `omp auth-broker token`. */
-@@ -83,6 +87,8 @@ interface ConfigSnapshot {
+@@ -85,6 +89,8 @@ interface ConfigSnapshot {
  	token?: string;
  	accountPolicies?: unknown;
  	usageReservePct?: unknown;
@@ -22,7 +22,7 @@ index 12bbc58..9ca34d6 100644
  }
  
  /**
-@@ -192,6 +198,66 @@ function parseUsageReservePct(value: unknown): number {
+@@ -194,6 +200,66 @@ function parseUsageReservePct(value: unknown): number {
  	return reservePct;
  }
  
@@ -89,7 +89,7 @@ index 12bbc58..9ca34d6 100644
  async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  	for (const filename of MAIN_CONFIG_FILENAMES) {
  		const configPath = path.join(agentDir, filename);
-@@ -220,6 +286,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+@@ -222,6 +288,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  			token: readDottedString(record, "auth.broker.token"),
  			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
  			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
@@ -98,7 +98,7 @@ index 12bbc58..9ca34d6 100644
  		};
  	}
  	return {};
-@@ -379,6 +447,12 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
+@@ -472,6 +540,12 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
  		accountPolicies: options.accountPolicies,
  		usageReservePct: options.authStorageOptions?.defaultReservePct,
  	});
@@ -108,20 +108,11 @@ index 12bbc58..9ca34d6 100644
 +		options.defaultAccounts && options.accountPriorities ? undefined : await readConfigYaml(agentDir);
 +	const defaultAccounts = options.defaultAccounts ?? configSnapshot?.defaultAccounts;
 +	const accountPriorities = options.accountPriorities ?? configSnapshot?.accountPriorities;
- 
- 	if (brokerConfig) {
- 		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
-@@ -443,6 +517,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
- 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
- 			accountPolicies,
- 			defaultReservePct,
-+			defaultAccounts,
-+			accountPriorities,
- 		});
- 		await storage.credentials.reload();
- 		return storage;
-@@ -455,6 +531,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
- 		sourceLabel: options.sourceLabel ?? `local ${dbPath}`,
+ 	const { store, sourceLabel } = await openAuthCredentialStore({
+ 		brokerConfig,
+ 		agentDir,
+@@ -485,6 +559,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = {}): Promise<AuthStorage> {
+ 		sourceLabel,
  		accountPolicies,
  		defaultReservePct,
 +		defaultAccounts,
@@ -130,7 +121,7 @@ index 12bbc58..9ca34d6 100644
  	await storage.credentials.reload();
  	return storage;
 diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
-index f192c86..c5d4502 100644
+index 80cc547..cb946f1 100644
 --- a/packages/ai/src/auth-storage.ts
 +++ b/packages/ai/src/auth-storage.ts
 @@ -13,6 +13,11 @@ /**
@@ -153,14 +144,15 @@ index f192c86..c5d4502 100644
  import { AccountPolicies } from "./auth/policy";
  import { CredentialPool } from "./auth/pool";
  import { OAuthRefresher } from "./auth/refresh";
-@@ -33,16 +39,22 @@ import { CredentialSelector } from "./auth/select";
+@@ -33,18 +39,23 @@ import { CredentialSelector } from "./auth/select";
  import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
  import type { AuthCredentialStore } from "./auth/store";
  import type {
 +	AccountSelectionEvent,
+ 	AuthAccountPolicies,
  	AuthApiKeyOptions,
 +	AuthApiKeySelectionResult,
-+	AuthCredential,
+ 	AuthCredential,
  	AuthStorageOptions,
  	BlocksApi,
  	CredentialsApi,
@@ -176,25 +168,46 @@ index f192c86..c5d4502 100644
  	UsageApi,
  } from "./auth/types";
  import { UsageService } from "./auth/usage";
-@@ -53,6 +65,8 @@ import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
+@@ -55,6 +66,8 @@ import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
  export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
  export * from "./auth/store";
  export * from "./auth/types";
 +export * from "./auth/login";
 +export * from "./auth/selection";
  
- /**
-  * Credential management over an {@link AuthCredentialStore}: multi-account
-@@ -79,6 +93,8 @@ export class AuthStorage {
- 	/** Persisted rate-limit blocks (auth-broker server seam). */
- 	readonly blocks: BlocksApi;
- 	#pool: CredentialPool;
-+	#pins: AccountPins;
-+	#affinity: SessionAffinity;
+ /** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
+ interface AuthStorageModules {
+@@ -67,6 +80,8 @@ interface AuthStorageModules {
+ 	limits: RateLimits;
+ 	resets: ResetCredits;
+ 	blocks: CredentialBlocks;
++	/** Fork: default-account/priority pins, resolved against this store's rows. */
++	pins: AccountPins;
+ }
  
- 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
- 		const overrides = new KeyOverrides(options.configValueResolver);
-@@ -91,13 +107,15 @@ export class AuthStorage {
+ /**
+@@ -145,9 +160,9 @@ export class AuthStorage {
+ 	 * Swap the backing credential store in place (live `auth.broker.url` change).
+ 	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
+ 	 * keyed by the old store's row ids — then closes the previous store. Runtime key
+-	 * overrides, account policies, usage-provider overrides, and credential event
+-	 * subscribers carry over. On a load failure `store` is closed and the current
+-	 * store stays active.
++	 * overrides, account policies, default-account/priority selectors, usage-provider
++	 * overrides, and credential event subscribers carry over. On a load failure `store`
++	 * is closed and the current store stays active.
+ 	 */
+ 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+ 		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+@@ -160,6 +175,7 @@ export class AuthStorage {
+ 		const previous = this.#modules;
+ 		next.pool.adoptSubscribers(previous.pool);
+ 		next.usage.adoptRuntimeProviders(previous.usage);
++		next.pins.adoptSelectors(previous.pins);
+ 		this.#modules = next;
+ 		previous.pool.close();
+ 		next.pool.bump("store-replaced");
+@@ -177,6 +193,7 @@ export class AuthStorage {
  			onReset: provider => {
  				selector.resetRoundRobin(provider);
  				affinity.clearProvider(provider);
@@ -202,8 +215,9 @@ index f192c86..c5d4502 100644
  			},
  		});
  		const refresher = new OAuthRefresher({ store, pool, policies, override: options.refreshOAuthCredential });
- 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
- 		const usageCache = new UsageCache(store, pool, usageProviders);
+@@ -185,7 +202,8 @@ export class AuthStorage {
+ 		// override's `cacheVersion` separates its rows from other processes sharing the store.
+ 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
  		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 -		const affinity = new SessionAffinity(store, pool, overrides);
 +		const pins = new AccountPins(pool, blocks, options.defaultAccounts, options.accountPriorities);
@@ -211,7 +225,7 @@ index f192c86..c5d4502 100644
  		const usage = new UsageService({
  			store,
  			pool,
-@@ -121,10 +139,12 @@ export class AuthStorage {
+@@ -209,10 +227,12 @@ export class AuthStorage {
  			store,
  			pool,
  			policies,
@@ -224,23 +238,23 @@ index f192c86..c5d4502 100644
  			strategies,
  		});
  		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
-@@ -133,12 +153,15 @@ export class AuthStorage {
+@@ -221,6 +241,7 @@ export class AuthStorage {
  			overrides,
  			selector,
  			affinity,
 +			pins,
  			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
- 			sourceLabel: options.sourceLabel,
+ 			sourceLabel,
  		});
- 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
+@@ -247,6 +268,7 @@ export class AuthStorage {
+ 			limits,
+ 			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+ 			blocks,
++			pins,
+ 		};
+ 	}
  
- 		this.#pool = pool;
-+		this.#pins = pins;
-+		this.#affinity = affinity;
- 		this.credentials = pool;
- 		this.keys = keys;
- 		this.oauth = oauth;
-@@ -188,4 +211,113 @@ export class AuthStorage {
+@@ -276,4 +298,115 @@ export class AuthStorage {
  	reload(): Promise<void> {
  		return this.credentials.reload();
  	}
@@ -265,17 +279,17 @@ index f192c86..c5d4502 100644
 +
 +	/** Configured default-account selector for `provider`, verbatim, or undefined. */
 +	getDefaultAccountSelector(provider: string): string | undefined {
-+		return this.#pins.getDefaultAccountSelector(provider);
++		return this.#modules.pins.getDefaultAccountSelector(provider);
 +	}
 +
 +	/** Durable credential id the configured default resolves to, or undefined. */
 +	getDefaultAccountCredentialId(provider: string): number | undefined {
-+		return this.#pins.getDefaultAccountCredentialId(provider);
++		return this.#modules.pins.getDefaultAccountCredentialId(provider);
 +	}
 +
 +	/** Identity of the configured default OAuth account, for display. Undefined for api_key rows. */
 +	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
-+		return this.#pins.getDefaultAccountIdentity(provider);
++		return this.#modules.pins.getDefaultAccountIdentity(provider);
 +	}
 +
 +	/**
@@ -286,19 +300,20 @@ index f192c86..c5d4502 100644
 +	 * request instead of taking effect only on restart.
 +	 */
 +	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
-+		if (this.#pins.setDefaultAccountSelector(provider, selector)) {
-+			this.#affinity.clearProvider(provider);
++		const { pins, sessions } = this.#modules;
++		if (pins.setDefaultAccountSelector(provider, selector)) {
++			sessions.clearProvider(provider);
 +		}
 +	}
 +
 +	/** Configured `providers.accountPriority` selectors for `provider`, in order. */
 +	getAccountPrioritySelectors(provider: string): readonly string[] {
-+		return this.#pins.getAccountPrioritySelectors(provider);
++		return this.#modules.pins.getAccountPrioritySelectors(provider);
 +	}
 +
 +	/** Durable credential ids the configured priority list resolves to, in order. */
 +	getAccountPriorityCredentialIds(provider: string): readonly number[] {
-+		return this.#pins.getAccountPriorityCredentialIds(provider);
++		return this.#modules.pins.getAccountPriorityCredentialIds(provider);
 +	}
 +
 +	/**
@@ -306,7 +321,7 @@ index f192c86..c5d4502 100644
 +	 * the most portable unique identity, else the durable `#<credentialId>` form.
 +	 */
 +	describeAccountSelector(provider: string, credentialId: number): string | undefined {
-+		return this.#pins.describeAccountSelector(provider, credentialId);
++		return this.#modules.pins.describeAccountSelector(provider, credentialId);
 +	}
 +
 +	/**
@@ -317,14 +332,15 @@ index f192c86..c5d4502 100644
 +	 * their sticky so the new order applies to the next request.
 +	 */
 +	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): void {
-+		if (this.#pins.setAccountPrioritySelectors(provider, selectors)) {
-+			this.#affinity.clearProvider(provider);
++		const { pins, sessions } = this.#modules;
++		if (pins.setAccountPrioritySelectors(provider, selectors)) {
++			sessions.clearProvider(provider);
 +		}
 +	}
 +
 +	/** Take the pending fallover notice for `(provider, sessionId)`, if any. Consumes it. */
 +	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
-+		return this.#pins.consumeDefaultAccountFallover(provider, sessionId);
++		return this.#modules.pins.consumeDefaultAccountFallover(provider, sessionId);
 +	}
 +
 +	/**
@@ -336,14 +352,14 @@ index f192c86..c5d4502 100644
 +		sessionId?: string;
 +		limit?: number;
 +	}): readonly AccountSelectionEvent[] {
-+		return this.#pins.listAccountSelectionEvents(options);
++		return this.#modules.pins.listAccountSelectionEvents(options);
 +	}
 +
 +	// ── Fork feature: durable-row access for the gateway management API ─────
 +
 +	/** List live stored credential rows by id, preserving first requested order. */
 +	listStoredCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
-+		return this.#pool.listByIds(ids);
++		return this.#modules.pool.listByIds(ids);
 +	}
 +
 +	/**
@@ -351,7 +367,7 @@ index f192c86..c5d4502 100644
 +	 * in-memory snapshot, and return the provider's stored rows.
 +	 */
 +	upsertCredentialAsync(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
-+		return this.#pool.upsertStored(provider, credential);
++		return this.#modules.pool.upsertStored(provider, credential);
 +	}
  }
 diff --git a/packages/ai/test/auth-storage-account-priority.test.ts b/packages/ai/test/auth-storage-account-priority.test.ts
@@ -600,7 +616,7 @@ index 0000000..98bce8e
 +	});
 +});
 diff --git a/packages/ai/test/auth-storage-api-key-login.test.ts b/packages/ai/test/auth-storage-api-key-login.test.ts
-index b9816a1..9c6c8eb 100644
+index 9dcb8e4..0d441b6 100644
 --- a/packages/ai/test/auth-storage-api-key-login.test.ts
 +++ b/packages/ai/test/auth-storage-api-key-login.test.ts
 @@ -4,10 +4,12 @@ import * as fs from "node:fs/promises";
@@ -1257,7 +1273,7 @@ index 0000000..1bd43b6
 +	);
 +});
 diff --git a/packages/ai/test/auth-storage-codex-selection.test.ts b/packages/ai/test/auth-storage-codex-selection.test.ts
-index 52344f0..8c0b5a6 100644
+index ab6f772..6cdb6b8 100644
 --- a/packages/ai/test/auth-storage-codex-selection.test.ts
 +++ b/packages/ai/test/auth-storage-codex-selection.test.ts
 @@ -11,7 +11,12 @@ import {
@@ -1274,7 +1290,7 @@ index 52344f0..8c0b5a6 100644
  import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
  import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
  import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-@@ -2708,6 +2713,50 @@ describe("AuthStorage codex oauth ranking", () => {
+@@ -2694,6 +2699,56 @@ describe("AuthStorage codex oauth ranking", () => {
  		expect(apiKey).toBe("api-acct-paid");
  	});
  
@@ -1318,7 +1334,13 @@ index 52344f0..8c0b5a6 100644
 +			}),
 +		).resolves.toEqual({
 +			ok: true,
-+			credential: { apiKey: "api-acct-paid", credentialId: paidRow.id, credentialType: "oauth", source: "oauth" },
++			credential: {
++				apiKey: "api-acct-paid",
++				credentialId: paidRow.id,
++				credentialType: "oauth",
++				source: "oauth",
++				oauthIdentity: { orgId: undefined, region: undefined, inferenceRegion: undefined },
++			},
 +		});
 +	});
 +
@@ -1590,7 +1612,7 @@ index 0000000..654e3b6
 +	});
 +});
 diff --git a/packages/ai/test/auth-storage-email-dedupe.test.ts b/packages/ai/test/auth-storage-email-dedupe.test.ts
-index 246f035..737404d 100644
+index e6504a6..649a0f4 100644
 --- a/packages/ai/test/auth-storage-email-dedupe.test.ts
 +++ b/packages/ai/test/auth-storage-email-dedupe.test.ts
 @@ -3,12 +3,24 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -1802,10 +1824,10 @@ index 246f035..737404d 100644
  
  	it("persists session-sticky credentials across AuthStorage restarts", async () => {
 diff --git a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
-index 70322e7..f171edd 100644
+index 8fbc220..caa7049 100644
 --- a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
 +++ b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
-@@ -67,7 +67,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+@@ -68,7 +68,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
  		}
  	});
  
@@ -1814,7 +1836,7 @@ index 70322e7..f171edd 100644
  		registerOAuthProvider({
  			id: PROVIDER,
  			name: "Rotate Unit",
-@@ -76,7 +76,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+@@ -77,7 +77,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
  				return { access: "login", refresh: "login", expires: farExpiry() };
  			},
  			async refreshToken(credentials) {
@@ -1823,7 +1845,7 @@ index 70322e7..f171edd 100644
  				return {
  					...credentials,
  					access: nextAccess?.() ?? "minted-access",
-@@ -113,6 +113,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+@@ -114,6 +114,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
  		expect(after).toBe("minted-access");
  	});
  
@@ -1866,15 +1888,15 @@ index 70322e7..f171edd 100644
 +		});
 +	});
 +
- 	test("getOAuthAccess includes a stable credentialId across cached and forced refresh resolves", async () => {
- 		if (!authStorage) throw new Error("test setup failed");
+ 	test("cached refresh rebinds a pinned account by id after preceding row removal", async () => {
+ 		if (!authStorage || !store) throw new Error("test setup failed");
  		registerProvider();
 diff --git a/packages/ai/test/auth-storage-selection-policy.test.ts b/packages/ai/test/auth-storage-selection-policy.test.ts
 new file mode 100644
-index 0000000..b9ce9dc
+index 0000000..51dba77
 --- /dev/null
 +++ b/packages/ai/test/auth-storage-selection-policy.test.ts
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,637 @@
 +import { Database } from "bun:sqlite";
 +import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 +import {
@@ -2024,7 +2046,13 @@ index 0000000..b9ce9dc
 +			}),
 +		).resolves.toEqual({
 +			ok: true,
-+			credential: { apiKey: "access-oauth-b", credentialId: oauthB, credentialType: "oauth", source: "oauth" },
++			credential: {
++				apiKey: "access-oauth-b",
++				credentialId: oauthB,
++				credentialType: "oauth",
++				source: "oauth",
++				oauthIdentity: { orgId: undefined, region: undefined, inferenceRegion: undefined },
++			},
 +		});
 +
 +		await expect(
@@ -2954,10 +2982,10 @@ index eb64b2e..131cd78 100644
  	OAuthAccountSummary,
  	OAuthCredential,
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index 7592005..1108c00 100644
+index 00acc23..21976e8 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -417,6 +417,18 @@ export interface AdvisorStatusOverviewEntry {
+@@ -521,6 +521,18 @@ export interface AdvisorStatusOverviewEntry {
  	yielded: boolean;
  }
  
@@ -2976,7 +3004,7 @@ index 7592005..1108c00 100644
  /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
  export class SessionAdvisors {
  	readonly #host: SessionAdvisorsHost;
-@@ -2297,6 +2309,27 @@ export class SessionAdvisors {
+@@ -2807,6 +2819,27 @@ export class SessionAdvisors {
  		return { configured: this.#advisorEnabled, advisors };
  	}
  
@@ -3006,12 +3034,13 @@ index 7592005..1108c00 100644
  		let cost = 0;
 diff --git a/packages/coding-agent/src/slash-commands/helpers/account-priority.ts b/packages/coding-agent/src/slash-commands/helpers/account-priority.ts
 new file mode 100644
-index 0000000..601896e
+index 0000000..2cbd8b2
 --- /dev/null
 +++ b/packages/coding-agent/src/slash-commands/helpers/account-priority.ts
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,132 @@
 +import type { Settings } from "../../config/settings";
 +import type { AuthStorage, OAuthAccountSummary } from "../../session/auth-storage";
++import { cfgProvidersAccountPriority, cfgProvidersDefaultAccount } from "../../session/settings";
 +
 +/**
 + * Everything the account-priority mutations need: the settings file they
@@ -3051,10 +3080,7 @@ index 0000000..601896e
 +}
 +
 +function writeDefaultAccountSelector(ctx: AccountPriorityContext, selector: string | undefined): void {
-+	const current = { ...ctx.settings.get("providers.defaultAccount") };
-+	if (selector === undefined) delete current[ctx.providerId];
-+	else current[ctx.providerId] = selector;
-+	ctx.settings.set("providers.defaultAccount", current);
++	cfgProvidersDefaultAccount.setEntry(ctx.settings, ctx.providerId, selector);
 +	ctx.authStorage.setDefaultAccountSelector(ctx.providerId, selector);
 +}
 +
@@ -3066,15 +3092,12 @@ index 0000000..601896e
 + * disagree.
 + */
 +export function applyAccountPriority(ctx: AccountPriorityContext, selectors: readonly string[]): void {
-+	const current = { ...ctx.settings.get("providers.accountPriority") };
 +	if (selectors.length === 0) {
-+		delete current[ctx.providerId];
-+		ctx.settings.set("providers.accountPriority", current);
++		cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, undefined);
 +		ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, undefined);
 +		return;
 +	}
-+	current[ctx.providerId] = [...selectors];
-+	ctx.settings.set("providers.accountPriority", current);
++	cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, [...selectors]);
 +	ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, selectors);
 +	const head = selectors[0];
 +	if (head !== undefined) writeDefaultAccountSelector(ctx, head);
@@ -3148,19 +3171,20 @@ index 0000000..601896e
 +	return { moved: true, rank: target + 1, total: list.length };
 +}
 diff --git a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
-index af98856..5385e9f 100644
+index 03b8690..b9b09fd 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
-@@ -1,5 +1,7 @@
+@@ -1,6 +1,7 @@
  import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 -import type { OAuthAccountIdentity } from "../../session/auth-storage";
+-import { sanitizeText } from "@oh-my-pi/pi-utils";
 +import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 +import type { DefaultAccountFallover, OAuthAccountIdentity, OAuthAccountSummary } from "../../session/auth-storage";
-+import { formatDuration } from "@oh-my-pi/pi-utils";
++import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
  
- function normalizeIdentityValue(value: unknown): string | undefined {
- 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
-@@ -21,6 +23,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {
+ /** Codex's orgName is the login-time plan, not a workspace name. */
+ export function codexUsagePlan(report: UsageReport): string | undefined {
+@@ -57,6 +58,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {
  	return org && org !== base ? `${base} (${org})` : base;
  }
  
@@ -3194,7 +3218,7 @@ index af98856..5385e9f 100644
  /**
   * True when a single usage-limit column belongs to the given OAuth identity.
   *
-@@ -78,3 +107,29 @@ export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
+@@ -114,3 +142,29 @@ export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
  	if (!identity) return false;
  	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
  }
