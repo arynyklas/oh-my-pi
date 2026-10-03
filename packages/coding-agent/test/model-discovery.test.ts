@@ -3115,36 +3115,51 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(model?.name).toBe("GPT-5");
 	});
 
-	test("proxy discovery adopts the thinking ladder an omp auth-gateway advertises", async () => {
-		const opus = getBundledModel("anthropic", "claude-opus-5-5");
-		if (!opus) throw new Error("expected bundled Claude Opus 5.5");
-		const gatewayStorage = await GatewayAuthStorage.create(path.join(tempDir, "gateway-auth.db"));
-		const gateway = startAuthGateway({
-			bind: "127.0.0.1:0",
-			bearerTokens: [],
-			storage: gatewayStorage,
-			resolveModel: () => opus,
-			listModels: () => [opus],
-			version: "test",
-		});
-		try {
-			writeRawModelsJson({
-				"gateway-test": { baseUrl: gateway.url, auth: "none", discovery: { type: "proxy" } },
+	for (const { label, api, mode } of [
+		// No supported_endpoint_types: the row rides the openai-completions
+		// fallback, whose generic ladder stops at `high`; `effort` is the mode
+		// that wire encodes.
+		{ label: "openai-completions fallback rows", api: undefined, mode: "effort" },
+		// A provider-level anthropic-messages api keeps Claude's adaptive mode,
+		// but the generic ladder of an unknown host stops at `xhigh`.
+		{ label: "anthropic-messages rows", api: "anthropic-messages", mode: "anthropic-adaptive" },
+	] as const) {
+		test(`proxy discovery adopts the thinking ladder an omp auth-gateway advertises on ${label}`, async () => {
+			const opus = getBundledModel("anthropic", "claude-opus-5-5");
+			if (!opus) throw new Error("expected bundled Claude Opus 5.5");
+			const gatewayStorage = await GatewayAuthStorage.create(path.join(tempDir, "gateway-auth.db"));
+			const gateway = startAuthGateway({
+				bind: "127.0.0.1:0",
+				bearerTokens: [],
+				storage: gatewayStorage,
+				resolveModel: () => opus,
+				listModels: () => [opus],
+				version: "test",
 			});
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
-			await registry.refresh();
-			// The row has no supported_endpoint_types, so the client model rides the
-			// openai-completions fallback, whose generic ladder stops at `high`.
-			// The gateway serves Opus 5.5 with its native ladder; the client must
-			// offer exactly that, `xhigh`/`max` included and no `minimal`.
-			const model = registry.find("gateway-test", "anthropic/claude-opus-5-5");
-			expect(model?.reasoning).toBe(true);
-			expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
-		} finally {
-			await gateway.close();
-			gatewayStorage.close();
-		}
-	});
+			try {
+				writeRawModelsJson({
+					"gateway-test": { baseUrl: gateway.url, auth: "none", api, discovery: { type: "proxy" } },
+				});
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
+				await registry.refresh();
+				// The gateway serves Opus 5.5 with its native ladder; the client must
+				// offer exactly that, `xhigh`/`max` included and no `minimal`.
+				const model = registry.find("gateway-test", "anthropic/claude-opus-5-5");
+				expect(model?.reasoning).toBe(true);
+				expect(model?.thinking?.mode).toBe(mode);
+				expect(model?.thinking?.efforts).toEqual([
+					Effort.Low,
+					Effort.Medium,
+					Effort.High,
+					Effort.XHigh,
+					Effort.Max,
+				]);
+			} finally {
+				await gateway.close();
+				gatewayStorage.close();
+			}
+		});
+	}
 
 	test("pi-native gateway runner models land in their roles and run through the gateway", async () => {
 		const upstreamCalls: string[] = [];

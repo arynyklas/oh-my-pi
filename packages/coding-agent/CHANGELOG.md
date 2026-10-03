@@ -8,6 +8,10 @@
 
 - Re-based the fork onto upstream v18.5.1. The default-account and account-priority settings moved into upstream's settings registry, `omp auth-gateway` gained upstream's `stdio` action and `--trust-proxy-headers` flag alongside the fork's user/pool/audit/tui commands, and the `/usage` dashboard keeps the gateway user and usage summary on upstream's account-visibility layout.
 
+### Fixed
+
+- Claude models discovered from an omp auth gateway on a provider declared with `api: anthropic-messages` now offer the gateway's own reasoning levels, so Claude Opus 4.7+ shows `max` instead of stopping at `xhigh`.
+
 ## [18.3.0-fork.3] - 2026-09-24
 
 ### Added

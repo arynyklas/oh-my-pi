@@ -9,6 +9,7 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import {
 	getBundledModelReferenceIndex,
@@ -1222,11 +1223,12 @@ export async function discoverProxyModels(
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
 		// An omp auth-gateway advertises the served model's reasoning surface. It
 		// dispatches with its own catalog entry, so that ladder is authoritative
-		// over the reference guess (cross-provider references carry no thinking,
-		// which left gateway Claude rows on the generic minimal..high ladder).
-		// Only the OpenAI-shaped fallback api takes it: `effort` is the mode that
-		// wire encodes, while Anthropic rows keep their own identity-derived mode.
-		const advertisedEfforts = isAnthropic ? undefined : parseAdvertisedEfforts(item.thinking_efforts);
+		// over the reference guess: cross-provider references carry no thinking,
+		// and an unknown host's generic ladder left gateway Claude rows without
+		// `xhigh`/`max`. OpenAI-shaped fallback rows take it in `effort` mode, the
+		// mode that wire encodes; Anthropic rows keep their identity-derived mode
+		// (adaptive vs budget is an Anthropic wire choice) and swap only the ladder.
+		const advertisedEfforts = parseAdvertisedEfforts(item.thinking_efforts);
 		const reasoning = typeof item.reasoning === "boolean" ? item.reasoning : (reference?.reasoning ?? false);
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
@@ -1234,43 +1236,50 @@ export async function discoverProxyModels(
 			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
-		discovered.push(
-			buildModel({
-				id,
-				name: displayName,
-				api,
-				provider: providerConfig.provider,
-				baseUrl,
-				reasoning,
-				thinking: advertisedEfforts
+		const spec = {
+			id,
+			name: displayName,
+			api,
+			provider: providerConfig.provider,
+			baseUrl,
+			reasoning,
+			thinking:
+				advertisedEfforts && !isAnthropic
 					? { mode: "effort", efforts: advertisedEfforts }
 					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input: reference?.input ?? ["text"],
-				// Proxy pricing is provider-specific and usually does not match
-				// upstream bundled catalogs, so keep costs local-unknown even when
-				// we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Prefer the context_length the API reports for this model; fall
-				// back to the bundled reference, then a sane default.
-				contextWindow:
-					toPositiveNumberOrUndefined(item.context_length) ??
-					reference?.contextWindow ??
-					DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-				maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
-				headers,
-				// OpenAI-compat fields are no-ops on anthropic models; the
-				// Anthropic SDK ignores them. Provider-level disableStrictTools
-				// flows in via #applyProviderCompat for the third-party-Anthropic
-				// path. Cross-wire bundled compat is intentionally not copied:
-				// request-shaping fields are provider-wire specific.
-				compat: isAnthropic
-					? undefined
-					: {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-						},
-			} as ModelSpec<Api>),
+			input: reference?.input ?? ["text"],
+			// Proxy pricing is provider-specific and usually does not match
+			// upstream bundled catalogs, so keep costs local-unknown even when
+			// we successfully recover the upstream model identity.
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// Prefer the context_length the API reports for this model; fall
+			// back to the bundled reference, then a sane default.
+			contextWindow:
+				toPositiveNumberOrUndefined(item.context_length) ??
+				reference?.contextWindow ??
+				DISCOVERY_DEFAULT_CONTEXT_WINDOW,
+			maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			headers,
+			// OpenAI-compat fields are no-ops on anthropic models; the
+			// Anthropic SDK ignores them. Provider-level disableStrictTools
+			// flows in via #applyProviderCompat for the third-party-Anthropic
+			// path. Cross-wire bundled compat is intentionally not copied:
+			// request-shaping fields are provider-wire specific.
+			compat: isAnthropic
+				? undefined
+				: {
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+					},
+		} as ModelSpec<Api>;
+		const derivedMode = isAnthropic && advertisedEfforts ? resolveModelPolicy(spec).thinking?.mode : undefined;
+		discovered.push(
+			buildModel(
+				derivedMode && advertisedEfforts
+					? { ...spec, thinking: { mode: derivedMode, efforts: advertisedEfforts } }
+					: spec,
+			),
 		);
 	}
 	return discovered;
