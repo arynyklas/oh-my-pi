@@ -12,6 +12,7 @@ import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
 	isCompiledBinary,
+	isRecord,
 	logger,
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
@@ -621,6 +622,17 @@ export function __isExtensionParseCacheAvailableForTests(): boolean {
 	return getExtensionParseCacheDb() !== null;
 }
 
+/**
+ * Test seam: close the process-wide extension parse cache connection so the
+ * next analysis reopens it at the then-current cache path. Tests that
+ * relocate the home/cache root must call this before deleting that root:
+ * Windows refuses to remove a directory holding an open SQLite db/WAL set.
+ */
+export function __closeExtensionParseCacheForTests(): void {
+	extensionParseCacheDb?.close();
+	extensionParseCacheDb = undefined;
+}
+
 function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalysis | null {
 	try {
 		if (row.source_type !== "script" && row.source_type !== "module") return null;
@@ -795,14 +807,22 @@ function resolveBundledVirtualSpecifier(
 // scope name they happened to declare in their peerDependencies.
 const CANONICAL_PI_SCOPE = "@oh-my-pi";
 
-// Scopes that have historically been used to publish (or alias) the same set
-// of internal pi-* packages. `@oh-my-pi` is intentionally included so direct
+// Scopes that have historically been used to publish (or alias) internal host
+// packages. `@oh-my-pi` is intentionally included so direct
 // canonical imports still pass through the same host-bundled package resolution
 // path instead of pulling a duplicate copy from plugin node_modules.
 const PI_SCOPE_ALIASES = ["oh-my-pi", "mariozechner", "earendil-works"] as const;
 
-// Internal pi-* package basenames bundled inside the omp binary.
-const PI_PACKAGE_NAMES = ["pi-agent-core", "pi-ai", "pi-coding-agent", "pi-natives", "pi-tui", "pi-utils"] as const;
+// Internal host package basenames bundled inside the omp binary.
+const PI_PACKAGE_NAMES = [
+	"pi-agent-core",
+	"pi-ai",
+	"pi-catalog",
+	"pi-coding-agent",
+	"pi-natives",
+	"pi-tui",
+	"pi-utils",
+] as const;
 
 const PI_SCOPE_ALTERNATION = PI_SCOPE_ALIASES.join("|");
 const PI_PACKAGE_ALTERNATION = PI_PACKAGE_NAMES.join("|");
@@ -1185,26 +1205,22 @@ export async function __rewriteLegacyExtensionSourceForTests(
 }
 
 /**
- * Build the import specifier for a graph-resolved absolute path. POSIX
- * emits a bare filesystem path with an optional `?mtime=<tag>` (Bun keys
- * query strings for bare-path specifiers), so same-process extension
- * reloads pick up edits to package-alias (`#foo/*`) and extension-local
- * bare deps. Windows and bundled virtual specifiers keep the current
- * `file://` / virtual form — Bun ignores queries on `file://` URLs, so
- * cache-bust does not reach Windows extensions until Bun changes that.
+ * Build the import specifier for a graph-resolved absolute path. Emits a bare
+ * filesystem path with an optional `?mtime=<tag>` (Bun keys query strings for
+ * bare-path specifiers on POSIX and Windows alike), so same-process extension
+ * reloads pick up edits to package-alias (`#foo/*`) and extension-local bare
+ * deps. Untagged paths keep the `file://` form; bundled virtual specifiers
+ * pass through unchanged. Bun ignores queries on `file://` URLs, so a tagged
+ * specifier must never use that form.
  */
 function toGraphImportSpecifier(resolvedPath: string, mtimeTag: string | null): string {
 	if (isBundledVirtualSpecifier(resolvedPath)) {
 		return resolvedPath;
 	}
-	if (process.platform === "win32" || !mtimeTag) {
+	if (!mtimeTag) {
 		return url.pathToFileURL(stripWindowsExtendedLengthPathPrefix(resolvedPath)).href;
 	}
 	return `${stripWindowsExtendedLengthPathPrefix(resolvedPath)}?mtime=${mtimeTag}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -2620,13 +2636,12 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
-		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
-		// suffix as part of the module identity; Bun ignores query strings on
+		// Use the raw filesystem path so Bun keys the `?mtime` suffix as part of
+		// the module identity (on Windows too); Bun ignores query strings on
 		// `file://` specifiers, which would serve stale edited source.
-		const entrySpecifier =
-			process.platform === "win32" || isBundledVirtualSpecifier(entryRealPath)
-				? toImportSpecifier(entryRealPath)
-				: entryRealPath;
+		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
+			? toImportSpecifier(entryRealPath)
+			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only
@@ -2649,12 +2664,53 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
 	return "js";
 }
 
+// Set while `resolveLegacyPiSpecifier` is resolving. Every `Bun.resolveSync`
+// below targets a specifier this same hook matches, so Bun re-enters the hook
+// synchronously; the nested call must decline or it recurses.
+let isResolvingLegacyPiSpecifier = false;
+
 function resolveLegacyPiSpecifier(args: { path: string; importer: string }): LegacyPiResolveResult | undefined {
+	// A nested call comes from our own `Bun.resolveSync`: decline so Bun resolves
+	// natively from the directory that call chose (the host location first, so
+	// canonical imports keep landing on the host copy, not a plugin-local one).
+	if (isResolvingLegacyPiSpecifier) {
+		return undefined;
+	}
 	const remappedSpecifier = remapLegacyPiSpecifier(args.path);
 	if (!remappedSpecifier) {
 		return undefined;
 	}
 
+	isResolvingLegacyPiSpecifier = true;
+	try {
+		const resolved = resolveRemappedLegacyPiSpecifier(remappedSpecifier, args);
+		// A canonical specifier that remaps to itself and already resolves to the
+		// same host file from its importer (host code, e.g. `/login` requiring
+		// `@oh-my-pi/pi-ai/index.js`) has nothing to rewrite: decline and let Bun
+		// resolve it natively. Answering it anyway breaks `require()` on Bun
+		// 1.3.x, which reads the returned path back as `file:<path>` and, on
+		// source-link/dev installs, recurses into `NameTooLong reading
+		// "file:file:…"` (#12293). Importers whose native resolution differs (a
+		// plugin-local copy) still get the host path.
+		if (resolved && !resolved.namespace && remappedSpecifier === args.path) {
+			try {
+				if (Bun.resolveSync(args.path, path.dirname(args.importer)) === resolved.path) {
+					return undefined;
+				}
+			} catch {
+				// Unresolvable from the importer: keep the host answer.
+			}
+		}
+		return resolved;
+	} finally {
+		isResolvingLegacyPiSpecifier = false;
+	}
+}
+
+function resolveRemappedLegacyPiSpecifier(
+	remappedSpecifier: string,
+	args: { path: string; importer: string },
+): LegacyPiResolveResult | undefined {
 	// Primary: resolve the canonical @oh-my-pi/* specifier from the host binary
 	// location. Works in dev mode and in source-link installs.
 	try {

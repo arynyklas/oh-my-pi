@@ -133,6 +133,16 @@ export class AccountPins {
 		}
 	}
 
+	/**
+	 * Carry the configured default/priority selectors over from the pins of a
+	 * replaced credential store. Fallover notices, log de-duplication, and the
+	 * journal reference the old store's row ids, so they start fresh.
+	 */
+	adoptSelectors(previous: AccountPins): void {
+		this.#defaultAccountSelectors = new Map(previous.#defaultAccountSelectors);
+		this.#accountPrioritySelectors = new Map(previous.#accountPrioritySelectors);
+	}
+
 	/** True when `selector` (already lowercased/trimmed) identifies `entry`. */
 	#credentialMatchesSelector(entry: StoredCredential, selector: string): boolean {
 		if (`#${entry.id}` === selector) return true;

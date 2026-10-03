@@ -1,5 +1,5 @@
 /**
- * omp auth-gateway HTTP server.
+ * omp auth-gateway router and HTTP server.
  *
  * Accepts any provider-format request (OpenAI chat-completions, Anthropic
  * messages, OpenAI Responses) and dispatches through pi-ai's `streamSimple()`
@@ -23,14 +23,16 @@
  *   POST /v1/audio/transcriptions          → speech-to-text, multipart or JSON base64 in (routes/transcriptions)
  *
  * Chat routes live in this file; every other modality is a `routes/*` module
- * built on the shared plumbing in `dispatch.ts`.
+ * built on the shared plumbing in `dispatch.ts`. {@link createAuthGatewayRouter}
+ * answers the `/v1/*` routes for any transport: {@link startAuthGateway}
+ * serves them over HTTP behind bearer auth, `stdio.ts` over JSON lines.
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver } from "../auth-retry";
+import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type { AuthCredentialSelectionPolicy, AuthStorage, ResolvedAuthCredential } from "../auth-storage";
 import * as AIError from "../error";
 import { isAuthRetryableError } from "../error/auth-classify";
@@ -56,12 +58,14 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
 	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	GATEWAY_KEYLESS_API_KEY,
 	type GatewayCredentialScope,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
 	resolveGatewayAccount,
+	toResolvedApiKey,
 } from "./dispatch";
 import {
 	type AuthGatewayAuditOutcome,
@@ -75,6 +79,7 @@ import {
 	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
+	hasMisplacedBearer,
 	json,
 	readBearerToken,
 	resolveClientIdentity,
@@ -94,13 +99,14 @@ import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes
 import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
+	AuthGatewayServerOptions,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
 import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
-// ModelResolver / AuthGatewayBootOptions come from ./dispatch, shared with routes/*.
+// ModelResolver / AuthGatewayRouteOptions / AuthGatewayBootOptions come from ./dispatch, shared with routes/*.
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
@@ -324,7 +330,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	selection: AuthCredentialSelectionPolicy | undefined,
 	exhaustion: PoolExhaustionState,
 	onCredential: (credential: ResolvedAuthCredential) => void,
-): Promise<string | undefined> {
+): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
@@ -360,7 +366,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			return undefined;
 		}
 		onCredential(next.credential);
-		return next.apiKey;
+		return toResolvedApiKey(next.credential);
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal, selection });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -385,7 +391,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		return undefined;
 	}
 	onCredential(next.credential);
-	return next.apiKey;
+	return toResolvedApiKey(next.credential);
 }
 
 function buildPooledApiKeyResolver(
@@ -407,13 +413,14 @@ function buildPooledApiKeyResolver(
 		if (error === undefined) {
 			lastKey = initial.apiKey;
 			onCredential(initial.credential);
-			return initial.apiKey;
+			return toResolvedApiKey(initial.credential);
 		}
 		if (!lastChance) {
 			const refreshed = await storage.resolveApiKeySelection(model.provider, sessionId, {
 				modelId: model.id,
 				signal: sig,
 				forceRefresh: true,
+				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 				selection,
 			});
 			if (!refreshed.ok) {
@@ -426,7 +433,7 @@ function buildPooledApiKeyResolver(
 			}
 			lastKey = refreshed.credential.apiKey;
 			onCredential(refreshed.credential);
-			return refreshed.credential.apiKey;
+			return toResolvedApiKey(refreshed.credential);
 		}
 		const next = await refreshGatewayApiKeyAfterAuthError(
 			storage,
@@ -442,7 +449,7 @@ function buildPooledApiKeyResolver(
 			exhaustion,
 			onCredential,
 		);
-		lastKey = next ?? lastKey;
+		lastKey = next?.apiKey ?? lastKey;
 		return next;
 	};
 }
@@ -487,7 +494,7 @@ function qualifiedModelId(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-function resolveGatewayModel(opts: AuthGatewayBootOptions, id: string): Model<Api> | undefined {
+function resolveGatewayModel(opts: AuthGatewayRouteOptions, id: string): Model<Api> | undefined {
 	const direct = opts.resolveModel(id);
 	if (direct) return direct;
 	const slash = id.indexOf("/");
@@ -626,7 +633,7 @@ interface AuditRecorder {
 }
 
 function createAuditRecorder(
-	opts: AuthGatewayBootOptions,
+	opts: AuthGatewayRouterOptions,
 	req: Request,
 	pathname: string,
 	routeFamily: AuthGatewayRouteFamily,
@@ -803,7 +810,7 @@ function chatRouteRejection(model: Model<Api>): string | undefined {
 
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouterOptions,
 	req: Request,
 	peer: string,
 	principal: AuthGatewayPrincipal,
@@ -1264,7 +1271,7 @@ async function handleFormatEndpoint(
  * path.
  */
 async function handlePiNative(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouterOptions,
 	req: Request,
 	peer: string,
 	principal: AuthGatewayPrincipal,
@@ -1689,7 +1696,7 @@ async function handleUsage(
 	storage: AuthStorage,
 	req: Request,
 	principal: AuthGatewayPrincipal,
-	accessStore?: AuthGatewayBootOptions["accessStore"],
+	accessStore?: AuthGatewayRouterOptions["accessStore"],
 ): Promise<Response> {
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
@@ -1743,7 +1750,7 @@ async function handleCredentialsCheck(
 	storage: AuthStorage,
 	signal: AbortSignal,
 	principal: AuthGatewayPrincipal,
-	accessStore?: AuthGatewayBootOptions["accessStore"],
+	accessStore?: AuthGatewayRouterOptions["accessStore"],
 ): Promise<Response> {
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
@@ -1816,7 +1823,7 @@ async function handleCredentialsCheck(
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
-function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPrincipal): Response {
+function handleModelsList(opts: AuthGatewayRouterOptions, principal: AuthGatewayPrincipal): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
 	let filtered = list;
 	if (isManagedRegular(principal) && opts.accessStore) {
@@ -1868,14 +1875,22 @@ function handleModelsList(opts: AuthGatewayBootOptions, principal: AuthGatewayPr
 	return json(200, { object: "list", data });
 }
 
+/** The unrestricted admin every caller is when the transport does no inbound auth. */
+const NO_AUTH_PRINCIPAL: AuthGatewayPrincipal = {
+	kind: "no-auth",
+	id: "no-auth-admin",
+	userId: null,
+	name: "no-auth",
+	role: "admin",
+	tokenId: null,
+};
+
 function authenticateGatewayRequest(
 	req: Request,
 	tokens: ReadonlySet<string>,
-	accessStore?: AuthGatewayBootOptions["accessStore"],
+	accessStore?: AuthGatewayRouterOptions["accessStore"],
 ): AuthGatewayPrincipal | null {
-	if (tokens.size === 0) {
-		return { kind: "no-auth", id: "no-auth-admin", userId: null, name: "no-auth", role: "admin", tokenId: null };
-	}
+	if (tokens.size === 0) return NO_AUTH_PRINCIPAL;
 	const bearer = readBearerToken(req);
 	if (!bearer) return null;
 	const presented = new TextEncoder().encode(bearer);
@@ -1895,7 +1910,7 @@ function authenticateGatewayRequest(
  * denial the route encodes in its own error envelope.
  */
 function gatewayCredentialScopeFor(
-	opts: AuthGatewayBootOptions,
+	opts: AuthGatewayRouterOptions,
 	principal: AuthGatewayPrincipal,
 	routeFamily: AuthGatewayRouteFamily,
 ): GatewayCredentialScope {
@@ -1948,35 +1963,25 @@ function gatewayCredentialScopeFor(
 
 /**
  * Dispatch the non-chat modality routes. Returns `null` when `pathname` is not
- * one of them, so the router falls through to its remaining routes. Streaming
- * and long-poll modalities opt out of Bun's idle timer the same way inference
- * does.
+ * one of them, so the router falls through to its remaining routes.
  */
 async function dispatchModalityRoute(
-	opts: AuthGatewayBootOptions,
+	opts: AuthGatewayRouteOptions,
 	req: Request,
 	pathname: string,
 	peer: string,
-	server: { timeout: (req: Request, seconds: number) => void },
 ): Promise<Response | null> {
 	if (req.method === "POST") {
 		// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own judge
 		// point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs reach the
 		// same handler through their Decisions path.
-		if (pathname === "/v1/systemone" || pathname === "/alpha/decisions") {
-			server.timeout(req, 0);
-			return handleSystemOne(opts, req, peer);
-		}
+		if (pathname === "/v1/systemone" || pathname === "/alpha/decisions") return handleSystemOne(opts, req, peer);
 		// Image generation: OpenAI `/v1/images/generations` + OpenRouter
 		// `/v1/images` (JSON), and OpenAI multipart / OpenRouter JSON edits.
 		if (pathname === "/v1/images/generations" || pathname === "/v1/images") {
-			server.timeout(req, 0);
 			return handleImageGenerations(opts, req, peer);
 		}
-		if (pathname === "/v1/images/edits") {
-			server.timeout(req, 0);
-			return handleImageEdits(opts, req, peer);
-		}
+		if (pathname === "/v1/images/edits") return handleImageEdits(opts, req, peer);
 		// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
 		if (pathname === "/v1/audio/speech") return handleSpeech(opts, req, peer);
 		// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
@@ -2026,13 +2031,171 @@ function classifyRoute(pathname: string): AuthGatewayRouteFamily {
 /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
 const VIDEO_JOB_PATH = /^\/v1\/videos\/([^/]+)(\/content)?$/;
 
+// Only exact static routes are safe to include in unauthorized request logs.
+// Dynamic video IDs and unknown paths may carry credentials.
+const LOGGABLE_PATHS: Record<string, true> = {
+	"/v1/usage": true,
+	"/v1/credentials/check": true,
+	"/v1/pi/stream": true,
+	"/v1/systemone": true,
+	"/alpha/decisions": true,
+	"/v1/images/generations": true,
+	"/v1/images": true,
+	"/v1/images/edits": true,
+	"/v1/audio/speech": true,
+	"/v1/audio/transcriptions": true,
+	"/v1/embeddings": true,
+	"/v1/rerank": true,
+	"/v1/videos": true,
+	"/v1/models": true,
+};
+
+/** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
+function loggablePath(pathname: string): string {
+	return Object.hasOwn(FORMAT_ROUTES, pathname) || Object.hasOwn(LOGGABLE_PATHS, pathname) ? pathname : "<unrouted>";
+}
+
+/**
+ * What {@link createAuthGatewayRouter} needs: the routes' options plus the
+ * optional managed-user store (ACLs, account pools, audit, management API) and
+ * the version the management status reports.
+ */
+export interface AuthGatewayRouterOptions
+	extends AuthGatewayRouteOptions, Pick<AuthGatewayServerOptions, "accessStore" | "version"> {}
+
+/** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
+export interface AuthGatewayRouter {
+	/**
+	 * Answers one request; `peer` names the caller in logs. `principal` is who
+	 * the transport admitted; omitted, the caller is the unrestricted no-auth
+	 * admin. Never rejects: a crashed route answers 500.
+	 */
+	route(req: Request, peer: string, principal?: AuthGatewayPrincipal): Promise<Response>;
+	/**
+	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
+	 * workflows), whose sockets and timers would otherwise keep the process alive.
+	 */
+	close(): void;
+}
+
+/**
+ * The gateway's routes over `opts`, owning their per-session provider state:
+ * two routers in one process never share (or tear down) each other's.
+ */
+export function createAuthGatewayRouter(opts: AuthGatewayRouterOptions): AuthGatewayRouter {
+	const sessionStates = new AuthGatewaySessionStateStore();
+	const version = opts.version ?? "dev";
+	const route = async (req: Request, peer: string, principal = NO_AUTH_PRINCIPAL): Promise<Response> => {
+		const pathname = new URL(req.url).pathname;
+		const routeFamily = classifyRoute(pathname);
+		const audit = createAuditRecorder(opts, req, pathname, routeFamily);
+		audit?.setPrincipal(principal);
+		try {
+			if (opts.accessStore) {
+				const management = await handleAuthGatewayManagementRequest(
+					req,
+					pathname,
+					principal,
+					opts.accessStore,
+					opts.storage,
+					version,
+				);
+				if (management) {
+					audit?.record(
+						auditOutcomeForStatus(management.status),
+						management.status,
+						zeroUsage(),
+						management.status >= 400 ? "management_error" : null,
+					);
+					return management;
+				}
+			}
+
+			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
+			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
+			// same client struct.
+			if (req.method === "GET" && pathname === "/v1/usage") {
+				const response = await handleUsage(opts.storage, req, principal, opts.accessStore);
+				audit?.record(auditOutcomeForStatus(response.status), response.status);
+				return response;
+			}
+
+			// Per-credential auth probe — diagnoses which row in a multi-account
+			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
+			// credentials, so we need a separate endpoint that captures errors.
+			if (req.method === "GET" && pathname === "/v1/credentials/check") {
+				const response = await handleCredentialsCheck(opts.storage, req.signal, principal, opts.accessStore);
+				audit?.record(auditOutcomeForStatus(response.status), response.status);
+				return response;
+			}
+
+			// Provider-format dispatch.
+			const formatRoute = FORMAT_ROUTES[pathname];
+			if (formatRoute && req.method === "POST") {
+				if (routeFamily === "chat" || routeFamily === "messages" || routeFamily === "responses") {
+					return await handleFormatEndpoint(
+						formatRoute,
+						opts,
+						req,
+						peer,
+						principal,
+						audit,
+						routeFamily,
+						sessionStates,
+					);
+				}
+			}
+
+			// Pi-native fast path. Same auth + provider plumbing as the
+			// foreign-wire routes, just without the wire-format translation.
+			if (req.method === "POST" && pathname === "/v1/pi/stream") {
+				return await handlePiNative(opts, req, peer, principal, audit, sessionStates);
+			}
+
+			// Non-chat modalities. Each handler resolves its own model after
+			// parsing the body, so the principal's ACL and account pool travel
+			// with the request through `credentialScope` instead of being
+			// checked here; the audit row is recorded from the settled status.
+			const modalityOpts: AuthGatewayRouteOptions = {
+				...opts,
+				credentialScope: gatewayCredentialScopeFor(opts, principal, routeFamily),
+			};
+			const modality = await dispatchModalityRoute(modalityOpts, req, pathname, peer);
+			if (modality) {
+				audit?.record(auditOutcomeForStatus(modality.status), modality.status, zeroUsage());
+				return modality;
+			}
+
+			// Model catalog.
+			if (req.method === "GET" && pathname === "/v1/models") {
+				const response = handleModelsList(opts, principal);
+				audit?.record(auditOutcomeForStatus(response.status), response.status);
+				return response;
+			}
+
+			// Route-table miss: no format module to defer to, so we emit a
+			// plain JSON 404 rather than guessing at a protocol-specific envelope.
+			audit?.record("not_found", 404, zeroUsage(), "not_found");
+			return json(404, { error: `No route: ${req.method} ${pathname}` });
+		} catch (error) {
+			logger.error("auth-gateway handler crashed", {
+				method: req.method,
+				path: loggablePath(pathname),
+				peer,
+				error: String(error),
+			});
+			audit?.record("internal_error", 500, zeroUsage(), "internal_error");
+			return json(500, { error: "internal error" });
+		}
+	};
+	return { route, close: () => sessionStates.close() };
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version ?? "dev";
-	// Owned by this server instance so two gateways in one process never share
-	// (or tear down) each other's provider state, and so `close()` can drain it.
-	const sessionStates = new AuthGatewaySessionStateStore();
+	const router = createAuthGatewayRouter(opts);
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -2040,123 +2203,66 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		fetch: async (req, server): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
-			const peer = resolvePeer(req);
+			const socketPeer = server.requestIP(req)?.address ?? "unknown";
+			// CORS preflight is always answered without auth — browsers send
+			// preflights pre-authentication and a 401 here breaks the actual
+			// request before the bearer is ever attached.
 			if (req.method === "OPTIONS") {
 				return new Response(null, { status: 204, headers: corsHeaders(req) });
 			}
+			if (req.method === "GET" && pathname === "/healthz") {
+				return withCors(json(200, { ok: true, version }), req);
+			}
+			let principal: AuthGatewayPrincipal | null;
 			try {
-				if (req.method === "GET" && pathname === "/healthz") {
-					return withCors(json(200, { ok: true, version }), req);
-				}
-				const routeFamily = classifyRoute(pathname);
-				const audit = createAuditRecorder(opts, req, pathname, routeFamily);
-				const principal = authenticateGatewayRequest(req, tokens, opts.accessStore);
-				if (!principal) {
-					logger.info("auth-gateway request unauthorized", { method: req.method, path: pathname, peer });
-					audit?.record("unauthorized", 401, zeroUsage(), "unauthorized");
-					return withCors(
-						routeFamily === "management"
-							? json(401, { error: { code: "unauthorized", message: "Unauthorized" } })
-							: json(401, { error: "unauthorized" }),
-						req,
-					);
-				}
-				audit?.setPrincipal(principal);
-
-				if (opts.accessStore) {
-					const management = await handleAuthGatewayManagementRequest(
-						req,
-						pathname,
-						principal,
-						opts.accessStore,
-						opts.storage,
-						version,
-					);
-					if (management) {
-						audit?.record(
-							auditOutcomeForStatus(management.status),
-							management.status,
-							zeroUsage(),
-							management.status >= 400 ? "management_error" : null,
-						);
-						return withCors(management, req);
-					}
-				}
-
-				if (req.method === "GET" && pathname === "/v1/usage") {
-					const response = await handleUsage(opts.storage, req, principal, opts.accessStore);
-					audit?.record(auditOutcomeForStatus(response.status), response.status);
-					return withCors(response, req);
-				}
-
-				if (req.method === "GET" && pathname === "/v1/credentials/check") {
-					const response = await handleCredentialsCheck(opts.storage, req.signal, principal, opts.accessStore);
-					audit?.record(auditOutcomeForStatus(response.status), response.status);
-					return withCors(response, req);
-				}
-
-				const formatRoute = FORMAT_ROUTES[pathname];
-				if (formatRoute && req.method === "POST") {
-					if (routeFamily === "chat" || routeFamily === "messages" || routeFamily === "responses") {
-						// Provider watchdogs and client cancellation own inference lifetime,
-						// not Bun's socket idle timer (which also runs between SSE events).
-						server.timeout(req, 0);
-						return withCors(
-							await handleFormatEndpoint(
-								formatRoute,
-								opts,
-								req,
-								peer,
-								principal,
-								audit,
-								routeFamily,
-								sessionStates,
-							),
-							req,
-						);
-					}
-				}
-
-				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					server.timeout(req, 0);
-					return withCors(await handlePiNative(opts, req, peer, principal, audit, sessionStates), req);
-				}
-
-				// Non-chat modalities. Each handler resolves its own model after
-				// parsing the body, so the principal's ACL and account pool travel
-				// with the request through `credentialScope` instead of being
-				// checked here; the audit row is recorded from the settled status.
-				const modalityOpts: AuthGatewayBootOptions = {
-					...opts,
-					credentialScope: gatewayCredentialScopeFor(opts, principal, routeFamily),
-				};
-				const modality = await dispatchModalityRoute(modalityOpts, req, pathname, peer, server);
-				if (modality) {
-					audit?.record(auditOutcomeForStatus(modality.status), modality.status, zeroUsage());
-					return withCors(modality, req);
-				}
-
-				// Model catalog.
-				if (req.method === "GET" && pathname === "/v1/models") {
-					const response = handleModelsList(opts, principal);
-					audit?.record(auditOutcomeForStatus(response.status), response.status);
-					return withCors(response, req);
-				}
-
-				const response = json(404, { error: `No route: ${req.method} ${pathname}` });
-				audit?.record("not_found", 404, zeroUsage(), "not_found");
-				return withCors(response, req);
+				principal = authenticateGatewayRequest(req, tokens, opts.accessStore);
 			} catch (error) {
 				logger.error("auth-gateway handler crashed", {
 					method: req.method,
-					path: pathname,
-					peer,
+					path: loggablePath(pathname),
+					peer: socketPeer,
 					error: String(error),
 				});
 				const audit = createAuditRecorder(opts, req, pathname, classifyRoute(pathname));
 				audit?.record("internal_error", 500, zeroUsage(), "internal_error");
 				return withCors(json(500, { error: "internal error" }), req);
 			}
+			if (!principal) {
+				logger.info("auth-gateway request unauthorized", {
+					method: req.method,
+					path: loggablePath(pathname),
+					peer: socketPeer,
+				});
+				const routeFamily = classifyRoute(pathname);
+				const audit = createAuditRecorder(opts, req, pathname, routeFamily);
+				audit?.record("unauthorized", 401, zeroUsage(), "unauthorized");
+				return withCors(
+					routeFamily === "management"
+						? json(401, { error: { code: "unauthorized", message: "Unauthorized" } })
+						: json(401, { error: "unauthorized" }),
+					req,
+				);
+			}
+			if (hasMisplacedBearer(req, url, tokens)) {
+				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
+			}
+			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
+			// Provider watchdogs and client cancellation own inference lifetime,
+			// not Bun's socket idle timer (which also runs between SSE events):
+			// chat, pi-native, judgment, and image generation opt out of it.
+			if (
+				req.method === "POST" &&
+				(Object.hasOwn(FORMAT_ROUTES, pathname) ||
+					pathname === "/v1/pi/stream" ||
+					pathname === "/v1/systemone" ||
+					pathname === "/alpha/decisions" ||
+					pathname === "/v1/images/generations" ||
+					pathname === "/v1/images" ||
+					pathname === "/v1/images/edits")
+			) {
+				server.timeout(req, 0);
+			}
+			return withCors(await router.route(req, peer, principal), req);
 		},
 		// Bound ordinary idle connections; authenticated inference opts out above
 		// so long silent reasoning is not cut off before the provider watchdog.
@@ -2187,7 +2293,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			// Drain after the listener is down: the retained provider states own
 			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
 			// process can't settle until each one is closed.
-			sessionStates.close();
+			router.close();
 		},
 	};
 }

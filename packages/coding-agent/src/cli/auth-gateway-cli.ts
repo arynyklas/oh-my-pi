@@ -8,11 +8,12 @@
  * `OMP_AUTH_BROKER_URL` / `auth.broker.url` precedence used elsewhere).
  *
  * Sub-verbs:
- *   - `serve [--bind=…]` — boots the gateway against the configured broker.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the gateway against the configured broker.
+ *   - `stdio` — serves the same routes as JSON lines on stdin/stdout with this omp's own credentials
+ *     and model roles (`auth-gateway-stdio.ts`).
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
  *   - `status` — prints the locally-stored gateway token and bind hint.
  */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -23,6 +24,7 @@ import {
 	type CredentialCompletionResult,
 	completeSimple,
 	type Model,
+	type OAuthRequestIdentity,
 } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
@@ -46,7 +48,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { runAuthGatewayTui } from "../auth-gateway/run-tui";
 import { ModelRegistry } from "../config/model-registry";
@@ -55,8 +57,10 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
 } from "../session/auth-broker-config";
+import { runAuthGatewayStdio } from "./auth-gateway-stdio";
+import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
-export type AuthGatewayAction = "serve" | "token" | "status" | "check" | "user" | "pool" | "audit" | "tui";
+export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check" | "user" | "pool" | "audit" | "tui";
 
 export interface AuthGatewayCommandArgs {
 	action: AuthGatewayAction;
@@ -68,6 +72,7 @@ export interface AuthGatewayCommandArgs {
 		json?: boolean;
 		bind?: string;
 		regenerate?: boolean;
+		trustProxyHeaders?: boolean;
 		description?: string;
 		owner?: string;
 		role?: string;
@@ -129,7 +134,17 @@ export function buildAuthGatewayModelIndex(modelRegistry: ModelRegistry): AuthGa
 	};
 }
 
-const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check", "user", "pool", "audit", "tui"];
+const ACTIONS: readonly AuthGatewayAction[] = [
+	"serve",
+	"stdio",
+	"token",
+	"status",
+	"check",
+	"user",
+	"pool",
+	"audit",
+	"tui",
+];
 
 const USER_POSITIONAL_COUNTS: Record<string, number> = {
 	list: 2,
@@ -173,29 +188,6 @@ function getTokenFilePath(): string {
 function getAccessDbPath(deps?: AuthGatewayCommandDependencies): string {
 	return deps?.accessDbPath ?? path.join(getConfigRootDir(), "auth-gateway.db");
 }
-
-async function readToken(): Promise<string | null> {
-	try {
-		const raw = await fs.readFile(getTokenFilePath(), "utf8");
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
-	}
-}
-
-async function writeToken(token: string): Promise<void> {
-	const file = getTokenFilePath();
-	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await fs.writeFile(file, token, { mode: 0o600 });
-	try {
-		await fs.chmod(file, 0o600);
-	} catch {
-		// Best-effort (e.g. Windows).
-	}
-}
-
 /**
  * Atomically create the token file, refusing to clobber an existing one.
  * Returns `true` on success, `false` when the file already existed (so the
@@ -219,21 +211,17 @@ async function createTokenExclusive(token: string): Promise<boolean> {
 	return true;
 }
 
-function generateToken(): string {
-	return crypto.randomBytes(32).toString("base64url");
-}
-
 async function ensureToken(): Promise<string> {
-	const existing = await readToken();
+	const existing = await readTokenFile(getTokenFilePath());
 	if (existing) return existing;
 	const token = generateToken();
 	if (await createTokenExclusive(token)) return token;
 	// Another concurrent invocation won the create race; read what they wrote.
-	const fromRace = await readToken();
+	const fromRace = await readTokenFile(getTokenFilePath());
 	if (fromRace) return fromRace;
 	// File existed-then-disappeared between EEXIST and read; last resort, write
 	// our generated token unconditionally so callers don't see an empty string.
-	await writeToken(token);
+	await writeTokenFile(getTokenFilePath(), token);
 	return token;
 }
 
@@ -412,6 +400,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 			accessStore,
 			bind,
 			bearerTokens: gatewayToken ? [gatewayToken] : [],
+			trustProxyHeaders: flags.trustProxyHeaders,
 			version: VERSION,
 			resolveModel: (modelId: string) => modelIndex.resolveModel(modelId),
 			listModels: () => modelIndex.listModels(),
@@ -508,7 +497,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	if (flags.regenerate) {
 		const next = generateToken();
-		await writeToken(next);
+		await writeTokenFile(getTokenFilePath(), next);
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ token: next, path: getTokenFilePath() })}\n`);
 		} else {
@@ -539,7 +528,7 @@ async function readAccessCounts(dbPath: string): Promise<{ users: number; active
 }
 
 async function runStatus(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatewayCommandDependencies): Promise<void> {
-	const token = await readToken();
+	const token = await readTokenFile(getTokenFilePath());
 	const tokenFile = getTokenFilePath();
 	const accessDb = getAccessDbPath(deps);
 	const accessCounts = await readAccessCounts(accessDb);
@@ -798,6 +787,7 @@ function positionalCountForGroupedCommand(
 function expectedAuthGatewayPositionals(cmd: AuthGatewayCommandArgs): number | undefined {
 	switch (cmd.action) {
 		case "serve":
+		case "stdio":
 		case "token":
 		case "status":
 		case "check":
@@ -1210,6 +1200,9 @@ export async function runAuthGatewayCommand(
 		case "serve":
 			await runServe(cmd.flags, deps);
 			return;
+		case "stdio":
+			await runAuthGatewayStdio();
+			return;
 		case "token":
 			await runToken(cmd.flags);
 			return;
@@ -1328,6 +1321,7 @@ async function probeOneModel(
 	model: Model<Api>,
 	apiKey: string,
 	outerSignal: AbortSignal,
+	oauthIdentity?: OAuthRequestIdentity,
 ): Promise<CredentialCompletionResult> {
 	const start = Date.now();
 	const attemptTimeoutSignal = AbortSignal.timeout(STRICT_PROBE_PER_ATTEMPT_TIMEOUT_MS);
@@ -1344,6 +1338,7 @@ async function probeOneModel(
 		},
 		{
 			apiKey,
+			oauthIdentity,
 			maxTokens: 32,
 			signal: attemptSignal,
 		},
@@ -1375,6 +1370,14 @@ function createStrictCompletionProbe(): CompletionProbe {
 			return { ok: null, reason: `no bearer-compatible probe model bundled for provider ${input.provider}` };
 		}
 		const apiKey = composeProbeApiKey(input.provider, input.credential);
+		const oauthIdentity =
+			input.credential.type === "oauth"
+				? {
+						orgId: input.credential.orgId,
+						region: input.credential.region,
+						inferenceRegion: input.credential.inferenceRegion,
+					}
+				: undefined;
 		let lastFailure: CredentialCompletionResult | undefined;
 		for (const model of candidates) {
 			if (input.signal.aborted) {
@@ -1384,7 +1387,7 @@ function createStrictCompletionProbe(): CompletionProbe {
 					modelId: model.id,
 				};
 			}
-			const result = await probeOneModel(model, apiKey, input.signal);
+			const result = await probeOneModel(model, apiKey, input.signal, oauthIdentity);
 			if (result.ok === true) return result;
 			lastFailure = result;
 			if (!RETRYABLE_MODEL_ERROR_RE.test(result.reason ?? "")) {

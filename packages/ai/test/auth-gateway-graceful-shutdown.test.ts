@@ -31,7 +31,7 @@ describe("auth-gateway graceful shutdown", () => {
 
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["t"],
+			bearerTokens: ["gateway-test-token"],
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -40,7 +40,7 @@ describe("auth-gateway graceful shutdown", () => {
 		try {
 			const responsePromise = fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gateway-test-token" },
 				body: JSON.stringify({
 					model: "openrouter/drain-model",
 					messages: [{ role: "user", content: "hi" }],

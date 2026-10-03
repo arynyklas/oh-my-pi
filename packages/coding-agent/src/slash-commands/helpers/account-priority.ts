@@ -1,5 +1,6 @@
 import type { Settings } from "../../config/settings";
 import type { AuthStorage, OAuthAccountSummary } from "../../session/auth-storage";
+import { cfgProvidersAccountPriority, cfgProvidersDefaultAccount } from "../../session/settings";
 
 /**
  * Everything the account-priority mutations need: the settings file they
@@ -39,10 +40,7 @@ export function selectorMatchesAccount(selector: string, account: OAuthAccountSu
 }
 
 function writeDefaultAccountSelector(ctx: AccountPriorityContext, selector: string | undefined): void {
-	const current = { ...ctx.settings.get("providers.defaultAccount") };
-	if (selector === undefined) delete current[ctx.providerId];
-	else current[ctx.providerId] = selector;
-	ctx.settings.set("providers.defaultAccount", current);
+	cfgProvidersDefaultAccount.setEntry(ctx.settings, ctx.providerId, selector);
 	ctx.authStorage.setDefaultAccountSelector(ctx.providerId, selector);
 }
 
@@ -54,15 +52,12 @@ function writeDefaultAccountSelector(ctx: AccountPriorityContext, selector: stri
  * disagree.
  */
 export function applyAccountPriority(ctx: AccountPriorityContext, selectors: readonly string[]): void {
-	const current = { ...ctx.settings.get("providers.accountPriority") };
 	if (selectors.length === 0) {
-		delete current[ctx.providerId];
-		ctx.settings.set("providers.accountPriority", current);
+		cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, undefined);
 		ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, undefined);
 		return;
 	}
-	current[ctx.providerId] = [...selectors];
-	ctx.settings.set("providers.accountPriority", current);
+	cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, [...selectors]);
 	ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, selectors);
 	const head = selectors[0];
 	if (head !== undefined) writeDefaultAccountSelector(ctx, head);

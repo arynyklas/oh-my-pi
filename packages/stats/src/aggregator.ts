@@ -1,19 +1,31 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, logger, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
-	applySessionParseResult,
+	applySessionParseResults,
 	completeSessionSync,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
-	getBehaviorByModel,
-	getBehaviorOverall,
-	getBehaviorTimeSeries,
-	getCostTimeSeries,
-	getFileOffset,
+	type FileOffset,
+	getFileOffsets,
 	getMessageById,
 	getMessageCount,
+	initDb,
+	markSessionBackfillsComplete,
+	type ParsedSession,
+	prepareSessionSync,
+} from "./db";
+import {
+	getSessionEntry,
+	listAllSessionFiles,
+	matchesSessionFile,
+	type ParseSessionResult,
+	parseSessionFile,
+	type SessionParserState,
+} from "./parser";
+import {
+	getCostTimeSeries,
 	getModelPerformanceSeries,
 	getModelTimeSeries,
 	getOverallStats,
@@ -27,36 +39,31 @@ import {
 	getToolStats,
 	getToolStatsByModel,
 	getToolTimeSeries,
-	initDb,
-	markSessionBackfillsComplete,
-	prepareSessionSync,
-} from "./db";
-import {
-	getSessionEntry,
-	listAllSessionFiles,
-	matchesSessionFile,
-	type ParseSessionResult,
-	parseSessionFile,
-	type SessionParserState,
-} from "./parser";
+	type RangeWindow,
+} from "./rollup";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
 // JavaScript entry. Standalone source `omp-stats` keeps using this package's
 // own sync-worker source file.
 import type {
-	BehaviorDashboardStats,
 	DashboardStats,
 	FolderStats,
 	MessageStats,
 	ProviderDashboardStats,
+	ProviderWindowStats,
 	RequestDetails,
 	ToolDashboardStats,
 } from "./types";
-import { computeUsageWindowStats, fetchUsageData } from "./usage-windows";
+import { computeUsageWindowStats, fetchUsageData, type UsageDataSnapshot } from "./usage-windows";
 
 const STATS_SYNC_LOCK_RETRY_MS = 25;
 const STATS_SYNC_LOCK_WAIT_MS = 60 * 60 * 1000;
+// Bound queued results by both file count and derived rows; never hold a SQLite transaction across I/O.
+const SYNC_BATCH_FILES = 512;
+const SYNC_BATCH_ROWS = 8192;
+const SYNC_METADATA_FILES = 128;
+const SYNC_INLINE_READS = 8;
 
 /**
  * Serialize stats ingestion and archive reconciliation across processes.
@@ -78,7 +85,7 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
  * each committed chunk of a file large enough to be parsed in several passes.
  * `current` is the number of files completed (skipped + parsed),
  * `total` is the size of the work set. `processed` is the running total
- * of inserted rows.
+ * of inserted rows. Parsed files are reported only after their batch commits.
  */
 export interface SyncProgress {
 	current: number;
@@ -97,9 +104,14 @@ export interface SyncOptions {
 	/**
 	 * Worker pool size. Defaults to a sensible value derived from the host
 	 * (capped to avoid drowning a small machine in workers). Set to `1` to
-	 * force serial parsing without spawning workers.
+	 * parse on the calling thread without spawning workers. File I/O is pipelined.
 	 */
 	workers?: number;
+	/**
+	 * Sync only these transcripts (e.g. files a watcher saw change) instead of
+	 * listing every session. Missing files are skipped.
+	 */
+	files?: readonly string[];
 }
 
 function defaultWorkerCount(): number {
@@ -227,9 +239,11 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 /**
  * Sync all session files to the database.
  *
- * `workers: 1` parses inline. Larger pools fan parsing out across workers
+ * `workers: 1` pipelines file reads and parses inline, committing in discovery order.
+ * Larger pools fan parsing out across workers
  * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
- * the calling thread so the single SQLite handle stays uncontended.
+ * the calling thread. Bounded batches commit rows and cursors atomically without
+ * holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
  * bar walks at a steady rate).
  */
@@ -246,24 +260,80 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 	});
 }
 
+/** Recency tiers for {@link orderForIngest}, newest first. */
+const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
+
+/**
+ * Order a full sync so recent activity lands first: transcripts modified in
+ * the last day, then the last week, then the rest. Within a tier files go in
+ * creation order, so a fork still follows its parent and the parent keeps
+ * ownership of the entries the fork copied (first writer wins). The only
+ * exception is a from-scratch ingest where a fork was touched more recently
+ * than a parent idle for a day: the fork then owns the copied entries, which
+ * changes per-session attribution but never totals.
+ */
+async function orderForIngest(files: string[]): Promise<string[]> {
+	const now = Date.now();
+	const ranked: { file: string; tier: number; born: number; index: number }[] = [];
+	for (let start = 0; start < files.length; start += SYNC_METADATA_FILES) {
+		const batch = files.slice(start, start + SYNC_METADATA_FILES);
+		const stats = await Promise.all(batch.map(file => fs.promises.stat(file).catch(() => null)));
+		for (let i = 0; i < batch.length; i++) {
+			const stat = stats[i];
+			const age = stat ? now - stat.mtimeMs : Number.POSITIVE_INFINITY;
+			const tier = INGEST_TIERS_MS.findIndex(limit => age <= limit);
+			ranked.push({
+				file: batch[i],
+				tier: tier === -1 ? INGEST_TIERS_MS.length : tier,
+				born: stat ? stat.birthtimeMs || stat.ctimeMs : 0,
+				index: start + i,
+			});
+		}
+	}
+	ranked.sort((a, b) => a.tier - b.tier || a.born - b.born || a.index - b.index);
+	return ranked.map(entry => entry.file);
+}
+
+/** One parse pass over a transcript, run inline or on a sync worker. */
+type ParseChunk = (
+	sessionFile: string,
+	fromOffset: number,
+	state: SessionParserState | undefined,
+	replay: boolean,
+) => Promise<ParseSessionResult>;
+
+/** A parsed transcript chunk awaiting its batch commit. */
+interface PendingChunk extends ParsedSession {
+	/** Offset this chunk was parsed from; a chunk that is not `done` must end past it. */
+	fromOffset: number;
+	/** Transcript size when its sync started (`SyncProgress.fileBytes`). */
+	fileBytes: number;
+}
+
+/** First parse pass of one transcript; `chunk` is null when it is unchanged, missing, or unreadable. */
+interface PreparedFile {
+	fileBytes: number;
+	chunk: PendingChunk | null;
+}
+
 async function syncAllSessionsLocked(
 	opts?: SyncOptions,
 ): Promise<{ processed: number; files: number; reconcile: boolean }> {
 	await initDb();
 	const replay = prepareSessionSync();
 
-	const files = await listAllSessionFiles();
+	const files = opts?.files ?? (await orderForIngest(await listAllSessionFiles()));
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
 	let reconcile = false;
-	const finish = () => {
-		completeSessionSync(reconcile);
-		markSessionBackfillsComplete();
-		return { processed: totalProcessed, files: filesProcessed, reconcile };
-	};
-	if (files.length === 0) return finish();
+	let pending: PendingChunk[] = [];
+	let pendingRows = 0;
+	let failed = false;
+	let metadataStart = 0;
+	let metadataEnd = 0;
+	let metadata: Promise<{ fileStats?: fs.Stats; stored?: FileOffset }[]> = Promise.resolve([]);
 
 	const report = (sessionFile: string, fileBytes: number) => {
 		completed++;
@@ -290,79 +360,176 @@ async function syncAllSessionsLocked(
 		});
 	};
 
-	const processFile = async (
-		sessionFile: string,
-		parse: (
-			sessionFile: string,
-			fromOffset: number,
-			state: SessionParserState | undefined,
-			replay: boolean,
-		) => Promise<ParseSessionResult>,
-	): Promise<void> => {
-		let fileStats: fs.Stats;
-		try {
-			fileStats = await fs.promises.stat(sessionFile);
-		} catch {
-			report(sessionFile, 0);
-			return;
+	/**
+	 * Commit queued chunks and report them. `countFiles: false` keeps a transcript
+	 * an earlier chunk already counted from counting twice.
+	 */
+	const flush = (countFiles = true): number => {
+		if (pending.length === 0) return 0;
+		const batch = pending;
+		const applied = applySessionParseResults(batch);
+		pending = [];
+		pendingRows = 0;
+		totalProcessed += applied.processed;
+		if (countFiles) filesProcessed += applied.files;
+		reconcile ||= applied.reconcile;
+		// Report only durable progress: callbacks may interrupt the sync.
+		for (const { sessionFile, result, fileBytes } of batch) {
+			if (result.done) report(sessionFile, fileBytes);
+			else reportChunk(sessionFile, result.newOffset, fileBytes);
 		}
-		const lastModified = fileStats.mtimeMs;
-		const stored = getFileOffset(sessionFile);
+		return applied.files;
+	};
+
+	const finish = () => {
+		flush();
+		// A targeted sync cannot settle reconciliation or backfills (they need
+		// every transcript); leave their markers for the next full sync.
+		if (opts?.files) return { processed: totalProcessed, files: filesProcessed, reconcile: false };
+		completeSessionSync(reconcile);
+		markSessionBackfillsComplete();
+		return { processed: totalProcessed, files: filesProcessed, reconcile };
+	};
+	if (files.length === 0) return finish();
+
+	const prepareFile = async (index: number, parse: ParseChunk): Promise<PreparedFile> => {
+		if (index >= metadataEnd) {
+			const batch = files.slice(index, index + SYNC_METADATA_FILES);
+			const offsets = getFileOffsets(batch);
+			metadataStart = index;
+			metadataEnd = index + batch.length;
+			metadata = Promise.all(
+				batch.map(async sessionFile => {
+					try {
+						const fileStats = await fs.promises.stat(sessionFile);
+						return { fileStats, stored: offsets.get(sessionFile) };
+					} catch {
+						return {};
+					}
+				}),
+			);
+		}
+		// Capture the position before awaiting: another worker can start the next metadata batch.
+		const metadataIndex = index - metadataStart;
+		const { fileStats, stored } = (await metadata)[metadataIndex];
+		if (!fileStats) return { fileBytes: 0, chunk: null };
+		const fileBytes = fileStats.size;
+		if (failed) return { fileBytes, chunk: null };
 		if (
 			!replay &&
 			stored?.parserState &&
-			stored.lastModified === lastModified &&
+			stored.lastModified === fileStats.mtimeMs &&
 			stored.parserState.size === fileStats.size &&
 			matchesSessionFile(stored.parserState, fileStats)
 		) {
-			report(sessionFile, fileStats.size);
-			return;
+			return { fileBytes, chunk: null };
 		}
 
+		const sessionFile = files[index];
+		// A row without a cursor cannot prove its offset still points into this
+		// byte stream, so it is re-read from byte 0 and reconciled.
+		const unknownIdentity = stored !== undefined && !stored.parserState;
+		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
+		let result: ParseSessionResult;
 		try {
-			// A row without a cursor cannot prove its offset still points into this
-			// byte stream, so it is re-read from byte 0 and reconciled.
-			const unknownIdentity = stored !== null && !stored.parserState;
-			let offset = unknownIdentity ? 0 : (stored?.offset ?? 0);
-			let state = unknownIdentity ? undefined : stored?.parserState;
-			// Only the first pass may replay from byte 0 or rebuild the file's rows;
-			// a later chunk of the same file must append to what it just committed.
-			let firstPass = true;
-			let countedFile = false;
-			while (true) {
-				const result = await parse(sessionFile, offset, state, replay && firstPass);
-				if (unknownIdentity && firstPass && result.parserState) result.reset = true;
-				const applied = applySessionParseResult(sessionFile, result, firstPass && (replay || !stored?.parserState));
-				if (applied.reconcile) reconcile = true;
-				if (applied.processed > 0) {
-					totalProcessed += applied.processed;
-					countedFile = true;
-				}
-				const advanced = result.newOffset > offset;
-				offset = result.newOffset;
-				state = result.parserState;
-				firstPass = false;
-				if (result.done) break;
-				if (!advanced) {
-					logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset });
-					break;
-				}
-				reportChunk(sessionFile, offset, fileStats.size);
-			}
-			if (countedFile) filesProcessed++;
+			result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
 		} catch (err) {
 			// One unreadable or corrupt transcript must not abort the whole sync.
 			logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
+			return { fileBytes, chunk: null };
 		}
-		report(sessionFile, fileStats.size);
+		if (unknownIdentity && result.parserState) result.reset = true;
+		return {
+			fileBytes,
+			chunk: {
+				sessionFile,
+				result,
+				// During a full replay, a changed file can be a rewrite even if its old tail checkpoint matches.
+				rebuild:
+					!stored?.parserState ||
+					(replay &&
+						(result.parserState?.size !== stored.parserState.size ||
+							result.parserState?.mtimeMs !== stored.parserState.mtimeMs)),
+				replay,
+				fromOffset,
+				fileBytes,
+			},
+		};
+	};
+
+	/**
+	 * Ingest a transcript too large for one parse pass. Each chunk commits on its
+	 * own, after every transcript queued before it, so peak memory stays bounded
+	 * and an interrupted sync resumes from the last committed chunk. Only the
+	 * first pass may replay from byte 0 or rebuild the file's rows; a later chunk
+	 * appends to what the previous one committed.
+	 */
+	const commitChunks = async (first: PendingChunk, parse: ParseChunk): Promise<void> => {
+		let chunk = first;
+		let counted = false;
+		while (true) {
+			// Earlier transcripts commit first, preserving fork ownership order.
+			flush();
+			pending.push(chunk);
+			if (flush(!counted) > 0) counted = true;
+			const { sessionFile, result, fromOffset, fileBytes } = chunk;
+			if (result.done) return;
+			if (result.newOffset <= fromOffset) {
+				logger.warn("stats: session parse stalled, skipping remainder", { sessionFile, offset: result.newOffset });
+				report(sessionFile, fileBytes);
+				return;
+			}
+			let next: ParseSessionResult;
+			try {
+				next = await parse(sessionFile, result.newOffset, result.parserState, false);
+			} catch (err) {
+				// One unreadable or corrupt transcript must not abort the whole sync.
+				logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
+				report(sessionFile, fileBytes);
+				return;
+			}
+			if (failed) return;
+			chunk = { sessionFile, result: next, rebuild: false, replay: false, fromOffset: result.newOffset, fileBytes };
+		}
+	};
+
+	const acceptFile = async (sessionFile: string, prepared: PreparedFile, parse: ParseChunk): Promise<void> => {
+		const { chunk } = prepared;
+		if (!chunk) {
+			report(sessionFile, prepared.fileBytes);
+			return;
+		}
+		if (!chunk.result.done) {
+			await commitChunks(chunk, parse);
+			return;
+		}
+		pending.push(chunk);
+		const { result } = chunk;
+		pendingRows +=
+			result.stats.length +
+			result.userStats.length +
+			result.userLinks.length +
+			result.toolCalls.length +
+			result.toolResults.length;
+		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
 	if (requestedWorkers === 1) {
-		for (const sessionFile of files) {
-			await processFile(sessionFile, (file, fromOffset, state, replayFile) =>
-				parseSessionFile(file, { fromOffset, state, replay: replayFile }),
+		const parseInline: ParseChunk = (file, fromOffset, state, replayFile) =>
+			parseSessionFile(file, { fromOffset, state, replay: replayFile });
+		for (let start = 0; start < files.length; start += SYNC_INLINE_READS) {
+			const results = await Promise.allSettled(
+				Array.from({ length: Math.min(SYNC_INLINE_READS, files.length - start) }, (_, offset) =>
+					prepareFile(start + offset, parseInline),
+				),
 			);
+			// Preserve fork ownership order and drain reads before a callback can release the sync lock.
+			for (let offset = 0; offset < results.length; offset++) {
+				const result = results[offset];
+				if (result.status === "rejected") throw result.reason;
+				await acceptFile(files[start + offset], result.value, parseInline);
+			}
 		}
 		return finish();
 	}
@@ -370,21 +537,30 @@ async function syncAllSessionsLocked(
 	const poolSize = Math.min(files.length, requestedWorkers);
 
 	const handles: WorkerHandle[] = [];
-	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
 	async function drain(handle: WorkerHandle): Promise<void> {
-		while (true) {
-			const idx = cursor++;
-			if (idx >= files.length) return;
-			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset, parserState, replayFile) =>
-				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile }),
-			);
+		const parseInWorker: ParseChunk = (file, fromOffset, parserState, replayFile) =>
+			dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile });
+		try {
+			while (!failed) {
+				const idx = cursor++;
+				if (idx >= files.length) return;
+				const prepared = await prepareFile(idx, parseInWorker);
+				if (!failed) await acceptFile(files[idx], prepared, parseInWorker);
+			}
+		} catch (error) {
+			failed = true;
+			throw error;
 		}
 	}
 
 	try {
-		await Promise.all(handles.map(drain));
+		for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
+		// Drain in-flight work before releasing the sync lock, even after a failed batch.
+		const results = await Promise.allSettled(handles.map(drain));
+		for (const result of results) {
+			if (result.status === "rejected") throw result.reason;
+		}
 	} finally {
 		for (const handle of handles) handle.worker.terminate();
 	}
@@ -394,92 +570,31 @@ async function syncAllSessionsLocked(
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-const FIVE_MIN_MS = 5 * 60 * 1000;
 
 type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
 
-interface TimeRangeConfig {
-	timeSeriesHours: number;
-	timeSeriesBucketMs: number;
-	modelSeriesDays: number;
-	modelSeriesBucketMs: number;
-	modelPerformanceDays: number;
-	modelPerformanceBucketMs: number;
-	costSeriesDays: number;
-	cutoff: number | null;
-}
-
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
-const TIME_RANGE_TO_CONFIG: Record<TimeRange, Omit<TimeRangeConfig, "cutoff">> = {
-	"1h": {
-		timeSeriesHours: 1,
-		timeSeriesBucketMs: FIVE_MIN_MS,
-		modelSeriesDays: 1,
-		modelSeriesBucketMs: FIVE_MIN_MS,
-		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: FIVE_MIN_MS,
-		costSeriesDays: 1,
-	},
-	"24h": {
-		timeSeriesHours: 24,
-		timeSeriesBucketMs: HOUR_MS,
-		modelSeriesDays: 1,
-		modelSeriesBucketMs: HOUR_MS,
-		modelPerformanceDays: 1,
-		modelPerformanceBucketMs: HOUR_MS,
-		costSeriesDays: 1,
-	},
-	"7d": {
-		timeSeriesHours: 24 * 7,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 7,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 7,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 7,
-	},
-	"30d": {
-		timeSeriesHours: 24 * 30,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 30,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 30,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 30,
-	},
-	"90d": {
-		timeSeriesHours: 24 * 90,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 90,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 90,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 90,
-	},
-	all: {
-		timeSeriesHours: 24 * 3650,
-		timeSeriesBucketMs: DAY_MS,
-		modelSeriesDays: 3650,
-		modelSeriesBucketMs: DAY_MS,
-		modelPerformanceDays: 3650,
-		modelPerformanceBucketMs: DAY_MS,
-		costSeriesDays: 3650,
-	},
+/** Span and series bucket per range; mirrored by the client's `data/range.ts`. */
+const TIME_RANGES: Record<TimeRange, { spanMs: number | null; bucketMs: number }> = {
+	"1h": { spanMs: HOUR_MS, bucketMs: 5 * 60 * 1000 },
+	"24h": { spanMs: DAY_MS, bucketMs: HOUR_MS },
+	"7d": { spanMs: 7 * DAY_MS, bucketMs: DAY_MS },
+	"30d": { spanMs: 30 * DAY_MS, bucketMs: DAY_MS },
+	"90d": { spanMs: 90 * DAY_MS, bucketMs: DAY_MS },
+	all: { spanMs: null, bucketMs: DAY_MS },
 };
 
-export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
-	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
-	const config = TIME_RANGE_TO_CONFIG[normalized as TimeRange];
-	if (config) {
-		const cutoff = normalized === "all" ? null : Date.now() - Math.max(1, config.timeSeriesHours * 60 * 60 * 1000);
-		return { ...config, cutoff };
-	}
+/** Most folders the projects payload carries (busiest first); the tail is thousands of temp dirs. */
+const FOLDER_LIMIT = 2000;
 
-	const fallbackConfig = TIME_RANGE_TO_CONFIG[DEFAULT_TIME_RANGE];
+/** Resolve a `?range=` value (default 24h) to its cutoff and series bucket size. */
+export function getTimeRangeConfig(range?: string | null): RangeWindow {
+	const normalized = range?.trim().toLowerCase() ?? DEFAULT_TIME_RANGE;
+	const config = TIME_RANGES[normalized as TimeRange] ?? TIME_RANGES[DEFAULT_TIME_RANGE];
 	return {
-		...fallbackConfig,
-		cutoff: Date.now() - fallbackConfig.timeSeriesHours * 60 * 60 * 1000,
+		cutoff: config.spanMs === null ? null : Date.now() - config.spanMs,
+		bucketMs: config.bucketMs,
 	};
 }
 
@@ -488,26 +603,16 @@ export function getTimeRangeConfig(range?: string | null): TimeRangeConfig {
  */
 export async function getDashboardStats(range?: string | null): Promise<DashboardStats> {
 	await initDb();
-	const {
-		timeSeriesHours,
-		timeSeriesBucketMs,
-		modelSeriesDays,
-		modelSeriesBucketMs,
-		modelPerformanceDays,
-		modelPerformanceBucketMs,
-		costSeriesDays,
-		cutoff,
-	} = getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byModel: getStatsByModel(cutoff ?? undefined),
-		byFolder: getStatsByFolder(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
+		overall: getOverallStats(window.cutoff),
+		byModel: getStatsByModel(window.cutoff),
+		byFolder: getStatsByFolder(window.cutoff, FOLDER_LIMIT),
+		byAgentType: getStatsByAgentType(window.cutoff),
+		timeSeries: getTimeSeries(window),
+		modelSeries: getModelTimeSeries(window),
+		modelPerformanceSeries: getModelPerformanceSeries(window),
+		costSeries: getCostTimeSeries(window.cutoff),
 	};
 }
 
@@ -515,12 +620,11 @@ export async function getOverviewStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
 	await initDb();
-	const { timeSeriesHours, timeSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		overall: getOverallStats(cutoff ?? undefined),
-		byAgentType: getStatsByAgentType(cutoff ?? undefined),
-		timeSeries: getTimeSeries(timeSeriesHours, cutoff, timeSeriesBucketMs),
+		overall: getOverallStats(window.cutoff),
+		byAgentType: getStatsByAgentType(window.cutoff),
+		timeSeries: getTimeSeries(window),
 	};
 }
 
@@ -528,29 +632,22 @@ export async function getModelDashboardStats(
 	range?: string | null,
 ): Promise<Pick<DashboardStats, "byModel" | "modelSeries" | "modelPerformanceSeries">> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, modelPerformanceDays, modelPerformanceBucketMs, cutoff } =
-		getTimeRangeConfig(range);
-
+	const window = getTimeRangeConfig(range);
 	return {
-		byModel: getStatsByModel(cutoff ?? undefined),
-		modelSeries: getModelTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		modelPerformanceSeries: getModelPerformanceSeries(modelPerformanceDays, cutoff, modelPerformanceBucketMs),
+		byModel: getStatsByModel(window.cutoff),
+		modelSeries: getModelTimeSeries(window),
+		modelPerformanceSeries: getModelPerformanceSeries(window),
 	};
 }
 
 export async function getCostDashboardStats(range?: string | null): Promise<Pick<DashboardStats, "costSeries">> {
 	await initDb();
-	const { costSeriesDays, cutoff } = getTimeRangeConfig(range);
-
-	return {
-		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
-	};
+	return { costSeries: getCostTimeSeries(getTimeRangeConfig(range).cutoff) };
 }
 
 export async function getFolderStats(range?: string | null): Promise<FolderStats[]> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return getStatsByFolder(cutoff ?? undefined);
+	return getStatsByFolder(getTimeRangeConfig(range).cutoff, FOLDER_LIMIT);
 }
 
 export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
@@ -560,8 +657,7 @@ export async function getRecentRequests(limit?: number): Promise<MessageStats[]>
 
 export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
 	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return dbGetRecentErrors(limit, cutoff);
+	return dbGetRecentErrors(limit, getTimeRangeConfig(range).cutoff);
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
@@ -570,16 +666,15 @@ export async function getRequestDetails(id: number): Promise<RequestDetails | nu
 	if (!msg) return null;
 
 	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
-	if (entry?.type !== "message") return null;
-
-	// TODO: Get parent/context messages?
-	// For now we return the single entry which contains the assistant response.
-	// The user prompt is likely the parent.
+	// Role-model attempts (judge, auto-thinking, …) journal only a `model_usage`
+	// record: usage and outcome, no request or response payload.
+	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: null };
+	if (entry?.type !== "message" || !("message" in entry)) return null;
 
 	return {
 		...msg,
 		messages: [entry],
-		output: (entry as any).message,
+		output: entry.message,
 	};
 }
 
@@ -591,51 +686,79 @@ export async function getTotalMessageCount(): Promise<number> {
 	return getMessageCount();
 }
 
-export async function getBehaviorDashboardStats(range?: string | null): Promise<BehaviorDashboardStats> {
-	await initDb();
-	const { cutoff } = getTimeRangeConfig(range);
-	return {
-		overall: getBehaviorOverall(cutoff),
-		byModel: getBehaviorByModel(cutoff),
-		behaviorSeries: getBehaviorTimeSeries(cutoff),
-	};
-}
-
 /**
  * Get the tools dashboard payload: per-tool totals, per-(tool, model)
- * breakdown, and the call time series (bucketed like the model series).
+ * breakdown, and the call time series.
  */
 export async function getToolDashboardStats(range?: string | null): Promise<ToolDashboardStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
+	const window = getTimeRangeConfig(range);
 	return {
-		byTool: getToolStats(cutoff ?? undefined),
-		byToolModel: getToolStatsByModel(cutoff ?? undefined),
-		series: getToolTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
+		byTool: getToolStats(window.cutoff),
+		byToolModel: getToolStatsByModel(window.cutoff),
+		series: getToolTimeSeries(window),
 	};
 }
 
 /**
  * Get the providers dashboard payload: per-provider totals, peak-burn-hours
- * histogram, provider token time series, and subscription-window analytics
- * (utilization series + insights) derived from recorded usage-limit snapshots.
+ * histogram and provider token time series. Subscription windows are served
+ * separately by {@link getProviderWindowStats}.
+ */
+export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
+	await initDb();
+	const window = getTimeRangeConfig(range);
+	return {
+		providers: getStatsByProvider(window.cutoff),
+		hourly: getProviderHourlyBurn(window.cutoff),
+		series: getProviderTimeSeries(window),
+	};
+}
+
+const USAGE_CACHE_TTL_MS = 60_000;
+let usageCache: { key: string; at: number; data: Promise<UsageDataSnapshot> } | null = null;
+
+/**
+ * Usage snapshots since `sinceMs`, memoized for a minute per hour-aligned
+ * cutoff and source database: the broker fetch takes seconds and the
+ * dashboard asks on every range switch and live refresh.
+ */
+function cachedUsageData(sinceMs: number): Promise<UsageDataSnapshot> {
+	const sinceHour = Math.floor(sinceMs / HOUR_MS) * HOUR_MS;
+	const key = `${getAgentDbPath()}:${sinceHour}`;
+	const now = Date.now();
+	if (usageCache?.key === key && now - usageCache.at < USAGE_CACHE_TTL_MS) {
+		return usageCache.data;
+	}
+	const data = fetchUsageData(sinceHour);
+	usageCache = { key, at: now, data };
+	data.catch(() => {
+		if (usageCache?.data === data) usageCache = null;
+	});
+	return data;
+}
+
+/**
+ * Subscription-window analytics derived from recorded usage-limit snapshots:
+ * insights for every provider window, plus utilization series for `provider`
+ * only (all series can number in the thousands).
  *
  * Window token estimates use broker-held fleet token burn when a broker is
  * configured — the window fractions cover every install sharing the broker's
  * credentials, so dividing them into local-only tokens would undercount.
  */
-export async function getProviderDashboardStats(range?: string | null): Promise<ProviderDashboardStats> {
+export async function getProviderWindowStats(
+	range?: string | null,
+	provider?: string | null,
+): Promise<ProviderWindowStats> {
 	await initDb();
-	const { modelSeriesDays, modelSeriesBucketMs, cutoff } = getTimeRangeConfig(range);
-	const providers = getStatsByProvider(cutoff ?? undefined);
-	const usage = await fetchUsageData(cutoff ?? 0);
-	const tokensByProvider = usage.fleetTokensByProvider ?? new Map(providers.map(p => [p.provider, p.totalTokens]));
+	const { cutoff } = getTimeRangeConfig(range);
+	const usage = await cachedUsageData(cutoff ?? 0);
+	const tokensByProvider =
+		usage.fleetTokensByProvider ?? new Map(getStatsByProvider(cutoff).map(p => [p.provider, p.totalTokens]));
 	const { usageSeries, windowInsights } = computeUsageWindowStats(usage.rows, tokensByProvider);
 	return {
-		providers,
-		hourly: getProviderHourlyBurn(cutoff ?? undefined),
-		series: getProviderTimeSeries(modelSeriesDays, cutoff, modelSeriesBucketMs),
-		usageSeries,
 		windowInsights,
+		usageSeries: provider ? usageSeries.filter(series => series.provider === provider) : [],
 	};
 }

@@ -34,7 +34,7 @@ describe("auth-gateway quiet inference", () => {
 			try {
 				gateway = startAuthGateway({
 					bind: "127.0.0.1:0",
-					bearerTokens: ["t"],
+					bearerTokens: ["gateway-test-token"],
 					storage,
 					resolveModel: () => mock.model,
 				});
@@ -46,7 +46,7 @@ describe("auth-gateway quiet inference", () => {
 				const native = format === "pi-native";
 				const response = await fetch(`${gateway.url}${native ? "/v1/pi/stream" : "/v1/chat/completions"}`, {
 					method: "POST",
-					headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+					headers: { "Content-Type": "application/json", Authorization: "Bearer gateway-test-token" },
 					body: JSON.stringify(
 						native
 							? {

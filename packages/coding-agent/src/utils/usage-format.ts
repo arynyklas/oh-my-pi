@@ -8,26 +8,13 @@ import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit 
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+import { collectUnreportedAccounts, type UsageAccountIdentity } from "../slash-commands/helpers/usage-accounts";
 
 const BAR_WIDTH = 28;
 
 function sanitizeUsageText(value: string): string {
 	return sanitizeText(value.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "));
-}
-
-/** Identity slice of a stored credential, for "every account" coverage. */
-export interface UsageAccountIdentity {
-	provider: string;
-	type: "api_key" | "oauth";
-	email?: string;
-	accountId?: string;
-	projectId?: string;
-	enterpriseUrl?: string;
-	/** Organization/workspace the credential is scoped to (Anthropic multi-subscription). */
-	orgId?: string;
-	orgName?: string;
-	/** Epoch ms of the interactive login that minted the OAuth grant (see `OAuthCredentials.authorizedAt`). */
-	authorizedAt?: number;
 }
 
 export interface UsagePolicyDiagnosticsOptions {
@@ -153,86 +140,6 @@ function reportAccountLabel(report: UsageReport, index: number): string {
 	return `account ${index + 1}`;
 }
 
-/** Lowercased identity strings a report can be attributed to. */
-function reportIdentifiers(report: UsageReport): Set<string> {
-	const ids = new Set<string>();
-	const add = (value: unknown): void => {
-		if (typeof value === "string" && value) ids.add(value.toLowerCase());
-	};
-	const meta = report.metadata ?? {};
-	add(meta.email);
-	add(meta.accountId);
-	add(meta.projectId);
-	add(meta.orgId);
-	for (const limit of report.limits) {
-		add(limit.scope.accountId);
-		add(limit.scope.projectId);
-		add(limit.scope.orgId);
-	}
-	return ids;
-}
-
-/**
- * Stored credentials that no usage report could be attributed to.
- *
- * Conservative on purpose: when a provider's reports carry no identity at
- * all (or the credential is an API key alongside existing reports), we
- * can't attribute, so we don't claim the account is missing.
- */
-export function collectUnreportedAccounts(
-	reports: UsageReport[],
-	accounts: UsageAccountIdentity[],
-): UsageAccountIdentity[] {
-	const byProvider = new Map<string, UsageReport[]>();
-	for (const report of reports) {
-		const list = byProvider.get(report.provider) ?? [];
-		list.push(report);
-		byProvider.set(report.provider, list);
-	}
-	return accounts.filter(account => {
-		const providerReports = byProvider.get(account.provider) ?? [];
-		if (providerReports.length === 0) return true;
-		if (account.type === "api_key") return false;
-		const accountOrg = account.orgId?.toLowerCase();
-		const ids = [account.email, account.accountId, account.projectId]
-			.filter((value): value is string => typeof value === "string" && value.length > 0)
-			.map(value => value.toLowerCase());
-		const sameOrgReports: UsageReport[] = [];
-		let sawReportOrg = false;
-		for (const report of providerReports) {
-			const metaOrg = report.metadata?.orgId;
-			if (typeof metaOrg === "string" && metaOrg) {
-				sawReportOrg = true;
-				if (accountOrg !== undefined && metaOrg.toLowerCase() === accountOrg) sameOrgReports.push(report);
-			}
-		}
-		if (accountOrg || sawReportOrg) {
-			const candidates = accountOrg
-				? sameOrgReports
-				: providerReports.filter(report => {
-						const metaOrg = report.metadata?.orgId;
-						return !(typeof metaOrg === "string" && metaOrg);
-					});
-			if (candidates.length === 0) return true;
-			if (ids.length === 0) return false;
-			return !candidates.some(report => {
-				const identifiers = reportIdentifiers(report);
-				return ids.some(id => identifiers.has(id));
-			});
-		}
-		if (ids.length === 0) return false;
-		const reported = new Set<string>();
-		let anyIdentified = false;
-		for (const report of providerReports) {
-			const identifiers = reportIdentifiers(report);
-			if (identifiers.size > 0) anyIdentified = true;
-			for (const id of identifiers) reported.add(id);
-		}
-		if (!anyIdentified) return false;
-		return !ids.some(id => reported.has(id));
-	});
-}
-
 function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<string, string>): string {
 	if (account.type === "api_key") return "API key";
 	const base = account.email ?? account.accountId ?? account.projectId ?? account.enterpriseUrl ?? "OAuth account";
@@ -244,6 +151,7 @@ function accountIdentityLabel(account: UsageAccountIdentity, redaction?: Map<str
 
 function formatAccountHeader(
 	report: UsageReport,
+	peers: readonly UsageReport[],
 	index: number,
 	nowMs: number,
 	redaction?: Map<string, string>,
@@ -253,14 +161,20 @@ function formatAccountHeader(
 	const rawLabel = reportAccountLabel(report, index);
 	const label = redaction?.get(rawLabel) ?? sanitizeUsageText(rawLabel);
 	let header = `${icon} ${chalk.bold(label)}`;
-	const metaOrgName = report.metadata?.orgName;
-	const metaOrgId = report.metadata?.orgId;
-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-	if (typeof org === "string" && org && org !== rawLabel) {
-		header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
+	if (report.provider === "openai-codex") {
+		const identity = sanitizeText((redaction?.get(rawLabel) ?? rawLabel).replace(/[\r\n\t]+/g, " "));
+		const rendered = formatCodexUsageReportLabel(report, peers, rawLabel, redaction, true, "inline");
+		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
+	} else {
+		const metaOrgName = report.metadata?.orgName;
+		const metaOrgId = report.metadata?.orgId;
+		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+		if (typeof org === "string" && org && org !== rawLabel) {
+			header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
+		}
+		const plan = report.metadata?.planType;
+		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${sanitizeUsageText(plan.trim())}`);
 	}
-	const planType = report.metadata?.planType;
-	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${sanitizeUsageText(planType)}`);
 	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 	if (resets && resets.bankedCount > 0) {
@@ -348,7 +262,7 @@ export function formatUsageReportLines(report: UsageReport, options: FormatUsage
 	if (options.includeNotes !== false) {
 		for (const note of report.notes ?? []) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
 	}
-	lines.push(`  ${formatAccountHeader(report, options.index ?? 0, nowMs, options.redaction)}`);
+	lines.push(`  ${formatAccountHeader(report, providerReports, options.index ?? 0, nowMs, options.redaction)}`);
 	if (options.policyLine) lines.push(`      ${chalk.dim(options.policyLine)}`);
 	if (report.limits.length === 0) {
 		lines.push(`      ${chalk.dim("no limits reported")}`);
@@ -382,10 +296,20 @@ export interface ProviderWindowStat {
 	remainingAccounts: number;
 }
 
+/**
+ * Meter identity for a limit that holds its own quota pool inside a window. A model-scoped
+ * allowance is a separate pool from the umbrella window it caps - `claude.ts` marks the Fable
+ * weekly cap `tier` without `shared` precisely so it cannot gate Opus or Sonnet requests - and
+ * reporting it separately keeps a spent scoped cap visible next to the umbrella remainder.
+ * Only Anthropic and Codex use `tier` for such a pool; other providers (Copilot, Devin, Muse Code)
+ * put the subscription plan there, which must not split one window per plan. Codex meters that
+ * carry no tier fall back to the limit-id slug.
+ */
 function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
-	if (report.provider !== "openai-codex") return undefined;
+	if (report.provider !== "anthropic" && report.provider !== "openai-codex") return undefined;
 	const tier = limit.scope.tier?.trim().toLowerCase();
 	if (tier) return tier;
+	if (report.provider !== "openai-codex") return undefined;
 	const slug = limit.id.toLowerCase().split(":")[1];
 	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
 }
@@ -394,8 +318,9 @@ function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefin
  * Aggregate one provider's reports into per-window quota capacity stats.
  *
  * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
- * account contributes its single highest used fraction. Codex keeps each meter
- * in its own bucket because chat and Spark can share a window duration.
+ * account contributes its single highest used fraction. Limits that hold their
+ * own pool inside a window keep their own bucket: a model-scoped tier cap, and
+ * Codex chat versus Spark, which can share a window duration.
  */
 export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
 	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();

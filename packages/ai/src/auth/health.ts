@@ -76,6 +76,9 @@ export class CredentialHealth implements HealthApi {
 			email: credential.email,
 			enterpriseUrl: credential.enterpriseUrl,
 			apiEndpoint: credential.apiEndpoint,
+			orgId: credential.orgId,
+			region: credential.region,
+			inferenceRegion: credential.inferenceRegion,
 		};
 	}
 
@@ -143,13 +146,11 @@ export class CredentialHealth implements HealthApi {
 				const credentialType = entry.credential.type;
 				const providerKey = providerTypeKey(provider, credentialType);
 				let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
-				// A block must still fetch a probe report, or it outlives the recovery
-				// that report would prove: no report means no reconciliation, so the
-				// credential idles until the clock runs out even after quota is
-				// restored. The probe is spent for any healable provider rather than
-				// only for scoped blocks, because our strategies also vouch for the
-				// unscoped block (`blockScope: ""`) a legacy usage limit leaves behind.
-				if (blockedUntil !== undefined && !this.#deps.blocks.supportsHealing(provider)) {
+				// A block under a scope the strategy can vouch for must still fetch
+				// a probe report, or it outlives the recovery that report would
+				// prove: no report means no reconciliation, so the credential idles
+				// until the clock runs out even after quota is restored.
+				if (blockedUntil !== undefined && !this.#deps.blocks.canHeal(provider, providerKey, index, blockScopes)) {
 					return {
 						credentialId: entry.id,
 						credentialType,

@@ -91,6 +91,7 @@ export function buildCustomModelOverlay(
 		tokenizer: modelDef.tokenizer,
 		supportsTools: modelDef.supportsTools,
 		cost: modelDef.cost,
+		promptCache: modelDef.promptCache,
 		contextWindow: modelDef.contextWindow,
 		maxContextWindow: modelDef.maxContextWindow,
 		maxTokens: modelDef.maxTokens,
@@ -141,6 +142,8 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		imageInputDecoder: resolvedModel.imageInputDecoder,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
+		promptCache: resolvedModel.promptCache,
+		promptCacheConfig: resolvedModel.promptCache,
 		// Chat token defaults mean nothing for image/audio jobs; leave them unknown.
 		contextWindow:
 			resolvedModel.contextWindow ??

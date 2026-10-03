@@ -153,6 +153,8 @@ export interface AuthGatewayServerOptions {
 	bearerTokens: string[];
 	/** Optional access-control, management, and audit store for managed gateway users. */
 	accessStore?: AuthGatewayAccessStore;
+	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
+	trustProxyHeaders?: boolean;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }

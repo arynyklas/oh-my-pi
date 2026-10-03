@@ -7,24 +7,23 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
-import type {
-	AuthStorage,
-	DisabledCredentialSummary,
-	OAuthAccountIdentity,
-	UsageHistoryEntry,
-	UsageReport,
-} from "@oh-my-pi/pi-ai";
+import type { DisabledCredentialSummary, OAuthAccountIdentity, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import { discoverAuthStorage } from "../sdk";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import {
+	collectStoredAccounts,
 	collectUnreportedAccounts,
+	selectReportableAccounts,
+	type UsageAccountIdentity,
+} from "../slash-commands/helpers/usage-accounts";
+import {
 	computeProviderWindowStats,
 	formatProviderName,
 	formatUsageBreakdown,
@@ -32,9 +31,10 @@ import {
 	type LimitStatus,
 	type ProviderWindowStat,
 	STATUS_COLOR,
-	type UsageAccountIdentity,
 	type UsagePolicyDiagnosticsOptions,
 } from "../utils/usage-format";
+
+import { cfgRetryUsageReservePct } from "../session/settings";
 
 export * from "../utils/usage-format";
 
@@ -47,6 +47,10 @@ export interface UsageCommandArgs {
 	history?: boolean;
 	/** History window in days (with `history`). */
 	days?: number;
+	/** CLI `-e <path>` extension paths to load before fetching live reports. */
+	extensions?: string[];
+	/** Skip extension discovery; only load explicit `extensions`. */
+	noExtensions?: boolean;
 }
 
 /**
@@ -307,55 +311,6 @@ export function formatUsageHistory(
 	return lines.join("\n");
 }
 
-function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	const accounts: UsageAccountIdentity[] = [];
-	const all = authStorage.credentials.all();
-	for (const provider in all) {
-		const entry = all[provider];
-		const credentials = Array.isArray(entry) ? entry : [entry];
-		for (const credential of credentials) {
-			if (credential.type === "oauth") {
-				accounts.push({
-					provider,
-					type: "oauth",
-					email: credential.email,
-					accountId: credential.accountId,
-					projectId: credential.projectId,
-					enterpriseUrl: credential.enterpriseUrl,
-					orgId: credential.orgId,
-					orgName: credential.orgName,
-					authorizedAt: credential.authorizedAt,
-				});
-			} else {
-				accounts.push({ provider, type: "api_key" });
-			}
-		}
-	}
-	return accounts;
-}
-
-/**
- * Keep only accounts worth a usage row: those whose provider has a usage
- * provider, so a missing report is a real gap rather than the absence of any
- * usage concept. Providers with no usage endpoint (web-search keys, local /
- * keyless servers, inference providers without a usage API) would only ever
- * render as noise, so they are dropped.
- *
- * `hasUsageProvider` is injected (in practice {@link AuthStorage.usage.providerFor})
- * so custom/broker resolvers stay authoritative — no provider list is duplicated
- * here. An explicit `--provider` request bypasses the cull, so
- * `omp usage --provider xai` can still confirm the stored credential has no
- * usage endpoint.
- */
-export function selectReportableAccounts(
-	accounts: UsageAccountIdentity[],
-	hasUsageProvider: (provider: string) => boolean,
-	explicitProvider?: string,
-): UsageAccountIdentity[] {
-	if (explicitProvider) return accounts;
-	return accounts.filter(account => hasUsageProvider(account.provider));
-}
-
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -535,23 +490,30 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
-			globalReservePct: settings.get("retry.usageReservePct"),
+			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = new ModelRegistry(authStorage);
-		const reports =
-			(await authStorage.usage.reports({
-				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
-			})) ?? [];
-		// Reports are always fresh (broker-side fetch) but the account list can
-		// come from a disk-cached snapshot up to an hour old — revalidate so a
-		// just-logged-in (or just-rotated-identity) credential isn't rendered
-		// as a stale duplicate. Best-effort: offline broker keeps the cache.
+		// Extensions contribute usage providers via `registerProvider(name, { usage })`;
+		// without loading them their accounts land in `accountsWithoutUsage`.
+		await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
+			additionalExtensionPaths: cmd.extensions,
+			disableExtensionDiscovery: cmd.noExtensions,
+			includeAmbientHooks: false,
+			discoverModels: false,
+		});
+		// The broker may serve reports for credentials newer than the local
+		// snapshot. Refresh before probing extension providers with local keys
+		// and before labeling accounts; offline brokers keep the cached snapshot.
 		try {
 			await authStorage.credentials.revalidate();
 		} catch {
 			// Stale identities beat no output.
 		}
+		const reports =
+			(await authStorage.usage.reports({
+				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
+			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
 		let accounts = selectReportableAccounts(
 			storedAccounts,

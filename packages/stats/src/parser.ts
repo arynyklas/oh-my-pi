@@ -25,7 +25,7 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
-import { computeUserMessageMetrics } from "./user-metrics";
+import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
@@ -135,6 +135,7 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
+	const prose = judgeProse(text);
 	const ts = Date.parse(entry.timestamp);
 	return {
 		sessionFile,
@@ -151,6 +152,8 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 		negation: metrics.negation,
 		repetition: metrics.repetition,
 		blame: metrics.blame,
+		prose,
+		proseHash: prose ? Bun.hash(prose).toString(16) : "",
 	};
 }
 
@@ -717,6 +720,7 @@ export async function parseSessionFile(
 						? options.serviceTier
 						: await scanServiceTierPrefix(sessionPath, start);
 
+		// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 		const { read, done } = await scanSessionLines(sessionPath, start, maxBytes, line => {
 			const entry = parseJsonLine(line);
 			if (!entry) return true;
@@ -743,24 +747,16 @@ export async function parseSessionFile(
 				const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier ?? undefined, agentType);
 				if (msgStats) stats.push(msgStats);
 				toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
-				// Link assistant's responding model back to the user message it answered.
-				const parentId = (entry as SessionMessageEntry).parentId;
-				if (parentId) {
-					const msg = entry.message as AssistantMessage;
-					if (msg.model && msg.provider) {
-						// Emit unconditionally. The aggregator's UPDATE is guarded by
-						// `model IS NULL` so this is idempotent: a no-op for already
-						// linked rows, a fix-up for fresh inserts (which start NULL
-						// because the user row is recorded before its reply lands) and
-						// for cross-pass orphans whose parent was committed by an
-						// earlier incremental sync.
-						userLinks.push({
-							sessionFile: sessionPath,
-							entryId: parentId,
-							model: msg.model,
-							provider: msg.provider,
-						});
-					}
+				// Persist links even when the user entry was ingested in an earlier tail read.
+				const parentId = entry.parentId;
+				const msg = entry.message;
+				if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+					userLinks.push({
+						sessionFile: sessionPath,
+						entryId: parentId,
+						model: msg.model,
+						provider: msg.provider,
+					});
 				}
 			}
 			return true;

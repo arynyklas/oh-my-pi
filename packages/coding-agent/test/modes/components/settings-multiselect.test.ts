@@ -11,6 +11,8 @@ import { createGatewaySettingsHost } from "@oh-my-pi/pi-coding-agent/modes/compo
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
+import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
+
 beforeAll(async () => {
 	await initTheme();
 });
@@ -98,12 +100,12 @@ describe("settings section sidebar", () => {
 	it("does not toggle the selected section's first setting", () => {
 		const comp = createSelector();
 		for (let i = 0; i < 7; i++) comp.handleInput("\x1b[C");
-		expect(settings.get("dev.autoqa")).toBe(true);
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
 
 		clickOption(comp, "Developer");
-		expect(settings.get("dev.autoqa")).toBe(true);
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
 
 		clickOption(comp, "Developer");
-		expect(settings.get("dev.autoqa")).toBe(true);
+		expect(cfgDevAutoqa.get(settings)).toBe(true);
 	});
 });

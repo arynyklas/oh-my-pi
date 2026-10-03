@@ -147,7 +147,13 @@ describe("AuthStorage credential selection policy", () => {
 			}),
 		).resolves.toEqual({
 			ok: true,
-			credential: { apiKey: "access-oauth-b", credentialId: oauthB, credentialType: "oauth", source: "oauth" },
+			credential: {
+				apiKey: "access-oauth-b",
+				credentialId: oauthB,
+				credentialType: "oauth",
+				source: "oauth",
+				oauthIdentity: { orgId: undefined, region: undefined, inferenceRegion: undefined },
+			},
 		});
 
 		await expect(

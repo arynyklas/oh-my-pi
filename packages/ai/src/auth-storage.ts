@@ -40,6 +40,7 @@ import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 import type { AuthCredentialStore } from "./auth/store";
 import type {
 	AccountSelectionEvent,
+	AuthAccountPolicies,
 	AuthApiKeyOptions,
 	AuthApiKeySelectionResult,
 	AuthCredential,
@@ -68,38 +69,123 @@ export * from "./auth/types";
 export * from "./auth/login";
 export * from "./auth/selection";
 
+/** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
+interface AuthStorageModules {
+	pool: CredentialPool;
+	keys: KeyCascade;
+	oauth: OAuthAccounts;
+	sessions: SessionAffinity;
+	usage: UsageService;
+	health: CredentialHealth;
+	limits: RateLimits;
+	resets: ResetCredits;
+	blocks: CredentialBlocks;
+	/** Fork: default-account/priority pins, resolved against this store's rows. */
+	pins: AccountPins;
+}
+
 /**
  * Credential management over an {@link AuthCredentialStore}: multi-account
  * selection with usage-aware ranking, rate-limit blocks, OAuth refresh, and
  * usage reporting. See the module doc for the namespace layout.
+ *
+ * Namespaces resolve against the current store on every access, so holders of
+ * this instance follow {@link AuthStorage.replaceStore} without re-wiring.
  */
 export class AuthStorage {
-	/** Stored credential rows, change/disable events, broker snapshot. */
-	readonly credentials: CredentialsApi;
-	/** Provider auth cascade and key overrides. */
-	readonly keys: KeysApi;
-	/** OAuth login, account access, listings, refresh. */
-	readonly oauth: OAuthApi;
-	/** Session → account pins. */
-	readonly sessions: SessionsApi;
-	/** Usage reports, header ingestion, history. */
-	readonly usage: UsageApi;
-	/** Model pool health and per-credential probes. */
-	readonly health: HealthApi;
-	/** Usage-limit marking and credential rotation. */
-	readonly limits: LimitsApi;
-	/** Saved rate-limit resets. */
-	readonly resets: ResetsApi;
-	/** Persisted rate-limit blocks (auth-broker server seam). */
-	readonly blocks: BlocksApi;
-	#pool: CredentialPool;
-	#pins: AccountPins;
-	#affinity: SessionAffinity;
+	readonly #options: AuthStorageOptions;
+	readonly #overrides: KeyOverrides;
+	readonly #policies: AccountPolicies;
+	#modules: AuthStorageModules;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
-		const overrides = new KeyOverrides(options.configValueResolver);
-		const policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
-		const blockHealth = new BlockStoreHealth(options.sourceLabel);
+		this.#options = options;
+		this.#overrides = new KeyOverrides(options.configValueResolver);
+		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#modules = this.#compose(store, options.sourceLabel);
+		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+	}
+
+	/** Stored credential rows, change/disable events, broker snapshot. */
+	get credentials(): CredentialsApi {
+		return this.#modules.pool;
+	}
+	/** Provider auth cascade and key overrides. */
+	get keys(): KeysApi {
+		return this.#modules.keys;
+	}
+	/** OAuth login, account access, listings, refresh. */
+	get oauth(): OAuthApi {
+		return this.#modules.oauth;
+	}
+	/** Session → account pins. */
+	get sessions(): SessionsApi {
+		return this.#modules.sessions;
+	}
+	/** Usage reports, header ingestion, history. */
+	get usage(): UsageApi {
+		return this.#modules.usage;
+	}
+	/** Model pool health and per-credential probes. */
+	get health(): HealthApi {
+		return this.#modules.health;
+	}
+	/** Usage-limit marking and credential rotation. */
+	get limits(): LimitsApi {
+		return this.#modules.limits;
+	}
+	/** Saved rate-limit resets. */
+	get resets(): ResetsApi {
+		return this.#modules.resets;
+	}
+	/** Persisted rate-limit blocks (auth-broker server seam). */
+	get blocks(): BlocksApi {
+		return this.#modules.blocks;
+	}
+
+	/**
+	 * Apply new account routing policy (live `auth.accountPolicies` /
+	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
+	 * active policy untouched, when the policy is malformed or does not match the
+	 * stored OAuth accounts.
+	 */
+	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
+		const pool = this.#modules.pool;
+		const stored = new Map<string, AuthCredential[]>();
+		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+	}
+
+	/**
+	 * Swap the backing credential store in place (live `auth.broker.url` change).
+	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
+	 * keyed by the old store's row ids — then closes the previous store. Runtime key
+	 * overrides, account policies, default-account/priority selectors, usage-provider
+	 * overrides, and credential event subscribers carry over. On a load failure `store`
+	 * is closed and the current store stays active.
+	 */
+	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		try {
+			await next.pool.reload();
+		} catch (error) {
+			next.pool.close();
+			throw error;
+		}
+		const previous = this.#modules;
+		next.pool.adoptSubscribers(previous.pool);
+		next.usage.adoptRuntimeProviders(previous.usage);
+		next.pins.adoptSelectors(previous.pins);
+		this.#modules = next;
+		previous.pool.close();
+		next.pool.bump("store-replaced");
+	}
+
+	#compose(store: AuthCredentialStore, sourceLabel: string | undefined): AuthStorageModules {
+		const options = this.#options;
+		const overrides = this.#overrides;
+		const policies = this.#policies;
+		const blockHealth = new BlockStoreHealth(sourceLabel);
 		const strategies = options.rankingStrategyResolver ?? defaultRankingStrategy;
 		const pool = new CredentialPool(store, {
 			policies,
@@ -112,7 +198,9 @@ export class AuthStorage {
 		});
 		const refresher = new OAuthRefresher({ store, pool, policies, override: options.refreshOAuthCredential });
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
-		const usageCache = new UsageCache(store, pool, usageProviders);
+		// Key reports by the effective provider (runtime extension override first), so an
+		// override's `cacheVersion` separates its rows from other processes sharing the store.
+		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 		const pins = new AccountPins(pool, blocks, options.defaultAccounts, options.accountPriorities);
 		const affinity = new SessionAffinity(store, pool, overrides, pins);
@@ -155,34 +243,33 @@ export class AuthStorage {
 			affinity,
 			pins,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
-			sourceLabel: options.sourceLabel,
+			sourceLabel,
 		});
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
 
-		this.#pool = pool;
-		this.#pins = pins;
-		this.#affinity = affinity;
-		this.credentials = pool;
-		this.keys = keys;
-		this.oauth = oauth;
-		this.sessions = affinity;
-		this.usage = usage;
-		this.health = new CredentialHealth({
-			store,
+		return {
 			pool,
 			keys,
-			policies,
-			blocks,
-			affinity,
+			oauth,
+			sessions: affinity,
 			usage,
-			refresher,
-			overrides,
-			strategies,
-		});
-		this.limits = limits;
-		this.resets = new ResetCredits({ store, pool, oauth, usage, usageCache, blocks });
-		this.blocks = blocks;
-		if (options.onCredentialDisabled) pool.onDisabled(options.onCredentialDisabled);
+			health: new CredentialHealth({
+				store,
+				pool,
+				keys,
+				policies,
+				blocks,
+				affinity,
+				usage,
+				refresher,
+				overrides,
+				strategies,
+			}),
+			limits,
+			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+			blocks,
+			pins,
+		};
 	}
 
 	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
@@ -193,7 +280,7 @@ export class AuthStorage {
 
 	/** Close the underlying credential store; the instance must not be reused. */
 	close(): void {
-		this.#pool.close();
+		this.#modules.pool.close();
 	}
 
 	/**
@@ -232,17 +319,17 @@ export class AuthStorage {
 
 	/** Configured default-account selector for `provider`, verbatim, or undefined. */
 	getDefaultAccountSelector(provider: string): string | undefined {
-		return this.#pins.getDefaultAccountSelector(provider);
+		return this.#modules.pins.getDefaultAccountSelector(provider);
 	}
 
 	/** Durable credential id the configured default resolves to, or undefined. */
 	getDefaultAccountCredentialId(provider: string): number | undefined {
-		return this.#pins.getDefaultAccountCredentialId(provider);
+		return this.#modules.pins.getDefaultAccountCredentialId(provider);
 	}
 
 	/** Identity of the configured default OAuth account, for display. Undefined for api_key rows. */
 	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
-		return this.#pins.getDefaultAccountIdentity(provider);
+		return this.#modules.pins.getDefaultAccountIdentity(provider);
 	}
 
 	/**
@@ -253,19 +340,20 @@ export class AuthStorage {
 	 * request instead of taking effect only on restart.
 	 */
 	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
-		if (this.#pins.setDefaultAccountSelector(provider, selector)) {
-			this.#affinity.clearProvider(provider);
+		const { pins, sessions } = this.#modules;
+		if (pins.setDefaultAccountSelector(provider, selector)) {
+			sessions.clearProvider(provider);
 		}
 	}
 
 	/** Configured `providers.accountPriority` selectors for `provider`, in order. */
 	getAccountPrioritySelectors(provider: string): readonly string[] {
-		return this.#pins.getAccountPrioritySelectors(provider);
+		return this.#modules.pins.getAccountPrioritySelectors(provider);
 	}
 
 	/** Durable credential ids the configured priority list resolves to, in order. */
 	getAccountPriorityCredentialIds(provider: string): readonly number[] {
-		return this.#pins.getAccountPriorityCredentialIds(provider);
+		return this.#modules.pins.getAccountPriorityCredentialIds(provider);
 	}
 
 	/**
@@ -273,7 +361,7 @@ export class AuthStorage {
 	 * the most portable unique identity, else the durable `#<credentialId>` form.
 	 */
 	describeAccountSelector(provider: string, credentialId: number): string | undefined {
-		return this.#pins.describeAccountSelector(provider, credentialId);
+		return this.#modules.pins.describeAccountSelector(provider, credentialId);
 	}
 
 	/**
@@ -284,14 +372,15 @@ export class AuthStorage {
 	 * their sticky so the new order applies to the next request.
 	 */
 	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): void {
-		if (this.#pins.setAccountPrioritySelectors(provider, selectors)) {
-			this.#affinity.clearProvider(provider);
+		const { pins, sessions } = this.#modules;
+		if (pins.setAccountPrioritySelectors(provider, selectors)) {
+			sessions.clearProvider(provider);
 		}
 	}
 
 	/** Take the pending fallover notice for `(provider, sessionId)`, if any. Consumes it. */
 	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
-		return this.#pins.consumeDefaultAccountFallover(provider, sessionId);
+		return this.#modules.pins.consumeDefaultAccountFallover(provider, sessionId);
 	}
 
 	/**
@@ -303,14 +392,14 @@ export class AuthStorage {
 		sessionId?: string;
 		limit?: number;
 	}): readonly AccountSelectionEvent[] {
-		return this.#pins.listAccountSelectionEvents(options);
+		return this.#modules.pins.listAccountSelectionEvents(options);
 	}
 
 	// ── Fork feature: durable-row access for the gateway management API ─────
 
 	/** List live stored credential rows by id, preserving first requested order. */
 	listStoredCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
-		return this.#pool.listByIds(ids);
+		return this.#modules.pool.listByIds(ids);
 	}
 
 	/**
@@ -318,6 +407,6 @@ export class AuthStorage {
 	 * in-memory snapshot, and return the provider's stored rows.
 	 */
 	upsertCredentialAsync(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
-		return this.#pool.upsertStored(provider, credential);
+		return this.#modules.pool.upsertStored(provider, credential);
 	}
 }
