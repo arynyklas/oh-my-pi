@@ -1,9 +1,9 @@
 {
-	"base": "v18.5.1",
-	"baseCommit": "d0cc52397dc2a68d39cba49b0009b9e50ffd643e",
+	"base": "v18.6.1",
+	"baseCommit": "2a2c6dcbbb558c0f8145f67f28b3370984f2bf60",
 	"head": "HEAD",
-	"headCommit": "e5eca3de9d7f5d82a88d3d01b8e6fd2e5b9317ab",
-	"generated": "2026-10-03T17:53:19.796Z",
+	"headCommit": "04d7f94c104d26f0cece697cc70b6aece0b550cc",
+	"generated": "2026-10-05T12:21:53.241Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"

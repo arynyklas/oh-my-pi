@@ -2997,7 +2997,7 @@ index 641e0e4..0c34fc2 100644
  		// A broker serves its retained last-good report for hours after `/usage`
  		// starts failing; those healthy limits describe the account before the
 diff --git a/packages/catalog/test/build.test.ts b/packages/catalog/test/build.test.ts
-index 4f8b656..3b8a3da 100644
+index 05a0e82..7e3de82 100644
 --- a/packages/catalog/test/build.test.ts
 +++ b/packages/catalog/test/build.test.ts
 @@ -674,6 +674,29 @@ describe("openai-completions wire-quirk compat detection", () => {

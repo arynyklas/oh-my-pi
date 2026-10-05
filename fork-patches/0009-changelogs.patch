@@ -1,5 +1,5 @@
 diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index 86a9097..05354c3 100644
+index 6cd4451..9657250 100644
 --- a/packages/ai/CHANGELOG.md
 +++ b/packages/ai/CHANGELOG.md
 @@ -2,6 +2,29 @@ # Changelog
@@ -29,10 +29,10 @@ index 86a9097..05354c3 100644
 +- Gateway routes for every non-chat modality now resolve credentials through the caller's account pool: `resolveGatewayApiKey` and `buildGatewayApiKeyResolver` take the request's boot options and honour the `credentialScope` the router installs, so an ACL denial, an empty pool, and pool-scoped rotation behave the same on `/v1/embeddings` as on `/v1/chat/completions`.
 +- ACL rules accept the new `systemone`, `images`, `speech`, `transcriptions`, `embeddings`, `rerank`, and `video` route families.
 +
- ## [18.5.1] - 2026-10-03
+ ## [18.6.1] - 2026-10-04
  
  ### Fixed
-@@ -420,6 +443,69 @@ - Ollama cache hits now populate cached-token usage: `prompt_eval_cached_count` from the `/api/chat` done chunk maps to `cacheRead`, with `input` reduced to the uncached portion, so status-line `cache_turn`/`cache_hit` segments and cache-prefix audits report real hit rates instead of false misses.
+@@ -433,6 +456,69 @@ - Ollama cache hits now populate cached-token usage: `prompt_eval_cached_count` from the `/api/chat` done chunk maps to `cacheRead`, with `input` reduced to the uncached portion, so status-line `cache_turn`/`cache_hit` segments and cache-prefix audits report real hit rates instead of false misses.
  - Fixed requests that run across a price change being costed at the newer rate; peak/off-peak estimates now use the rate in effect when the request started.
  - Fixed GitHub Copilot Business seats getting HTTP 403 on every model while the same token succeeds with a Chat client identity: chat and model-policy requests now identify as `copilot-chat`, denied requests retry once as the Copilot CLI (`copilot-developer-cli`), and `COPILOT_INTEGRATION_ID` pins the `Copilot-Integration-Id` header up front; model discovery keeps the CLI identity and the 403 message names the identity and the remedies ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)).
  
@@ -102,7 +102,7 @@ index 86a9097..05354c3 100644
  ## [18.1.16] - 2026-09-09
  
  ### Fixed
-@@ -1433,6 +1519,20 @@ ## [16.4.1] - 2026-07-10
+@@ -1446,6 +1532,20 @@ ## [16.4.1] - 2026-07-10
  ### Changed
  
  - Enforced `all_turns` reasoning context for all Responses Lite requests
@@ -124,13 +124,19 @@ index 86a9097..05354c3 100644
  ## [16.4.0] - 2026-07-10
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 4ffba55..3622e32 100644
+index 965cb7e..4e786af 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,52 @@ # Changelog
+@@ -2,6 +2,58 @@ # Changelog
  
  ## [Unreleased]
  
++## [18.6.1-fork.1] - 2026-10-05
++
++### Changed
++
++- Re-based the fork onto upstream v18.6.1.
++
 +## [18.5.1-fork.1] - 2026-10-03
 +
 +### Changed
@@ -177,10 +183,10 @@ index 4ffba55..3622e32 100644
 +
 +- Re-based the fork onto upstream v18.2.9, whose TUI components moved into `@oh-my-pi/pi-tui`. The gateway connection-profile editor is now injected into the settings selector and the status line resolves the active-account chip through its host, so both keep working from the relocated components.
 +
- ## [18.5.1] - 2026-10-03
+ ## [18.6.1] - 2026-10-04
  
- ### Added
-@@ -1525,4 +1571,16427 @@ - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
+ ### Fixed
+@@ -1557,4 +1609,16427 @@ - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
  - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
  - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
  

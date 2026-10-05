@@ -462,7 +462,7 @@ index 29fad86..22d0921 100644
  }
  
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index db59313..0013264 100644
+index af2a715..e16be45 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
 @@ -1,6 +1,7 @@
@@ -483,7 +483,7 @@ index db59313..0013264 100644
  import { reset as resetCapabilities } from "../../capability";
  import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { showGitOverlay } from "../../cli/git-tui";
-@@ -59,6 +63,11 @@ import type { SessionInfo } from "../../session/session-listing";
+@@ -66,6 +70,11 @@ import type { SessionInfo } from "../../session/session-listing";
  import { SessionManager } from "../../session/session-manager";
  import { loadPinnedSessionIds } from "../../session/session-pins";
  import { FileSessionStorage } from "../../session/session-storage";
@@ -495,7 +495,7 @@ index db59313..0013264 100644
  import { toLogoutAccounts } from "../../slash-commands/helpers/logout";
  import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
  import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-@@ -86,6 +95,11 @@ import { copyToClipboard } from "../../utils/clipboard";
+@@ -93,6 +102,11 @@ import { copyToClipboard } from "../../utils/clipboard";
  import { openPath } from "../../utils/open";
  import { setSessionTerminalTitle } from "../../utils/title-generator";
  import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
@@ -507,7 +507,7 @@ index db59313..0013264 100644
  import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { createAgentsHubDeps } from "../agents-hub-deps";
  import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-@@ -118,6 +132,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+@@ -125,6 +139,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
  import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
  import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -515,7 +515,7 @@ index db59313..0013264 100644
  import { renderUsageReports } from "./command-controller";
  import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
  
-@@ -273,6 +288,12 @@ export class SelectorController {
+@@ -280,6 +295,12 @@ export class SelectorController {
  					model: this.ctx.session.model,
  					imageBudget: this.ctx.ui.imageBudget,
  					requestRender: () => this.ctx.ui.requestRender(),
@@ -528,7 +528,7 @@ index db59313..0013264 100644
  					composerPreviewStatus: this.ctx.statusLine,
  				},
  				{
-@@ -340,12 +361,29 @@ export class SelectorController {
+@@ -347,12 +368,29 @@ export class SelectorController {
  		});
  	}
  
@@ -559,7 +559,7 @@ index db59313..0013264 100644
  		const authStorage = this.ctx.session.modelRegistry.authStorage;
  		const accounts = selectReportableAccounts(
  			collectStoredAccounts(authStorage),
-@@ -372,8 +410,8 @@ export class SelectorController {
+@@ -379,8 +417,8 @@ export class SelectorController {
  		const dashboard = new UsageDashboardComponent({
  			reports,
  			unavailableAccounts,
@@ -570,7 +570,7 @@ index db59313..0013264 100644
  					current,
  					theme,
  					Date.now(),
-@@ -381,7 +419,14 @@ export class SelectorController {
+@@ -388,7 +426,14 @@ export class SelectorController {
  					provider => (provider === currentProvider ? activeAccount : undefined),
  					usageModelSelectors,
  					unavailableAccounts,
@@ -586,7 +586,7 @@ index db59313..0013264 100644
  			loadActivity: loadDailyActivity,
  			refresh: () => this.ctx.session.fetchUsageReports(),
  			requestRender: () => this.ctx.ui.requestRender(),
-@@ -2093,6 +2138,146 @@ export class SelectorController {
+@@ -2116,6 +2161,146 @@ export class SelectorController {
  		});
  	}
  
@@ -734,10 +734,10 @@ index db59313..0013264 100644
  		const session = this.ctx.session;
  		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index bcde52f..4fb7b7f 100644
+index 28d23aa..0d30f77 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -7797,8 +7797,12 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -7799,8 +7799,12 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#selectorController.showSettingsSelector();
  	}
  
@@ -752,7 +752,7 @@ index bcde52f..4fb7b7f 100644
  	}
  
  	showAdvisorConfigure(): void {
-@@ -7868,6 +7872,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -7870,6 +7874,10 @@ export class InteractiveMode implements InteractiveModeContext {
  		return this.#selectorController.showSessionPinSelector();
  	}
  
@@ -864,7 +864,7 @@ index 0a93922..c154714 100644
  	showProviderSetup(): Promise<void>;
  	showHookConfirm(title: string, message: string): Promise<boolean>;
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index d304e67..0f6a844 100644
+index 04a6cd8..e8461f7 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
 @@ -200,6 +200,7 @@ import {
@@ -918,7 +918,7 @@ index d304e67..0f6a844 100644
  			}
  			if (event.message.role === "toolResult") {
  				const { toolName, toolCallId, isError, content } = event.message;
-@@ -12760,6 +12781,15 @@ export class AgentSession implements SettingsScope {
+@@ -12761,6 +12782,15 @@ export class AgentSession implements SettingsScope {
  		return this.#advisors.getAdvisorStatusOverview();
  	}
  
@@ -980,10 +980,10 @@ index 7af2052..2a1b24a 100644
  	id: "providers.openai-codex.codeMode",
  	type: "enum",
 diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-index f9657f1..da0c1bc 100644
+index 1f6b44d..567a0e4 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-@@ -303,6 +303,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+@@ -304,6 +304,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
  			clearSubmittedText(runtime);
  		},
  	},
@@ -2013,10 +2013,10 @@ index 7b30ac1..3d43682 100644
  
  	it("tears the loader down on the live turn's own final agent_end", async () => {
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index 6174d8f..bcd8227 100644
+index 438bd2e..7953b65 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
-@@ -1088,6 +1088,9 @@ ### Changed
+@@ -1102,6 +1102,9 @@ ### Changed
  
  - Improved row alignment and spacing for `align`, `gather`, and `array` environments
  - Updated matrix environments to render as baseline-aligned grids with stretched brackets
