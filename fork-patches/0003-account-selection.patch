@@ -121,7 +121,7 @@ index 7e7ab6c..1cf5b7f 100644
  	await storage.credentials.reload();
  	return storage;
 diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
-index 80cc547..cb946f1 100644
+index 80cc547..1045db4 100644
 --- a/packages/ai/src/auth-storage.ts
 +++ b/packages/ai/src/auth-storage.ts
 @@ -13,6 +13,11 @@ /**
@@ -207,7 +207,7 @@ index 80cc547..cb946f1 100644
  		this.#modules = next;
  		previous.pool.close();
  		next.pool.bump("store-replaced");
-@@ -177,6 +193,7 @@ export class AuthStorage {
+@@ -177,16 +193,18 @@ export class AuthStorage {
  			onReset: provider => {
  				selector.resetRoundRobin(provider);
  				affinity.clearProvider(provider);
@@ -215,16 +215,20 @@ index 80cc547..cb946f1 100644
  			},
  		});
  		const refresher = new OAuthRefresher({ store, pool, policies, override: options.refreshOAuthCredential });
-@@ -185,7 +202,8 @@ export class AuthStorage {
+ 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
+ 		// Key reports by the effective provider (runtime extension override first), so an
  		// override's `cacheVersion` separates its rows from other processes sharing the store.
- 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
+-		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
++		const usageCache: UsageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
  		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 -		const affinity = new SessionAffinity(store, pool, overrides);
+-		const usage = new UsageService({
 +		const pins = new AccountPins(pool, blocks, options.defaultAccounts, options.accountPriorities);
 +		const affinity = new SessionAffinity(store, pool, overrides, pins);
- 		const usage = new UsageService({
++		const usage: UsageService = new UsageService({
  			store,
  			pool,
+ 			overrides,
 @@ -209,10 +227,12 @@ export class AuthStorage {
  			store,
  			pool,
