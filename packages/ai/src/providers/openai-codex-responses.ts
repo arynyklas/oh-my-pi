@@ -157,6 +157,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	codexMode?: boolean;
 	toolChoice?: ToolChoice;
 	preferWebsockets?: boolean;
+	/** Per-request Codex WebSocket proxy; wins over the env-derived one. See SimpleStreamOptions.webSocketProxy. */
+	webSocketProxy?: string;
 	serviceTier?: ServiceTier;
 	/**
 	 * Responses Lite transport opt-in. Normal inference defaults to full
@@ -1848,6 +1850,7 @@ async function openCodexWebSocketTransport(
 		websocketHeaders,
 		model.provider,
 		requestSetup.requestSignal,
+		options?.webSocketProxy,
 	);
 	const timeouts: CodexWebSocketRequestTimeouts = {
 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
@@ -1892,6 +1895,7 @@ async function openCodexWebSocketTransport(
 				websocketHeaders,
 				model.provider,
 				requestSetup.requestSignal,
+				options?.webSocketProxy,
 			);
 		}
 	}
@@ -3315,7 +3319,14 @@ export async function prewarmOpenAICodexResponses(
 	model: Model<"openai-codex-responses">,
 	options?: Pick<
 		OpenAICodexResponsesOptions,
-		"apiKey" | "headers" | "sessionId" | "signal" | "preferWebsockets" | "providerSessionState" | "responsesLite"
+		| "apiKey"
+		| "headers"
+		| "sessionId"
+		| "signal"
+		| "preferWebsockets"
+		| "providerSessionState"
+		| "responsesLite"
+		| "webSocketProxy"
 	>,
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -3367,6 +3378,7 @@ export async function prewarmOpenAICodexResponses(
 		headers,
 		model.provider,
 		options?.signal,
+		options?.webSocketProxy,
 	);
 	state.prewarmed = true;
 }
@@ -4587,8 +4599,9 @@ async function getOrCreateCodexWebSocketConnection(
 	headers: Headers,
 	provider: string,
 	signal?: AbortSignal,
+	proxyOverride?: string,
 ): Promise<CodexWebSocketConnection> {
-	const proxy = getProxyForUrl(provider, new URL(url));
+	const proxy = proxyOverride ?? getProxyForUrl(provider, new URL(url));
 	const headerRecord = headersToRecord(headers);
 	// Join an in-flight handshake instead of tearing it down: closing a
 	// CONNECTING socket rejects the concurrent caller (prewarm racing the first

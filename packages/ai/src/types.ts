@@ -766,6 +766,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
 	/**
+	 * Proxy URL for the Codex WebSocket handshake of this request (`http(s)://[user:pass@]host:port`).
+	 * Wins over `PI_PROXY_*` / `HTTPS_PROXY`. HTTP transports take their proxy from {@link StreamOptions.fetch}.
+	 */
+	webSocketProxy?: string;
+	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
 	 * the request targets OpenRouter (`model.provider === "openrouter"`). Common
 	 * values: `"nitro"` (throughput), `"floor"` (cheapest), `"online"` (web

@@ -209,11 +209,14 @@ async function exchangeCodeForToken(
  *
  * Avoids a local callback server entirely — useful when port 1455 is unavailable
  * or when the browser callback flow fails with 403 (e.g. network/proxy issues).
+ * Every request (user code, polling, code exchange) goes through `ctrl.fetch`
+ * when set (fork: per-account proxy), else the global fetch.
  */
 export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAuthCredentials> {
+	const fetchImpl: FetchImpl = ctrl.fetch ?? fetch;
 	ctrl.onProgress?.("Initiating device authorization…");
 
-	const initResponse = await fetch(DEVICE_USERCODE_URL, {
+	const initResponse = await fetchImpl(DEVICE_USERCODE_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ client_id: CLIENT_ID }),
@@ -259,7 +262,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 			throw new AIError.LoginCancelledError("Device authorization cancelled");
 		}
 
-		const pollResponse = await fetch(DEVICE_TOKEN_URL, {
+		const pollResponse = await fetchImpl(DEVICE_TOKEN_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -293,7 +296,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 		}
 
 		ctrl.onProgress?.("Exchanging authorization code for tokens…");
-		return exchangeCodeForToken(pollData.authorization_code, pollData.code_verifier, DEVICE_REDIRECT_URI);
+		return exchangeCodeForToken(pollData.authorization_code, pollData.code_verifier, DEVICE_REDIRECT_URI, fetchImpl);
 	}
 
 	throw new AIError.OAuthError("Device authorization timed out — user did not complete login in time", {

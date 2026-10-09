@@ -82,8 +82,15 @@ export interface ProviderDefinition {
 	// --- interactive login (OAuthProviderInterface-compatible) ---
 	/** Interactive login; flows that need `onPrompt`/`onAuth` reject a bare controller at runtime. */
 	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
-	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
-	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+	/**
+	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
+	 * `fetchImpl` carries the token request (fork: per-credential proxy); default global fetch.
+	 */
+	readonly refreshToken?: (
+		credentials: OAuthCredentials,
+		signal?: AbortSignal,
+		fetchImpl?: FetchImpl,
+	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;

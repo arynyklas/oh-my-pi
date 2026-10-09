@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.6.1-fork.2] - 2026-10-09
+
+### Added
+
+- Этап aigw2 3A: прокси на запрос (`webSocketProxy`, `fetchImpl` для refresh, `ctrl.fetch` для device login), восстановление PKCE-входа через `pkceVerifier`/`resume()`.
+- `postmortem.releaseSigtermHandler()` передаёт SIGTERM встраивающему серверу, сохраняя все сторонние обработчики; cleanup при exit остаётся.
+
+### Fixed
+
+- Явные типы `UsageCache`/`UsageService` снимают циклический вывод типов при сборке деклараций TypeScript.
+
 ## [18.5.1-fork.1] - 2026-10-03
 
 ### Changed

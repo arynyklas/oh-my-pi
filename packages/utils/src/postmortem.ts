@@ -560,6 +560,16 @@ export async function fatal(error: unknown): Promise<never> {
 	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
+async function sigtermCleanup(): Promise<void> {
+	await runCleanup(Reason.SIGTERM);
+	exitProcess(143);
+}
+
+/** Transfer SIGTERM ownership to an embedding server without removing other listeners. */
+export function releaseSigtermHandler(): void {
+	process.removeListener("SIGTERM", sigtermCleanup);
+}
+
 if (Bun.isMainThread) {
 	process
 		.on("SIGINT", async () => {
@@ -639,10 +649,7 @@ if (Bun.isMainThread) {
 		.on("exit", async () => {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
 		})
-		.on("SIGTERM", async () => {
-			await runCleanup(Reason.SIGTERM);
-			exitProcess(143); // 128 + SIGTERM (15)
-		})
+		.on("SIGTERM", sigtermCleanup)
 		.on("SIGHUP", async () => {
 			await runCleanup(Reason.SIGHUP);
 			exitProcess(129); // 128 + SIGHUP (1)

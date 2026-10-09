@@ -2184,6 +2184,7 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
+				webSocketProxy: options?.webSocketProxy,
 				codexCompaction: options?.codexCompaction,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,

@@ -6,6 +6,7 @@
 import type { CompiledAuthProvider, CompiledRefresh } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
 import { claudeCodeSdkVersion } from "../../providers/claude-code-fingerprint";
+import type { FetchImpl } from "../../types";
 import type { OAuthCredentials } from "../oauth/types";
 import {
 	applyAfterExchange,
@@ -20,7 +21,11 @@ import {
 } from "./common";
 
 type RequestRefresh = Extract<CompiledRefresh, { kind: "request" }>;
-type Refresher = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+type Refresher = (
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+	fetchImpl?: FetchImpl,
+) => Promise<OAuthCredentials>;
 
 async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 	const login = policy.login;
@@ -49,7 +54,7 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 
 function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
 	const provider = policy.id;
-	return async (credentials, signal) => {
+	return async (credentials, signal, fetchImpl = fetch) => {
 		for (const field of rule.require) {
 			if (!credentials[field as keyof OAuthCredentials]) {
 				throw new AIError.OAuthError(`${provider} credentials are missing ${field}; sign in again`, {
@@ -61,7 +66,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 		throwIfCancelled(signal);
 		const client = await loginClient(policy, signal);
 		const hookHeaders = rule.headersHook ? (await loadHeadersHook(rule.headersHook))() : undefined;
-		const context = { provider, fetch, signal, headers: hookHeaders };
+		const context = { provider, fetch: fetchImpl, signal, headers: hookHeaders };
 		const vars: TemplateVars = {
 			refresh_token: credentials.refresh,
 			client_id: client.clientId,
@@ -91,7 +96,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			provider,
 			phase: "refresh",
 			raw: body,
-			fetch,
+			fetch: fetchImpl,
 			signal,
 			stored: credentials,
 		});
@@ -103,7 +108,8 @@ export function createRefresh(policy: CompiledAuthProvider): Refresher | undefin
 	const rule = policy.refresh;
 	if (!rule || rule.kind === "none") return undefined;
 	if (rule.kind === "hook") {
-		return async (credentials, signal) => (await loadRefreshHook(rule.hook))(credentials, signal);
+		return async (credentials, signal, fetchImpl) =>
+			(await loadRefreshHook(rule.hook))(credentials, signal, fetchImpl);
 	}
 	return createRequestRefresh(rule, policy);
 }

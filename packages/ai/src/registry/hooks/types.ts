@@ -11,8 +11,12 @@ import type { OAuthController, OAuthCredentials, OAuthPrompt } from "../oauth/ty
 /** Whole-flow login implementation (`login "custom" hook=…`); rejects a bare controller at runtime when it needs prompts. */
 export type LoginHook = (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
 
-/** Whole-flow refresh implementation (`refresh hook=…`). */
-export type RefreshHook = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+/** Whole-flow refresh implementation (`refresh hook=…`); `fetchImpl` routes provider calls (default global fetch). */
+export type RefreshHook = (
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+	fetchImpl?: FetchImpl,
+) => Promise<OAuthCredentials>;
 
 /** Runtime context handed to `after-exchange` / `after-refresh` hooks. */
 export interface ExchangeContext {

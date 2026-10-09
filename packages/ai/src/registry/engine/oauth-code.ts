@@ -120,13 +120,37 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 		}
 	}
 
-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+	/** Client settings the token exchange reuses; resolved by `generateAuthUrl` and by `resume`. */
+	async #resolveClient(signal?: AbortSignal): Promise<void> {
 		const rule = this.#rule;
-		const signal = this.ctrl.signal;
 		this.#clientId = rule.clientId ? await resolveValue(rule.clientId, signal) : undefined;
 		this.#clientSecret = rule.clientSecret ? await resolveValue(rule.clientSecret, signal) : undefined;
 		this.#base = rule.baseUrl ? (await resolveValue(rule.baseUrl, signal)).replace(/\/+$/, "") : undefined;
 		this.#auth = rule.authUrl ? (await resolveValue(rule.authUrl, signal)).replace(/\/+$/, "") : undefined;
+	}
+
+	/**
+	 * Fork: the PKCE verifier minted by the last `generateAuthUrl`, so a server
+	 * can persist it (encrypted) and finish the flow in another process.
+	 */
+	get pkceVerifier(): string {
+		return this.#verifier;
+	}
+
+	/**
+	 * Fork: prepare `exchangeToken` in a process that did not run
+	 * `generateAuthUrl` (split start/complete): re-resolve the client settings
+	 * and restore the verifier saved from {@link pkceVerifier}.
+	 */
+	async resume(verifier: string): Promise<void> {
+		await this.#resolveClient(this.ctrl.signal);
+		this.#verifier = verifier;
+	}
+
+	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+		const rule = this.#rule;
+		const signal = this.ctrl.signal;
+		await this.#resolveClient(signal);
 		let challenge: string | undefined;
 		if (rule.pkce) {
 			const pkce = await generatePKCE();

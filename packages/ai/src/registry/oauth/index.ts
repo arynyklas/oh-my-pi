@@ -4,6 +4,7 @@
 
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
+import type { FetchImpl } from "../../types";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
 import type {
@@ -63,11 +64,13 @@ export function unregisterOAuthProviders(sourceId: string): void {
 
 /**
  * Refresh a built-in OAuth grant, cancelling provider work when refresh ownership ends.
+ * `fetchImpl` carries every provider call of the refresh (fork: per-credential proxy).
  */
 export async function refreshOAuthToken(
 	provider: OAuthProvider,
 	credentials: OAuthCredentials,
 	signal?: AbortSignal,
+	fetchImpl?: FetchImpl,
 ): Promise<OAuthCredentials> {
 	if (!credentials) {
 		throw new AIError.OAuthError(`No OAuth credentials found for ${provider}`, {
@@ -84,7 +87,7 @@ export async function refreshOAuthToken(
 	}
 	// Providers without a real refresher (static bearer tokens / API keys that
 	// don't expire) return the credentials unchanged.
-	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
+	return def.refreshToken ? def.refreshToken(credentials, signal, fetchImpl) : credentials;
 }
 const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
 export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {
