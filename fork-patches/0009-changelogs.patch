@@ -135,13 +135,19 @@ index 6cd4451..e3e9020 100644
  ## [16.4.0] - 2026-07-10
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 965cb7e..193323c 100644
+index 965cb7e..c0db4ff 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,64 @@ # Changelog
+@@ -2,6 +2,70 @@ # Changelog
  
  ## [Unreleased]
  
++## [18.6.1-fork.3] - 2026-10-11
++
++### Fixed
++
++- Models discovered through a custom `models.yml` provider (`discovery: openai-models-list` or `proxy`) now take the reasoning levels the endpoint advertises on `/v1/models`: OpenRouter's `reasoning.supported_efforts` (with `default_effort` and `mandatory`) or the omp auth-gateway's `thinking_efforts`. OpenAI-shaped rows send the chosen level as `reasoning_effort`. A gateway serving Claude Opus 5.5 under its own provider name now offers `max`. Before, `openai-models-list` stopped at `high` (at `xhigh` when the matched reference already sent `reasoning_effort`), and `proxy` offered `max` on OpenAI-shaped rows without sending any `reasoning_effort`.
++
 +## [18.6.1-fork.2] - 2026-10-09
 +
 +### Changed
@@ -203,7 +209,7 @@ index 965cb7e..193323c 100644
  ## [18.6.1] - 2026-10-04
  
  ### Fixed
-@@ -1557,4 +1615,16427 @@ - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
+@@ -1557,4 +1621,16427 @@ - `#readProjectSettings` now logs capability warnings when a project `.claude/settings.json` fails to parse, instead of silently dropping them ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
  - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
  - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
  
