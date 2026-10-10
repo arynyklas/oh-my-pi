@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type Api, type FetchImpl, generateImage, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, completeSimple, type FetchImpl, generateImage, type Model } from "@oh-my-pi/pi-ai";
 import { synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
@@ -3157,6 +3157,93 @@ describe("ModelRegistry runtime discovery", () => {
 			} finally {
 				await gateway.close();
 				gatewayStorage.close();
+			}
+		});
+	}
+
+	for (const discovery of ["openai-models-list", "proxy"] as const) {
+		test(`${discovery} discovery adopts the effort ladder a gateway row advertises and sends it as reasoning_effort`, async () => {
+			const chatBodies: Array<Record<string, unknown>> = [];
+			const done = { id: "c", object: "chat.completion.chunk", created: 0, model: "m" };
+			const sse = [
+				{ ...done, choices: [{ index: 0, delta: { role: "assistant", content: "4" }, finish_reason: null }] },
+				{
+					...done,
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+				},
+			]
+				.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`)
+				.concat("data: [DONE]\n\n")
+				.join("");
+			const ladder = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+			const gateway = Bun.serve({
+				port: 0,
+				async fetch(req) {
+					const { pathname } = new URL(req.url);
+					if (pathname === "/v1/models") {
+						return Response.json({
+							object: "list",
+							data: [
+								// OpenRouter's shape, as an LLM gateway serves a subscription Claude under its own prefix.
+								{
+									id: "anthropic/claude-opus-5-5",
+									object: "model",
+									owned_by: "anthropic",
+									reasoning: {
+										supported_efforts: ["low", "medium", "high", "xhigh", "max"],
+										default_effort: "high",
+									},
+								},
+								// The omp auth-gateway's shape.
+								{
+									id: "anthropic/claude-fable-5-1",
+									object: "model",
+									owned_by: "anthropic",
+									reasoning: true,
+									thinking_efforts: ["low", "medium", "high", "xhigh", "max"],
+								},
+								// A row that advertises nothing keeps the custom provider's generic ladder.
+								{ id: "anthropic/claude-opus-4-8", object: "model", owned_by: "anthropic" },
+							],
+						});
+					}
+					if (pathname === "/v1/chat/completions") {
+						chatBodies.push((await req.json()) as Record<string, unknown>);
+						return new Response(sse, { headers: { "Content-Type": "text/event-stream" } });
+					}
+					return new Response("nope", { status: 404 });
+				},
+			});
+			try {
+				writeRawModelsJson({
+					"llm-gateway": {
+						baseUrl: `${gateway.url.origin}/v1`,
+						auth: "none",
+						api: "openai-completions",
+						discovery: { type: discovery },
+					},
+				});
+				const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetch as FetchImpl });
+				await registry.refresh();
+				const opus = registry.find("llm-gateway", "anthropic/claude-opus-5-5");
+				expect(opus?.reasoning).toBe(true);
+				expect(opus?.thinking).toMatchObject({ mode: "effort", efforts: ladder, defaultLevel: Effort.High });
+				expect(registry.find("llm-gateway", "anthropic/claude-fable-5-1")?.thinking?.efforts).toEqual(ladder);
+				const plain = registry.find("llm-gateway", "anthropic/claude-opus-4-8");
+				expect(plain?.thinking?.efforts?.length).toBeGreaterThan(0);
+				expect(plain?.thinking?.efforts).not.toContain(Effort.Max);
+				if (!opus) throw new Error("expected the advertised Opus row");
+				const reply = await completeSimple(
+					opus,
+					{ messages: [{ role: "user", content: "2+2?", timestamp: 0 }] },
+					{ apiKey: "gateway-test-key", reasoning: Effort.Max },
+				);
+				expect(reply.stopReason).toBe("stop");
+				// The tier the user picked reaches the gateway; the endpoint declared it takes it.
+				expect(chatBodies.map(body => body.reasoning_effort)).toEqual(["max"]);
+			} finally {
+				gateway.stop(true);
 			}
 		});
 	}

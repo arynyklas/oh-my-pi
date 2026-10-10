@@ -943,6 +943,8 @@ export async function discoverOpenAIModelsList(
 						architecture?: unknown;
 						metadata?: unknown;
 						mode?: unknown;
+						reasoning?: unknown;
+						thinking_efforts?: unknown;
 					}>;
 				};
 			}),
@@ -1029,43 +1031,41 @@ export async function discoverOpenAIModelsList(
 				? resolveLiteLLMApi(undefined, id, providerConfig.api)
 				: providerConfig.api;
 		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		discovered.push(
-			buildModel({
-				id,
-				name: reference?.name ?? id,
-				api,
-				provider: providerConfig.provider,
-				baseUrl,
-				reasoning: reference?.reasoning ?? false,
-				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input,
-				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-				// Proxy/gateway pricing is provider-specific and rarely matches
-				// upstream bundled catalogs, so keep costs local-unknown even
-				// when we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		const spec = {
+			id,
+			name: reference?.name ?? id,
+			api,
+			provider: providerConfig.provider,
+			baseUrl,
+			reasoning: reference?.reasoning ?? false,
+			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+			input,
+			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
+			// Proxy/gateway pricing is provider-specific and rarely matches
+			// upstream bundled catalogs, so keep costs local-unknown even
+			// when we successfully recover the upstream model identity.
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow,
+			// Cap a provider-advertised output limit or the reference's output limit at
+			// the discovered context window so a larger limit can never request more
+			// tokens than the local runtime advertises.
+			maxTokens: Math.min(
+				reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
 				contextWindow,
-				// Cap a provider-advertised output limit or the reference's output limit at
-				// the discovered context window so a larger limit can never request more
-				// tokens than the local runtime advertises.
-				maxTokens: Math.min(
-					reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
-					contextWindow,
-				),
-				headers,
-				compat: {
-					supportsStore: false,
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
-					...(referenceCompat?.reasoningEffortMap
-						? { reasoningEffortMap: referenceCompat.reasoningEffortMap }
-						: {}),
-					...(referenceCompat?.omitReasoningEffort !== undefined
-						? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
-						: {}),
-				},
-			} as ModelSpec<Api>),
-		);
+			),
+			headers,
+			compat: {
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
+				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
+				...(referenceCompat?.omitReasoningEffort !== undefined
+					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
+					: {}),
+			},
+		} as ModelSpec<Api>;
+		const ladder = parseAdvertisedEffortLadder(item);
+		discovered.push(buildModel(ladder ? withAdvertisedEffortLadder(spec, ladder) : spec));
 	}
 	return discovered;
 }
@@ -1221,14 +1221,6 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
-		// An omp auth-gateway advertises the served model's reasoning surface. It
-		// dispatches with its own catalog entry, so that ladder is authoritative
-		// over the reference guess: cross-provider references carry no thinking,
-		// and an unknown host's generic ladder left gateway Claude rows without
-		// `xhigh`/`max`. OpenAI-shaped fallback rows take it in `effort` mode, the
-		// mode that wire encodes; Anthropic rows keep their identity-derived mode
-		// (adaptive vs budget is an Anthropic wire choice) and swap only the ladder.
-		const advertisedEfforts = parseAdvertisedEfforts(item.thinking_efforts);
 		const reasoning = typeof item.reasoning === "boolean" ? item.reasoning : (reference?.reasoning ?? false);
 		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		const displayName =
@@ -1243,10 +1235,7 @@ export async function discoverProxyModels(
 			provider: providerConfig.provider,
 			baseUrl,
 			reasoning,
-			thinking:
-				advertisedEfforts && !isAnthropic
-					? { mode: "effort", efforts: advertisedEfforts }
-					: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input: reference?.input ?? ["text"],
 			// Proxy pricing is provider-specific and usually does not match
 			// upstream bundled catalogs, so keep costs local-unknown even when
@@ -1273,23 +1262,68 @@ export async function discoverProxyModels(
 						supportsReasoningEffort: false,
 					},
 		} as ModelSpec<Api>;
-		const derivedMode = isAnthropic && advertisedEfforts ? resolveModelPolicy(spec).thinking?.mode : undefined;
-		discovered.push(
-			buildModel(
-				derivedMode && advertisedEfforts
-					? { ...spec, thinking: { mode: derivedMode, efforts: advertisedEfforts } }
-					: spec,
-			),
-		);
+		const ladder = parseAdvertisedEffortLadder(item);
+		discovered.push(buildModel(ladder ? withAdvertisedEffortLadder(spec, ladder) : spec));
 	}
 	return discovered;
 }
 
-/** Known efforts from a proxy row's `thinking_efforts`, in ladder order; undefined when none survive. */
-function parseAdvertisedEfforts(value: unknown): Effort[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	const efforts = THINKING_EFFORTS.filter(effort => value.includes(effort));
-	return efforts.length > 0 ? efforts : undefined;
+/** The effort ladder a `/v1/models` row advertises for the model its endpoint serves. */
+interface AdvertisedEffortLadder {
+	efforts: Effort[];
+	defaultLevel?: Effort;
+	requiresEffort?: boolean;
+}
+
+/**
+ * Read a row's advertised ladder in either shape: OpenRouter's
+ * `reasoning: { supported_efforts, default_effort, mandatory }` (also
+ * CoralBricks', and what LLM gateways such as aigw2 serve), or the omp
+ * auth-gateway's `thinking_efforts` beside a boolean `reasoning`. Known efforts
+ * only, in ladder order; undefined when none survive or the row says it does
+ * not reason.
+ */
+function parseAdvertisedEffortLadder(item: {
+	reasoning?: unknown;
+	thinking_efforts?: unknown;
+}): AdvertisedEffortLadder | undefined {
+	if (item.reasoning === false) return undefined;
+	const controls = isRecord(item.reasoning) ? item.reasoning : undefined;
+	const wire = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : item.thinking_efforts;
+	if (!Array.isArray(wire)) return undefined;
+	const efforts = THINKING_EFFORTS.filter(effort => wire.includes(effort));
+	if (efforts.length === 0) return undefined;
+	const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+	return {
+		efforts,
+		...(defaultLevel !== undefined && { defaultLevel }),
+		...(controls?.mandatory === true && { requiresEffort: true }),
+	};
+}
+
+/**
+ * Apply an advertised ladder to a discovered chat row. The endpoint dispatches
+ * with its own catalog entry, so its ladder is authoritative over the reference
+ * guess: a cross-provider reference carries no thinking, and a custom
+ * provider's generic ladder drops provider-scoped tiers such as Claude's
+ * `xhigh`/`max`. OpenAI-shaped rows take it in `effort` mode and send it as
+ * `reasoning_effort` — the endpoint just declared that it accepts the field, so
+ * a reference's opt-out or effort map (another host's wire) must not drop or
+ * rewrite it. Anthropic rows keep their identity-derived mode (adaptive vs
+ * budget is an Anthropic wire choice) and swap only the ladder.
+ */
+function withAdvertisedEffortLadder(spec: ModelSpec<Api>, ladder: AdvertisedEffortLadder): ModelSpec<Api> {
+	if (spec.api === "anthropic-messages") {
+		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode;
+		return mode ? { ...spec, reasoning: true, thinking: { mode, ...ladder } } : spec;
+	}
+	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...compat } = (spec.compat ?? {}) as OpenAICompat;
+	return {
+		...spec,
+		reasoning: true,
+		thinking: { mode: "effort", ...ladder },
+		compat: { ...compat, supportsReasoningEffort: true },
+	} as ModelSpec<Api>;
 }
 
 export function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
