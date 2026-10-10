@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.6.1-fork.3] - 2026-10-11
+
 ### Fixed
 
 - Models discovered through a custom `models.yml` provider (`discovery: openai-models-list` or `proxy`) now take the reasoning levels the endpoint advertises on `/v1/models`: OpenRouter's `reasoning.supported_efforts` (with `default_effort` and `mandatory`) or the omp auth-gateway's `thinking_efforts`. OpenAI-shaped rows send the chosen level as `reasoning_effort`. A gateway serving Claude Opus 5.5 under its own provider name now offers `max`. Before, `openai-models-list` stopped at `high` (at `xhigh` when the matched reference already sent `reasoning_effort`), and `proxy` offered `max` on OpenAI-shaped rows without sending any `reasoning_effort`.
