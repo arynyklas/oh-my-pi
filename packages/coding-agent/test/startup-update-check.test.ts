@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { checkForNewVersion } from "@oh-my-pi/pi-coding-agent/main";
 
@@ -14,6 +15,8 @@ afterEach(() => {
 
 describe("startup update check", () => {
 	it("checks fork GitHub releases for fork builds", async () => {
+		// Tests run from the source checkout, which skips the startup check entirely.
+		spyOn(updateCli, "isSourceCheckout").mockReturnValue(false);
 		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
 			Response.json([{ tag_name: "v16.5.0-fork.3", draft: false, prerelease: false }]),
 		);

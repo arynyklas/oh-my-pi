@@ -27,6 +27,8 @@ export interface GatewayHarnessOptions {
 	models?: MockModel[];
 	credentials?: AuthCredential[];
 	keylessProviders?: string[];
+	/** Routing variants served under their own id but not listed, each cloned from a listed `provider/id`. */
+	variants?: Array<{ model: MockModel; base: string }>;
 }
 
 export function jsonHeaders(token?: string): Record<string, string> {
@@ -57,14 +59,24 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 		modelById.set(`${model.provider}/${model.id}`, model);
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
 	}
+	const variantById = new Map<string, MockModel>();
+	const variantBases = new Map<Model<Api>, Model<Api>>();
+	for (const { model, base } of options.variants ?? []) {
+		const baseModel = modelById.get(base);
+		if (!baseModel) throw new Error(`variant base ${base} is not a harness model`);
+		variantById.set(`${model.provider}/${model.id}`, model);
+		variantById.set(model.id, model);
+		variantBases.set(model, baseModel);
+	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: options.bearerTokens ?? ["legacy-token"],
 		accessStore,
 		storage,
-		resolveModel: id => modelById.get(id)?.model as Model<Api> | undefined,
+		resolveModel: id => (modelById.get(id) ?? variantById.get(id))?.model as Model<Api> | undefined,
 		listModels: () => Array.from(modelById.values()).map(model => model.model),
 		isKeylessModel: model => options.keylessProviders?.includes(model.provider) ?? false,
+		resolveVariantBase: model => variantBases.get(model),
 	});
 	return { tempDir, credentialStore, storage, accessStore, models, handle };
 }

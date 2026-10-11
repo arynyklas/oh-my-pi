@@ -45,7 +45,6 @@ import {
 	type SmitheryCliPollResponse,
 	saveSmitheryApiKey,
 } from "../../mcp/smithery-auth";
-import { SmitheryConnectError } from "../../mcp/smithery-connect";
 import {
 	SmitheryRegistryError,
 	type SmitherySearchResult,
@@ -2492,7 +2491,7 @@ export class MCPCommandController {
 	}
 
 	#getSmitheryErrorStatus(error: unknown): number | undefined {
-		if (error instanceof SmitheryRegistryError || error instanceof SmitheryConnectError) {
+		if (error instanceof SmitheryRegistryError) {
 			return error.status;
 		}
 		return undefined;

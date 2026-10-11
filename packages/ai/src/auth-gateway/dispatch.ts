@@ -44,11 +44,20 @@ export interface AuthGatewayRouteOptions {
 	 */
 	isKeylessModel?: (model: Model<Api>) => boolean;
 	/**
+	 * Catalog model a resolved model was synthesized from, when `resolveModel`
+	 * cloned one under the requested id (an OpenRouter routing variant such as
+	 * `openrouter/<id>:nitro`). Model ACL deny rules on the base also deny the
+	 * variant, so a suffix cannot route around them.
+	 */
+	resolveVariantBase?: (model: Model<Api>) => Model<Api> | undefined;
+	/**
 	 * Per-request credential policy for the authenticated principal, installed
 	 * by the router on a request-scoped clone of these options. Absent on an
 	 * unmanaged gateway, where every request uses the full credential set.
 	 */
 	credentialScope?: GatewayCredentialScope;
+	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
+	excludeProviders?: ReadonlySet<string>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 }
@@ -282,11 +291,12 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  *   to a sibling (usage-limit block vs credential invalidation by error class).
  *
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
- * credential that actually failed. `onResolvedKey` observes every rotation;
- * routes that retain provider session state use it to re-key the account
- * lease, one-shot routes pass `undefined`. Rotation stays inside the
- * principal's pool grant, so a managed user never fails over onto an account
- * their ACL does not reach.
+ * credential that actually failed; a retry context's `previousKey` wins, since
+ * concurrent operations sharing one resolver (split judgment chunks) each know
+ * the bearer they sent. `onResolvedKey` observes every rotation; routes that
+ * retain provider session state use it to re-key the account lease, one-shot
+ * routes pass `undefined`. Rotation stays inside the principal's pool grant, so
+ * a managed user never fails over onto an account their ACL does not reach.
  */
 export function buildGatewayApiKeyResolver(
 	bootOpts: AuthGatewayRouteOptions,
@@ -303,7 +313,7 @@ export function buildGatewayApiKeyResolver(
 	const grant = isCredentialDenial(scoped) ? undefined : scoped.grant;
 	const scopedSessionId = isCredentialDenial(scoped) ? sessionId : scoped.sessionId;
 	let lastKey = initialKey.apiKey;
-	return async ({ lastChance, error, signal }) => {
+	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
@@ -329,7 +339,7 @@ export function buildGatewayApiKeyResolver(
 			model,
 			scopedSessionId,
 			model.provider,
-			lastKey,
+			previousKey ?? lastKey,
 			error,
 			sig,
 			format,

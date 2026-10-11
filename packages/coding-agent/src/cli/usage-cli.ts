@@ -7,16 +7,37 @@
  * credentials produced no usage report are listed too, so the output
  * always covers the full credential pool.
  */
-import type { DisabledCredentialSummary, OAuthAccountIdentity, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	type AuthStorage,
+	type DisabledCredentialSummary,
+	type OAuthAccountIdentity,
+	type ResetCreditRedeemOutcome,
+	resolveCredentialIdentityKey,
+	type UsageHistoryEntry,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
+import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
-import { formatDuration, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { resetAccountLockKey } from "../session/codex-auto-reset";
+import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
+import { errorMessage } from "../slash-commands/helpers/parse";
+import {
+	describeRedeemOutcome,
+	formatResetProviderName,
+	formatResetUsageAccountLine,
+	normalizeResetProvider,
+	oneLine,
+	parseResetUsageTarget,
+	resolveResetUsageTarget,
+	toResetUsageAccount,
+} from "../slash-commands/helpers/reset-usage";
 import {
 	collectStoredAccounts,
 	collectUnreportedAccounts,
@@ -26,12 +47,14 @@ import {
 import {
 	computeProviderWindowStats,
 	formatProviderName,
+	formatQualifiedIdentity,
 	formatUsageBreakdown,
 	isActionableDisable,
 	type LimitStatus,
 	type ProviderWindowStat,
 	STATUS_COLOR,
 	type UsagePolicyDiagnosticsOptions,
+	type UsageResetExpiryOptions,
 } from "../utils/usage-format";
 
 import { cfgRetryUsageReservePct } from "../session/settings";
@@ -42,10 +65,12 @@ export interface UsageCommandArgs {
 	action?: string;
 	json?: boolean;
 	provider?: string;
+	/** `<provider>/<credential id>` saved reset to spend (with the `reset` action). */
+	target?: string;
 	redact?: boolean;
 	/** Show recorded usage-limit history instead of a live snapshot. */
 	history?: boolean;
-	/** History window in days (with `history`). */
+	/** History window in days (with `history` or the `clients` action). */
 	days?: number;
 	/** CLI `-e <path>` extension paths to load before fetching live reports. */
 	extensions?: string[];
@@ -183,6 +208,10 @@ interface HistorySeries {
 
 interface HistoryAccount {
 	label: string;
+	provider: string;
+	email?: string;
+	accountId?: string;
+	recordedAt: number;
 	series: Map<string, HistorySeries>;
 }
 
@@ -196,8 +225,25 @@ function historySeriesTitle(entry: UsageHistoryEntry): string {
 	return `${label} (${windowLabel})`;
 }
 
-function historyAccountLabel(entry: UsageHistoryEntry): string {
-	return entry.email ?? entry.accountId ?? entry.accountKey;
+function historyAccount(entry: UsageHistoryEntry): HistoryAccount {
+	return {
+		label: entry.email ?? entry.accountId ?? entry.accountKey,
+		provider: entry.provider,
+		email: entry.email,
+		accountId: entry.accountId,
+		recordedAt: entry.recordedAt,
+		series: new Map(),
+	};
+}
+
+/** Identity stand-in so same-email accounts get the main view's qualifier. */
+function historyIdentityReport(account: HistoryAccount): UsageReport {
+	return {
+		provider: account.provider,
+		fetchedAt: account.recordedAt,
+		limits: [],
+		metadata: { email: account.email, accountId: account.accountId },
+	};
 }
 
 function historyStatus(fraction: number | undefined, status: UsageHistoryEntry["status"]): LimitStatus {
@@ -231,7 +277,7 @@ function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, n
 }
 
 /** Identity strings a history rendering could surface — input for {@link buildRedactionMap}. */
-function collectHistoryIdentityStrings(entries: UsageHistoryEntry[]): string[] {
+export function collectHistoryIdentityStrings(entries: UsageHistoryEntry[]): string[] {
 	const values: string[] = [];
 	for (const entry of entries) {
 		if (entry.email) values.push(entry.email);
@@ -260,7 +306,7 @@ export function formatUsageHistory(
 		}
 		let account = accounts.get(entry.accountKey);
 		if (!account) {
-			account = { label: historyAccountLabel(entry), series: new Map() };
+			account = historyAccount(entry);
 			accounts.set(entry.accountKey, account);
 		}
 		let series = account.series.get(entry.limitId);
@@ -285,8 +331,12 @@ export function formatUsageHistory(
 			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accounts.size} ${accounts.size === 1 ? "account" : "accounts"}`)}`,
 		);
 		const sortedAccounts = [...accounts.values()].sort((a, b) => a.label.localeCompare(b.label));
-		for (const account of sortedAccounts) {
-			lines.push(`  ${chalk.bold(redaction?.get(account.label) ?? account.label)}`);
+		const reports = provider === "openai-codex" ? sortedAccounts.map(historyIdentityReport) : undefined;
+		for (const [index, account] of sortedAccounts.entries()) {
+			const identity = reports
+				? formatQualifiedIdentity(reports[index], reports, account.label, redaction)
+				: chalk.bold(redaction?.get(account.label) ?? account.label);
+			lines.push(`  ${identity}`);
 			const labelWidth = [...account.series.values()].reduce((max, series) => Math.max(max, series.title.length), 0);
 			const sortedSeries = [...account.series.values()].sort((a, b) => a.title.localeCompare(b.title));
 			for (const series of sortedSeries) {
@@ -309,6 +359,45 @@ export function formatUsageHistory(
 	}
 
 	return lines.join("\n");
+}
+
+/**
+ * Load extension usage providers and refresh broker credentials, so usage
+ * lookups see every provider and account the live session would.
+ */
+async function loadUsageSources(
+	cmd: UsageCommandArgs,
+	settings: Settings,
+	authStorage: AuthStorage,
+): Promise<ModelRegistry> {
+	const modelRegistry = new ModelRegistry(authStorage);
+	// Extensions contribute usage providers via `registerProvider(name, { usage })`;
+	// without loading them their accounts land in `accountsWithoutUsage`.
+	await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
+		additionalExtensionPaths: cmd.extensions,
+		disableExtensionDiscovery: cmd.noExtensions,
+		includeAmbientHooks: false,
+		discoverModels: false,
+	});
+	// The broker may serve reports for credentials newer than the local
+	// snapshot. Refresh before probing extension providers with local keys
+	// and before labeling accounts; offline brokers keep the cached snapshot.
+	try {
+		await authStorage.credentials.revalidate();
+	} catch {
+		// Stale identities beat no output.
+	}
+	return modelRegistry;
+}
+
+/** Name the providers that do hold credentials so a mistyped `--provider` id is easy to correct. */
+function formatNoProviderCredentials(provider: string, storedAccounts: UsageAccountIdentity[]): string {
+	const stored = [...new Set(storedAccounts.map(account => account.provider))].sort();
+	const hint =
+		stored.length > 0
+			? `Providers with stored credentials: ${stored.join(", ")}.`
+			: "Run `omp` and use /login to add accounts.";
+	return `No credentials stored for provider "${provider}". ${hint}\n`;
 }
 
 /** Apply a redaction mask to an optional identity field. */
@@ -413,6 +502,265 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 	}
 	return lines.join("\n");
 }
+/** The configured auth broker's client, or undefined when this machine reads its own store. */
+async function resolveBrokerClient(): Promise<AuthBrokerClient | undefined> {
+	const config = await resolveAuthBrokerConfig();
+	return config ? new AuthBrokerClient({ url: config.url, token: config.token }) : undefined;
+}
+
+/** One OAuth account as `omp usage accounts` lists it. */
+interface OAuthIdentityKeyRow {
+	provider: string;
+	/** `null` when the credential carries no account identity, so no pool can name it. */
+	identityKey: string | null;
+	/** Organization or workspace display name, when the provider reports one. */
+	orgName?: string;
+}
+
+/**
+ * Every OAuth account this process sees (after any broker account pool), with
+ * the identity key that `task.agentAccountPools`, `sessions.restrict`, and
+ * broker account pools match. Only the provider, the key, and the
+ * organization's display name leave each credential; tokens never do.
+ */
+function collectOAuthIdentityKeys(authStorage: AuthStorage, provider: string | undefined): OAuthIdentityKeyRow[] {
+	const rows: OAuthIdentityKeyRow[] = [];
+	for (const { provider: rowProvider, credential } of authStorage.credentials.list(provider)) {
+		if (credential.type !== "oauth") continue;
+		const identityKey = resolveCredentialIdentityKey(rowProvider, credential);
+		rows.push(
+			credential.orgName
+				? { provider: rowProvider, identityKey, orgName: credential.orgName }
+				: { provider: rowProvider, identityKey },
+		);
+	}
+	return rows;
+}
+
+/** Render {@link collectOAuthIdentityKeys} rows grouped under their provider, one key per line. */
+function formatOAuthIdentityKeys(rows: readonly OAuthIdentityKeyRow[]): string {
+	const width = Math.max(...rows.map(row => row.identityKey?.length ?? 0));
+	const lines: string[] = [];
+	let provider: string | undefined;
+	for (const row of rows) {
+		if (row.provider !== provider) {
+			provider = row.provider;
+			lines.push(chalk.bold(provider));
+		}
+		if (row.identityKey === null) {
+			lines.push(chalk.dim("  (no identity key: no pool can name this account)"));
+			continue;
+		}
+		const orgName = row.orgName ? sanitizeText(row.orgName.replace(/[\r\n\t]+/g, " ")) : undefined;
+		lines.push(orgName ? `  ${row.identityKey.padEnd(width)}  ${chalk.dim(orgName)}` : `  ${row.identityKey}`);
+	}
+	return lines.join("\n");
+}
+
+const RESET_COMMAND = "omp usage reset";
+
+function failUsageReset(message: string): void {
+	process.stderr.write(chalk.red(`${message}\n`));
+	process.exitCode = 1;
+}
+
+/**
+ * Mask each identity wherever it appears inside free text (`--redact`):
+ * its stored spelling or its lowercase form, case-insensitively, in one pass so
+ * a mask is never matched again; the longest identity wins an overlap.
+ */
+function identityTextMasker(redaction: Map<string, string>): (text: string) => string {
+	if (redaction.size === 0) return text => text;
+	const byLowerCase = new Map([...redaction].map(([value, mask]) => [value.toLowerCase(), mask]));
+	const pattern = new RegExp(
+		[...new Set([...redaction.keys(), ...byLowerCase.keys()])]
+			.sort((a, b) => b.length - a.length)
+			.map(value => RegExp.escape(value))
+			.join("|"),
+		"gi",
+	);
+	return text => text.replace(pattern, value => redaction.get(value) ?? byLowerCase.get(value.toLowerCase()) ?? value);
+}
+
+/**
+ * `omp usage reset [<provider>/<credential id>]`: list every stored Codex and
+ * Claude account's saved resets, or spend one on the named account. Both run in
+ * this process with the store's tokens, so a broker client works like the host.
+ */
+async function runUsageResetCommand(
+	cmd: UsageCommandArgs,
+	settings: Settings,
+	authStorage: AuthStorage,
+): Promise<void> {
+	let providers = ["openai-codex", "anthropic"];
+	if (cmd.target) {
+		const target = parseResetUsageTarget(cmd.target, RESET_COMMAND);
+		if ("error" in target) {
+			failUsageReset(target.error);
+			return;
+		}
+		if (target.account === "active") {
+			failUsageReset(
+				`\`${RESET_COMMAND}\` runs outside a session, so no account is active. Name one by the credential id \`${RESET_COMMAND}\` lists.`,
+			);
+			return;
+		}
+		providers = [target.provider];
+	} else if (cmd.provider) {
+		const provider = normalizeResetProvider(cmd.provider);
+		if (!provider) {
+			failUsageReset(
+				"Saved resets exist only for Codex and Claude accounts. Use --provider openai-codex or anthropic.",
+			);
+			return;
+		}
+		providers = [provider];
+	}
+	const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
+	const baseUrlResolver = (provider: string) => modelRegistry.getProviderBaseUrl(provider);
+	// Codex's listing requests carry no timeout of their own (Claude's discovery
+	// bounds each request), so a stalled endpoint cannot hang a script.
+	const statuses = (
+		await Promise.all(
+			providers.map(provider =>
+				authStorage.resets.list({
+					provider,
+					baseUrlResolver,
+					signal: provider === "openai-codex" ? AbortSignal.timeout(10_000) : undefined,
+				}),
+			),
+		)
+	).flat();
+	const redaction = cmd.redact
+		? buildRedactionMap(
+				statuses.flatMap(status =>
+					[status.email, status.accountId, status.orgId, status.orgName].filter(
+						(value): value is string => !!value,
+					),
+				),
+			)
+		: new Map<string, string>();
+	const maskText = identityTextMasker(redaction);
+	const maskOptionalText = (text: string | undefined) => (text === undefined ? undefined : maskText(text));
+	// Rows are built and judged from the stored statuses; `--redact` then masks only
+	// what is printed (identities and provider free text such as credit titles,
+	// reasons and errors), so provider, credential and credit ids stay canonical.
+	const accounts = statuses.map(status => {
+		const account = toResetUsageAccount(status);
+		return {
+			...account,
+			label: maskText(account.label),
+			error: maskOptionalText(account.error),
+			unavailableReason: maskOptionalText(account.unavailableReason),
+		};
+	});
+
+	if (!cmd.target) {
+		if (cmd.json) {
+			const rows = statuses.map((status, index) => {
+				const account = accounts[index];
+				return {
+					provider: status.provider,
+					credentialId: status.credentialId,
+					email: maskIdentity(redaction, status.email),
+					accountId: maskIdentity(redaction, status.accountId),
+					orgId: maskIdentity(redaction, status.orgId),
+					orgName: maskIdentity(redaction, status.orgName),
+					availableCount: account.availableCount,
+					redeemableCount: account.redeemableCount,
+					nextCreditId: status.nextCreditId,
+					soonestExpiry: account.expiresAt,
+					unavailableReason: account.unavailableReason,
+					error: account.error,
+					// Typed credit fields only, so untyped provider text never reaches the output.
+					credits: status.credits.map(credit => ({
+						id: credit.id,
+						title: maskOptionalText(credit.title),
+						program: credit.program,
+						status: credit.status,
+						remainingCount: credit.remainingCount,
+						usable: credit.usable,
+						requiresLimit: credit.requiresLimit,
+						clears: credit.clears,
+						blocking: credit.blocking,
+						usedFractions: credit.usedFractions,
+						grantedAt: credit.grantedAt,
+						expiresAt: credit.expiresAt,
+					})),
+				};
+			});
+			process.stdout.write(`${JSON.stringify({ generatedAt: Date.now(), accounts: rows }, null, 2)}\n`);
+			return;
+		}
+		if (accounts.length === 0) {
+			const names = providers.map(formatResetProviderName).join(" or ");
+			process.stderr.write(chalk.yellow(`No ${names} accounts found. Run \`omp\` and use /login to add one.\n`));
+			process.exitCode = 1;
+			return;
+		}
+		const lines = ["Saved rate-limit resets:", ...accounts.map(formatResetUsageAccountLine)];
+		lines.push("", `Spend one with \`${RESET_COMMAND} <provider>/<credential id>\`.`);
+		process.stdout.write(`${lines.join("\n")}\n`);
+		return;
+	}
+
+	const resolved = resolveResetUsageTarget(accounts, cmd.target, RESET_COMMAND);
+	if ("error" in resolved) {
+		failUsageReset(resolved.error);
+		return;
+	}
+	const { label, provider, availableCount, target } = resolved.account;
+	const who = `${oneLine(label)} (${formatResetProviderName(provider)})`;
+	const lockKey = resetAccountLockKey(target);
+	if (!lockKey) {
+		failUsageReset(
+			`${who}: this login stores no account id or email to fence the spend against other omp processes, so nothing was spent. Run \`omp\` and use /login to sign in to it again.`,
+		);
+		return;
+	}
+	// The fence a session's automatic spend takes: neither spends while the
+	// other's attempt is in flight or within a minute of it.
+	const result = await withResetFence<ResetCreditRedeemOutcome | ResetMarker>(
+		resetLockPath(lockKey),
+		async marker => marker,
+		async markedRedeem => {
+			if (provider === "openai-codex") {
+				const live = await authStorage.resets.list({
+					provider,
+					baseUrlResolver,
+					signal: AbortSignal.timeout(10_000),
+				});
+				const balance = checkCodexBalance(live, target.credentialId, availableCount);
+				if (balance) return { ok: false, code: balance === "spent" ? "offer_changed" : balance, provider };
+			}
+			const { outcome } = await markedRedeem(async () => {
+				try {
+					// Bounded like the session executor's redeem: the fence is held until it settles.
+					return await authStorage.resets.redeem({ target, baseUrlResolver, signal: AbortSignal.timeout(15_000) });
+				} catch (error) {
+					// A transport failure can land after the provider applied the reset.
+					return { ok: false, code: "network_error", provider, reason: errorMessage(error) };
+				}
+			});
+			return outcome;
+		},
+	);
+	if ("state" in result) {
+		const ago = formatDuration(Date.now() - result.atMs);
+		failUsageReset(
+			result.state === "reset"
+				? `${who}: another omp process spent a saved reset on this account ${ago} ago, so this one was not spent. Check \`omp usage\` before spending another.`
+				: `${who}: another omp process started spending a saved reset on this account ${ago} ago, so nothing was spent. Try again in a minute.`,
+		);
+		return;
+	}
+	const message = oneLine(describeRedeemOutcome({ ...result, reason: maskOptionalText(result.reason) }, label));
+	if (result.ok) {
+		process.stdout.write(`${message}\n`);
+	} else {
+		failUsageReset(message);
+	}
+}
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
@@ -420,6 +768,20 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
+			if (provider) {
+				// Usage providers registered by extensions and broker credentials newer than
+				// the cached snapshot count too, so load both before rejecting the id.
+				await loadUsageSources(cmd, settings, authStorage);
+				const storedAccounts = collectStoredAccounts(authStorage);
+				const known =
+					authStorage.usage.providerFor(provider) !== undefined ||
+					storedAccounts.some(account => account.provider.toLowerCase() === provider);
+				if (!known) {
+					process.stderr.write(chalk.yellow(formatNoProviderCredentials(provider, storedAccounts)));
+					process.exitCode = 1;
+					return;
+				}
+			}
 			await authStorage.usage.invalidate(provider);
 			if (provider) {
 				process.stdout.write(`Invalidated cached usage reports for provider "${provider}".\n`);
@@ -428,20 +790,54 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			}
 			return;
 		}
+		if (cmd.action === "accounts") {
+			if (cmd.redact) {
+				process.stderr.write(
+					chalk.red(
+						"`omp usage accounts` prints identity keys verbatim for configuration; --redact does not apply.\n",
+					),
+				);
+				process.exitCode = 1;
+				return;
+			}
+			// The listed keys get pasted into task.agentAccountPools, so read the
+			// broker's current accounts, not a cached snapshot; offline brokers
+			// keep the snapshot.
+			try {
+				await authStorage.credentials.revalidate();
+			} catch {
+				// Stale identities beat no output.
+			}
+			const rows = collectOAuthIdentityKeys(authStorage, cmd.provider?.toLowerCase());
+			if (cmd.json) {
+				process.stdout.write(`${JSON.stringify({ accounts: rows }, null, 2)}\n`);
+				return;
+			}
+			if (rows.length === 0) {
+				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+				process.stderr.write(
+					chalk.yellow(`No OAuth accounts found${scope}. Run \`omp\` and use /login to add accounts.\n`),
+				);
+				process.exitCode = 1;
+				return;
+			}
+			process.stdout.write(`${formatOAuthIdentityKeys(rows)}\n`);
+			return;
+		}
+		if (cmd.action === "reset") {
+			await runUsageResetCommand(cmd, settings, authStorage);
+			return;
+		}
 		if (cmd.action === "clients") {
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
 			// Prefer the broker's fleet-wide record; fall back to the local agent
 			// DB, which has rows only when this machine hosts the broker.
-			const brokerConfig = await resolveAuthBrokerConfig();
-			let clients: ClientUsageClientSummary[];
-			if (brokerConfig) {
-				const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
-				clients = (await client.fetchClientUsageSummary({ sinceMs })).clients;
-			} else {
-				clients = authStorage.usage.clientSummary(sinceMs).clients;
-			}
+			const broker = await resolveBrokerClient();
+			const clients = broker
+				? (await broker.fetchClientUsageSummary({ sinceMs })).clients
+				: authStorage.usage.clientSummary(sinceMs).clients;
 			if (cmd.json) {
 				process.stdout.write(`${JSON.stringify({ generatedAt: nowMs, sinceMs, clients }, null, 2)}\n`);
 				return;
@@ -462,7 +858,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
 			const nowMs = Date.now();
 			const sinceMs = nowMs - days * 86_400_000;
-			const entries = authStorage.usage.history({ sinceMs, provider: cmd.provider?.toLowerCase() });
+			const provider = cmd.provider?.toLowerCase();
+			// The broker host records every upstream usage fetch; a broker client's own store holds none.
+			const broker = await resolveBrokerClient();
+			const entries = broker
+				? (await broker.fetchUsageHistory({ sinceMs, provider })).entries
+				: authStorage.usage.history({ sinceMs, provider });
 			const redaction = cmd.redact ? buildRedactionMap(collectHistoryIdentityStrings(entries)) : undefined;
 			if (cmd.json) {
 				const masked = redaction
@@ -493,23 +894,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
-		const modelRegistry = new ModelRegistry(authStorage);
-		// Extensions contribute usage providers via `registerProvider(name, { usage })`;
-		// without loading them their accounts land in `accountsWithoutUsage`.
-		await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
-			additionalExtensionPaths: cmd.extensions,
-			disableExtensionDiscovery: cmd.noExtensions,
-			includeAmbientHooks: false,
-			discoverModels: false,
-		});
-		// The broker may serve reports for credentials newer than the local
-		// snapshot. Refresh before probing extension providers with local keys
-		// and before labeling accounts; offline brokers keep the cached snapshot.
-		try {
-			await authStorage.credentials.revalidate();
-		} catch {
-			// Stale identities beat no output.
-		}
+		const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
 		const reports =
 			(await authStorage.usage.reports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
@@ -586,13 +971,17 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 
 		if (filteredReports.length === 0 && accounts.length === 0) {
-			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
-			// Credentials exist but every one is for a provider without a usage
-			// endpoint — say so rather than implying nothing is logged in.
-			const message =
-				storedAccounts.length > 0
-					? `No usage data${scope}. Stored credentials are for providers without a usage endpoint.\n`
-					: `No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`;
+			// An explicit --provider keeps every stored account of that provider, so
+			// reaching here with one means none is stored for it. Without one,
+			// credentials may exist only for providers without a usage endpoint.
+			let message: string;
+			if (cmd.provider) {
+				message = formatNoProviderCredentials(cmd.provider, storedAccounts);
+			} else if (storedAccounts.length > 0) {
+				message = "No usage data. Stored credentials are for providers without a usage endpoint.\n";
+			} else {
+				message = "No credentials found. Run `omp` and use /login to add accounts.\n";
+			}
 			process.stderr.write(chalk.yellow(message));
 			process.exitCode = 1;
 			return;
@@ -617,9 +1006,19 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const label = formatActiveAccountLabel(maskedIdentity);
 			if (label) defaultAccountLabels.set(provider, label);
 		}
+		const resetOptions: UsageResetExpiryOptions = {
+			settings,
+			accounts: provider => authStorage.oauth.accounts(provider),
+		};
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, defaultAccountLabels)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions, defaultAccountLabels)}\n`,
 		);
+	} catch (error) {
+		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or
+		// pre-endpoint broker; report one line instead of a stack dump.
+		if (!(error instanceof AuthBrokerError)) throw error;
+		process.stderr.write(`${chalk.red(`Error: auth broker request failed: ${error.message}`)}\n`);
+		process.exitCode = 1;
 	} finally {
 		authStorage.close();
 	}

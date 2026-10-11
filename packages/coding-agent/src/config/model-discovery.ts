@@ -958,7 +958,7 @@ export async function discoverOpenAIModelsList(
 		: await attempt(baseHeaders);
 	const models = payload.data ?? [];
 	const references = getBundledModelReferenceIndex();
-	const discovered: Model<Api>[] = [];
+	const specs: ModelSpec<Api>[] = [];
 	for (const item of models) {
 		const id = item.id;
 		if (!id) continue;
@@ -1005,25 +1005,23 @@ export async function discoverOpenAIModelsList(
 		// cannot serve (issue #13021).
 		const task = extractOpenAIModelsListOutputTask(item);
 		if (task) {
-			discovered.push(
-				buildModel({
-					id,
-					name: reference?.name ?? id,
-					api: task.api,
-					kind: task.kind,
-					provider: providerConfig.provider,
-					baseUrl,
-					reasoning: false,
-					input,
-					supportsTools: false,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					// Embeddings cap their input by context; image jobs carry no
-					// token window. Neither produces output tokens.
-					contextWindow: task.kind === "embedding" ? reportedContextWindow : null,
-					maxTokens: null,
-					headers,
-				} as ModelSpec<Api>),
-			);
+			specs.push({
+				id,
+				name: reference?.name ?? id,
+				api: task.api,
+				kind: task.kind,
+				provider: providerConfig.provider,
+				baseUrl,
+				reasoning: false,
+				input,
+				supportsTools: false,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				// Embeddings cap their input by context; image jobs carry no
+				// token window. Neither produces output tokens.
+				contextWindow: task.kind === "embedding" ? reportedContextWindow : null,
+				maxTokens: null,
+				headers,
+			} as ModelSpec<Api>);
 			continue;
 		}
 		const api =
@@ -1065,9 +1063,12 @@ export async function discoverOpenAIModelsList(
 			},
 		} as ModelSpec<Api>;
 		const ladder = parseAdvertisedEffortLadder(item);
-		discovered.push(buildModel(ladder ? withAdvertisedEffortLadder(spec, ladder) : spec));
+		specs.push(ladder ? withAdvertisedEffortLadder(spec, ladder) : spec);
 	}
-	return discovered;
+	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
+	return providerConfig.discovery.type === "litellm"
+		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
+		: specs.map(spec => buildModel(spec));
 }
 
 export async function discoverLiteLLMModels(
@@ -1124,7 +1125,7 @@ export async function discoverLiteLLMModels(
 	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
-	return richModels.map(spec => buildModel({ ...spec, headers }));
+	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers }, "litellm"));
 }
 
 /**

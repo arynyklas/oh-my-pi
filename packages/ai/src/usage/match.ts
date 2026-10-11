@@ -91,9 +91,14 @@ function scopeUsageReportCandidates(
 		};
 	}
 	const orgless = candidates.filter(report => normalizedReportOrgIds(report).length === 0);
+	// The sole report stands in for an identity it shares no identity field
+	// with; otherwise exact matching decides, because a report naming another
+	// email, account or project is a sibling's pool whose fetch succeeded where
+	// this identity's failed.
 	return {
 		candidates: orgless,
-		allowLoneFallback: candidates.length === 1 && orgless.length === 1,
+		allowLoneFallback:
+			candidates.length === 1 && orgless.length === 1 && !reportHasComparableIdentity(orgless[0]!, identity),
 	};
 }
 
@@ -199,6 +204,15 @@ function reportHasProjectConflict(report: UsageReport, projectId: string | undef
 function reportHasEmailConflict(report: UsageReport, email: string | undefined): boolean {
 	const emails = normalizedReportEmails(report);
 	return email !== undefined && emails.length > 0 && !emails.includes(email);
+}
+
+/** Whether the report names an email, account or project the identity can compare against. */
+function reportHasComparableIdentity(report: UsageReport, identity: UsageReportIdentity): boolean {
+	if (normalizeIdentity(identity.email) !== undefined && normalizedReportEmails(report).length > 0) return true;
+	if (normalizeIdentity(identity.accountId) !== undefined && normalizedReportAccountIds(report).length > 0) {
+		return true;
+	}
+	return normalizeIdentity(identity.projectId) !== undefined && normalizedReportProjectIds(report).length > 0;
 }
 
 function normalizedReportOrgIds(report: UsageReport): string[] {

@@ -52,10 +52,14 @@ import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { runAuthGatewayTui } from "../auth-gateway/run-tui";
 import { ModelRegistry } from "../config/model-registry";
+import { cfgDisabledProviders } from "../config/model-settings";
+import { resolveOpenRouterVariantBase, resolveProviderModelReference } from "../config/model-resolver";
+import type { Settings } from "../config/settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
+	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
 import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
@@ -113,6 +117,8 @@ export interface AuthGatewayModelIndex {
 	resolveModel(modelId: string): Model<Api> | undefined;
 	listModels(): Iterable<Model<Api>>;
 	isKeylessModel(model: Model<Api>): boolean;
+	/** Catalog model a resolved routing variant was cloned from; undefined for catalog models. */
+	resolveVariantBase(model: Model<Api>): Model<Api> | undefined;
 }
 
 export function buildAuthGatewayModelIndex(modelRegistry: ModelRegistry): AuthGatewayModelIndex {
@@ -127,10 +133,21 @@ export function buildAuthGatewayModelIndex(modelRegistry: ModelRegistry): AuthGa
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
 		if (keylessProvider) keylessProviders.add(model.provider);
 	}
+	const listed = new Set(models);
+	// `models` keeps one identity per index build: `resolveProviderModelReference` caches its
+	// lookup on the array, so OpenRouter variant selectors stay O(1) until the next rebuild.
+	const resolveVariantBase = (model: Model<Api>): Model<Api> | undefined =>
+		listed.has(model) ? undefined : resolveOpenRouterVariantBase(model.id, models);
 	return {
-		resolveModel: (modelId: string) => modelById.get(modelId),
+		resolveModel: (modelId: string) => {
+			const model = resolveGatewayModel(modelId, modelById, models);
+			// A variant clone is only served while it can be attributed to its catalog
+			// model, whose model ACL deny rules the router applies to it as well.
+			return model && !listed.has(model) && !resolveVariantBase(model) ? undefined : model;
+		},
 		listModels: () => models,
 		isKeylessModel: (model: Model<Api>) => keylessProviders.has(model.provider),
+		resolveVariantBase,
 	};
 }
 
@@ -295,6 +312,19 @@ export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {
 }
 
 /**
+ * Providers the broker holds a credential for, minus `disabledProviders`. Recomputed on
+ * every rebuild so a later login or logout reaches the served catalog.
+ */
+export function gatewayRoutableProviders(storage: AuthStorage, settings: Settings): Set<string> {
+	const disabled = new Set(cfgDisabledProviders.get(settings));
+	const providers = new Set<string>();
+	for (const entry of storage.credentials.snapshot().credentials) {
+		if (!disabled.has(entry.provider)) providers.add(entry.provider);
+	}
+	return providers;
+}
+
+/**
  * Index resolvable models by the request ids clients may send: the
  * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
  * fallback for legacy clients). Scoped to providers the gateway holds broker
@@ -311,6 +341,25 @@ export function indexModelsByRequestId(
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
 	}
 	return modelById;
+}
+
+/**
+ * Resolve a client-requested model id: the exact `provider/id` or bare `id` first, then an
+ * OpenRouter routing-variant selector the catalog does not list (`openrouter/<id>:floor`,
+ * `:nitro`, …), cloned from its base model under the requested id so the suffix reaches
+ * OpenRouter — the same selectors `--model` accepts.
+ */
+export function resolveGatewayModel(
+	id: string,
+	modelById: ReadonlyMap<string, Model<Api>>,
+	routable: readonly Model<Api>[],
+): Model<Api> | undefined {
+	const exact = modelById.get(id);
+	if (exact) return exact;
+	const prefix = "openrouter/";
+	return id.startsWith(prefix)
+		? resolveProviderModelReference("openrouter", id.slice(prefix.length), routable)
+		: undefined;
 }
 
 /**
@@ -363,7 +412,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 		// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 		// in sdk.ts. The gateway never touches local SQLite for provider secrets.
 		const accountPool = await loadAuthBrokerAccountPool();
-		const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig();
+		const settings = await resolveEffectiveSettings();
+		const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 		const client = createBrokerClient(brokerConfig);
 		const initialSnapshot = await fetchBrokerSnapshot(client);
 		const store = new RemoteAuthCredentialStore({ client, initialSnapshot, accountPool });
@@ -379,8 +429,10 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 
 		// Use the same registry contract as the interactive agent: bundled
 		// credentialed providers, custom `models.yml` providers, cached
-		// discoveries, and explicit `auth: none` self-hosted models.
-		const modelRegistry = new ModelRegistry(storage);
+		// discoveries, and explicit `auth: none` self-hosted models. `settings`
+		// carries `disabledProviders`, so discovery and the served catalog skip
+		// disabled providers too.
+		const modelRegistry = new ModelRegistry(storage, undefined, { settings });
 		await modelRegistry.refresh("online-if-uncached");
 		let modelIndex = buildAuthGatewayModelIndex(modelRegistry);
 		// Rebuild the served catalog (a `modelRegistry.refresh()` pass, then
@@ -405,6 +457,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"], deps?: AuthGatew
 			resolveModel: (modelId: string) => modelIndex.resolveModel(modelId),
 			listModels: () => modelIndex.listModels(),
 			isKeylessModel: (model: Model<Api>) => modelIndex.isKeylessModel(model),
+			resolveVariantBase: (model: Model<Api>) => modelIndex.resolveVariantBase(model),
+			excludeProviders: new Set(cfgDisabledProviders.get(settings)),
 		});
 		process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 		if (gatewayToken) {
@@ -1433,7 +1487,8 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}
 
 	const accountPool = await loadAuthBrokerAccountPool();
-	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig();
+	const settings = await resolveEffectiveSettings();
+	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
 	const store = new RemoteAuthCredentialStore({
@@ -1448,11 +1503,12 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	try {
 		await storage.credentials.reload();
-		const results = await storage.health.check(
-			flags.strict
+		const results = await storage.health.check({
+			excludeProviders: new Set(cfgDisabledProviders.get(settings)),
+			...(flags.strict
 				? { completionProbe: createStrictCompletionProbe(), completionTimeoutMs: STRICT_PROBE_OVERALL_TIMEOUT_MS }
-				: undefined,
-		);
+				: {}),
+		});
 
 		if (flags.json) {
 			process.stdout.write(

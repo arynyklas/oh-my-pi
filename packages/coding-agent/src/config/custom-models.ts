@@ -6,6 +6,7 @@ import {
 	inheritReferenceThinking,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
+import { runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig, openAIRunnerKind } from "./model-patch";
@@ -84,6 +85,7 @@ export function buildCustomModelOverlay(
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
 		name: modelDef.name,
+		kind: modelDef.kind ?? runnerApiKind(api),
 		reasoning: modelDef.reasoning,
 		thinking: modelDef.thinking,
 		input: modelDef.input,
@@ -131,9 +133,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
-		// Runner APIs only serve their task; a chat kind would hide the model
-		// from its role and offer it to the chat picker instead.
-		...(runnerKind ? { kind: runnerKind } : {}),
+		kindConfig: resolvedModel.kind,
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),

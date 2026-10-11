@@ -122,6 +122,12 @@ export interface AuthGatewayAccessScope {
 	route: AuthGatewayAclRoute;
 	provider?: string;
 	qualifiedModel?: string;
+	/**
+	 * Catalog model `qualifiedModel` was synthesized from (an OpenRouter routing
+	 * variant such as `:nitro` or a dated id). Deny rules on it also deny the
+	 * variant; allow rules still have to match `qualifiedModel` itself.
+	 */
+	baseQualifiedModel?: string;
 }
 
 export type AuthGatewayAccessDecision =
@@ -325,10 +331,13 @@ export function evaluateAuthGatewayAccess(
 	) {
 		return { allowed: false, reason: "provider_denied" };
 	}
+	const deniedModels = [qualifiedModel, scope.baseQualifiedModel];
 	if (
-		qualifiedModel !== undefined &&
 		rules.some(
-			rule => rule.kind === "model" && rule.effect === "deny" && modelPatternMatches(rule.pattern, qualifiedModel),
+			rule =>
+				rule.kind === "model" &&
+				rule.effect === "deny" &&
+				deniedModels.some(model => model !== undefined && modelPatternMatches(rule.pattern, model)),
 		)
 	) {
 		return { allowed: false, reason: "model_denied" };

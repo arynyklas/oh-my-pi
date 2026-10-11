@@ -1,11 +1,14 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { openrouterDecisionsBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { type KindApiKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { apiServesKind, type KindApiKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
+import { SPECIAL_MODEL_MANAGER_PROVIDER_IDS } from "./model-provider-discovery";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
@@ -58,7 +61,9 @@ export function openAIRunnerKind(api: Api): KindApiKind | undefined {
  * own API — a model must never end up pi-native on a catalog upstream host
  * (#2555). Image, speech, and transcription runners never stream over
  * `/v1/pi/stream`; the gateway answers them on its OpenAI-compatible
- * `/v1/<task>` routes, so they get the gateway's `/v1` root instead.
+ * `/v1/<task>` routes, so they get the gateway's `/v1` root instead. An
+ * unscoped override names the OpenRouter `/api/v1` chat root, so Decisions
+ * models move to its `/api/alpha` sibling on the same host.
  */
 export function resolveProviderBaseUrl<TApi extends Api>(
 	modelApi: TApi,
@@ -73,6 +78,9 @@ export function resolveProviderBaseUrl<TApi extends Api>(
 		return override.baseUrl;
 	}
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	if (override.baseUrlApis === undefined && modelApi === "openrouter-decisions") {
+		return openrouterDecisionsBaseUrl(override.baseUrl);
+	}
 	return override.baseUrl;
 }
 
@@ -116,7 +124,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
 			headers: undefined,
@@ -139,9 +147,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	if (providerOverride) {
-		return buildModel({
+		const merged = buildModel({
 			...toModelSpec(model),
 			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
 			headers: undefined,
@@ -156,13 +165,15 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			),
 			compat: mergeCompat(model.compatConfig, providerOverride.compat),
 		} as ModelSpec<TApi>);
+		return Bun.deepEquals(merged, model) ? model : merged;
 	}
 	return model;
 }
 
+/** Built-in providers whose KDL entry makes a successful runtime roster replace bundled chat models. */
 export const AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS = new Set<string>(
-	PROVIDER_DESCRIPTORS.filter(descriptor => descriptor.dynamicModelsAuthoritative).map(
-		descriptor => descriptor.providerId,
+	[...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId), ...SPECIAL_MODEL_MANAGER_PROVIDER_IDS].filter(
+		providerId => providerEntry(providerId)?.dynamicModelsAuthoritative === true,
 	),
 );
 
@@ -262,6 +273,8 @@ export function mergeProviderRemoteCompactionConfig(
 export interface ModelPatch {
 	requestModelId?: string;
 	name?: string;
+	api?: Api;
+	kind?: ModelKind;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -298,6 +311,11 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	const result = { ...base };
 	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.api !== undefined) result.api = patch.api;
+	if (patch.kind !== undefined) {
+		result.kind = patch.kind;
+		result.kindConfig = patch.kind;
+	}
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
@@ -342,11 +360,20 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
-		// A same-id definition that omits a lifetime must not carry the previous
-		// route's catalog policy; buildModel reapplies policy for the new route.
+		// A same-id definition that omits a lifetime or kind must not carry the
+		// previous route's configuration; buildModel reapplies policy for the new route.
 		if (patch.promptCache === undefined) {
 			delete result.promptCache;
 			delete result.promptCacheConfig;
+		}
+		if (patch.kind === undefined) {
+			delete result.kindConfig;
+			// The base row's kind came with its old api; keep it only if the new api serves it.
+			const kind = kindOnApi(result, result.api);
+			if (kind !== undefined) {
+				result.kind = kind;
+				result.kindConfig = kind;
+			}
 		}
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
@@ -367,6 +394,38 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	return built;
 }
 
+/**
+ * The explicit `kind` of a `modelOverrides` entry that the api `model` ends up
+ * on does not serve. Config validation only sees apis named in models.yml;
+ * built-in, discovered, and `kind-apis` rows are checked here, against their
+ * resolved api, and the override's kind is ignored.
+ */
+export function unservedOverrideKind(model: Model<Api>, override: ModelOverride): ModelKind | undefined {
+	if (override.kind === undefined) return undefined;
+	return apiServesKind(override.api ?? model.api, override.kind) ? undefined : override.kind;
+}
+
+/**
+ * The kind `model` takes on `api`: a runner api's kind, else `undefined` (keep the
+ * current kind) when `api` serves it, else `chat`.
+ */
+function kindOnApi(model: Model<Api>, api: Api): ModelKind | undefined {
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return runnerKind;
+	return apiServesKind(api, modelKind(model)) ? undefined : "chat";
+}
+
+/**
+ * The kind a `modelOverrides` entry gives `model`; `undefined` leaves it alone.
+ * An explicit kind applies when the api the model ends up on serves it.
+ * Otherwise an `api` change takes a runner api's kind, keeps a kind the new api
+ * still serves, and falls back to `chat`.
+ */
+function overrideKind(model: Model<Api>, override: ModelOverride): ModelKind | undefined {
+	if (override.kind !== undefined && unservedOverrideKind(model, override) === undefined) return override.kind;
+	return override.api === undefined ? undefined : kindOnApi(model, override.api);
+}
+
 export function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<Api> {
-	return applyModelPatch(model, override as ModelPatch, "merge");
+	return applyModelPatch(model, { ...(override as ModelPatch), kind: overrideKind(model, override) }, "merge");
 }

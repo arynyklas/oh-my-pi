@@ -9,7 +9,7 @@ import type {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { SqliteAuthGatewayAccessStore } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { closeModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 import {
 	runAuthGatewayTuiWithDependencies,
@@ -548,6 +548,8 @@ describe("auth-gateway CLI access management", () => {
 			setAgentDir(fallbackAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
+		// writeModelCache under the agent dir opens the shared models.db handle; Windows cannot delete an open database.
+		closeModelCache();
 		Bun.gc(true);
 		if (agentDir) await removeWithRetries(agentDir);
 	});
@@ -634,6 +636,36 @@ describe("auth-gateway CLI access management", () => {
 		} finally {
 			authStorage.close();
 		}
+	});
+
+	test("attributes OpenRouter routing variants it serves to their catalog model", () => {
+		const base = buildModel({
+			id: "vendor/model-x",
+			provider: "openrouter",
+			api: "openai-completions",
+			baseUrl: "https://openrouter.ai/api/v1",
+			name: "Model X",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 8192,
+		});
+		const registry = {
+			getAvailable: (kind: string) => (kind === "chat" ? [base] : []),
+			isKeylessProvider: () => false,
+			isConfiguredModel: () => false,
+		} as unknown as ModelRegistry;
+		const index = buildAuthGatewayModelIndex(registry);
+
+		// The variant is served under its requested id (so the suffix reaches OpenRouter),
+		// and the router applies the catalog model's deny rules through its base.
+		for (const requested of ["openrouter/vendor/model-x:nitro", "openrouter/vendor/model-x-20250101"]) {
+			const variant = index.resolveModel(requested);
+			expect(variant?.id).toBe(requested.slice("openrouter/".length));
+			expect(variant ? index.resolveVariantBase(variant) : undefined).toBe(base);
+		}
+		expect(index.resolveVariantBase(base)).toBeUndefined();
 	});
 
 	test("rejects surplus positionals from direct dispatch before file side effects", async () => {

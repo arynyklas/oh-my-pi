@@ -5,8 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, acquireAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
 import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry/oauth";
@@ -46,10 +46,10 @@ describe("AuthStorage api-key login upsert", () => {
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
 	let authStorage: AuthStorage | null = null;
-	let getEnvApiKeySpy: Mock<typeof aiStream.getEnvApiKey>;
+	let getEnvApiKeySpy: Mock<typeof envApiKey.getEnvApiKey>;
 
 	beforeEach(async () => {
-		getEnvApiKeySpy = vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		getEnvApiKeySpy = vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-api-key-login-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);

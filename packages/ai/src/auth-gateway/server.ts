@@ -56,6 +56,7 @@ import type {
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
+import { resolvePeer } from "../utils/resolve-peer";
 import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
@@ -68,6 +69,8 @@ import {
 	toResolvedApiKey,
 } from "./dispatch";
 import {
+	type AuthGatewayAccessScope,
+	type AuthGatewayAclRoute,
 	type AuthGatewayAuditOutcome,
 	type AuthGatewayPrincipal,
 	type AuthGatewayRouteFamily,
@@ -83,7 +86,6 @@ import {
 	json,
 	readBearerToken,
 	resolveClientIdentity,
-	resolvePeer,
 	timingSafeEqual,
 	withCors,
 } from "./http";
@@ -145,14 +147,19 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
  * bucket and can't trample each other's prefix-tree entries.
  *
  * Anthropic-backed requests ignore `sessionId`; the key is harmless there.
+ *
+ * The derivation MUST stay byte-stable: AuthStorage persists credential pins
+ * under this id, so changing it re-routes every in-flight conversation.
+ * `toolsJson` lets the caller share one `JSON.stringify(context.tools)` with
+ * {@link AuthGatewaySessionStateStore.acquire}.
  */
-function deriveSessionId(modelId: string, context: Context): string {
+function deriveSessionId(modelId: string, context: Context, toolsJson = serializeTools(context)): string {
 	const parts: string[] = [modelId];
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		parts.push(context.systemPrompt.join("\n\n"));
 	}
-	if (context.tools && context.tools.length > 0) {
-		parts.push(JSON.stringify(context.tools));
+	if (toolsJson !== undefined) {
+		parts.push(toolsJson);
 	}
 	const first = context.messages?.[0];
 	if (first) {
@@ -165,6 +172,11 @@ function deriveSessionId(modelId: string, context: Context): string {
 	// The 36-char UUID flows through unchanged:
 	// `normalizeOpenAIPromptCacheKey` accepts ≤64 chars verbatim.
 	return deterministicUuid(seed);
+}
+
+/** `JSON.stringify(context.tools)`, or `undefined` when the request declares none. */
+function serializeTools(context: Context): string | undefined {
+	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
@@ -492,6 +504,21 @@ function buildTerminalCredentialErrorRecovery(
 
 function qualifiedModelId(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
+}
+
+/** ACL scope for a request-resolved model, carrying the catalog model a routing variant was cloned from. */
+function requestModelAccessScope(
+	opts: AuthGatewayRouteOptions,
+	route: AuthGatewayAclRoute,
+	model: Model<Api>,
+): AuthGatewayAccessScope {
+	const base = opts.resolveVariantBase?.(model);
+	return {
+		route,
+		provider: model.provider,
+		qualifiedModel: qualifiedModelId(model),
+		baseQualifiedModel: base ? qualifiedModelId(base) : undefined,
+	};
 }
 
 function resolveGatewayModel(opts: AuthGatewayRouteOptions, id: string): Model<Api> | undefined {
@@ -901,11 +928,7 @@ async function handleFormatEndpoint(
 	let credentialSessionScope = "default";
 	if (isManagedRegular(principal) && bootOpts.accessStore) {
 		const rules = bootOpts.accessStore.listAclRules(principal.userId);
-		const access = evaluateAuthGatewayAccess(principal, rules, {
-			route: routeFamily,
-			provider: model.provider,
-			qualifiedModel: qualifiedModelId(model),
-		});
+		const access = evaluateAuthGatewayAccess(principal, rules, requestModelAccessScope(bootOpts, routeFamily, model));
 		if (!access.allowed) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
@@ -941,7 +964,8 @@ async function handleFormatEndpoint(
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	const storageSessionId = isManagedRegular(principal)
 		? `gateway:${principal.id}:${credentialSessionScope}:${requestSessionId}`
 		: requestSessionId;
@@ -1044,6 +1068,7 @@ async function handleFormatEndpoint(
 		clientKey: clientKey === undefined ? undefined : storageSessionId,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, storageSessionId, activeApiKey),
 	});
 	noteAccountRotation = rotatedKey =>
@@ -1328,7 +1353,8 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const requestSessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = requestSessionId;
 
 	let selection: AuthCredentialSelectionPolicy | undefined;
@@ -1336,11 +1362,7 @@ async function handlePiNative(
 	const exhaustion: PoolExhaustionState = {};
 	if (isManagedRegular(principal) && bootOpts.accessStore) {
 		const rules = bootOpts.accessStore.listAclRules(principal.userId);
-		const access = evaluateAuthGatewayAccess(principal, rules, {
-			route: "pi-native",
-			provider: model.provider,
-			qualifiedModel: qualifiedModelId(model),
-		});
+		const access = evaluateAuthGatewayAccess(principal, rules, requestModelAccessScope(bootOpts, "pi-native", model));
 		if (!access.allowed) {
 			audit?.record("denied_by_acl", 403, zeroUsage(), "denied_by_acl");
 			return gatewayPermissionDenied(route);
@@ -1456,6 +1478,7 @@ async function handlePiNative(
 		clientKey: clientKey === undefined ? undefined : credentialSessionId,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, credentialSessionId, activeApiKey),
 	});
 	noteAccountRotation = rotatedKey =>
@@ -1693,11 +1716,11 @@ async function handlePiNative(
  * surfaces the same data to HTTP callers (notably the macOS usage widget).
  */
 async function handleUsage(
-	storage: AuthStorage,
+	opts: AuthGatewayRouterOptions,
 	req: Request,
 	principal: AuthGatewayPrincipal,
-	accessStore?: AuthGatewayRouterOptions["accessStore"],
 ): Promise<Response> {
+	const { accessStore } = opts;
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "usage", true);
@@ -1716,8 +1739,13 @@ async function handleUsage(
 			},
 		});
 	}
-	const reports = (await storage.usage.reports?.({ signal: req.signal })) ?? [];
-	const trimmed = reports.map(({ raw: _raw, ...rest }) => rest);
+	const reports = (await opts.storage.usage.reports?.({ signal: req.signal })) ?? [];
+	// Drop the heavy provider-specific `raw` payload — UI consumers only need
+	// `limits` + `metadata`. Match the broker's `/v1/usage` shape so a single
+	// client struct (Swift widget, llm-git, ...) works against either endpoint.
+	const trimmed = reports
+		.filter(report => !opts.excludeProviders?.has(report.provider))
+		.map(({ raw: _raw, ...rest }) => rest);
 	return json(200, {
 		generatedAt: Date.now(),
 		principal: {
@@ -1746,12 +1774,23 @@ function readUsageSince(req: Request): number | Response {
 	return since;
 }
 
+/**
+ * Per-credential health probe surfaced on `GET /v1/credentials/check`. Tells
+ * the caller exactly which row in their broker is producing 401s — the
+ * aggregate `/v1/usage` endpoint silently drops failed credentials, which is
+ * the wrong shape when you're diagnosing auth.
+ *
+ * The probe is sequential (one credential at a time) to avoid synchronized
+ * N-account fan-out tripping per-IP rate limits on provider `/usage`
+ * endpoints. For multi-account pools that's the difference between getting
+ * a clean diagnosis and getting a 429 storm.
+ */
 async function handleCredentialsCheck(
-	storage: AuthStorage,
+	opts: AuthGatewayRouterOptions,
 	signal: AbortSignal,
 	principal: AuthGatewayPrincipal,
-	accessStore?: AuthGatewayRouterOptions["accessStore"],
 ): Promise<Response> {
+	const { storage, accessStore, excludeProviders } = opts;
 	if (isManagedRegular(principal) && accessStore) {
 		const rules = accessStore.listAclRules(principal.userId);
 		const access = evaluateAuthGatewayRouteAccess(principal, rules, "check", true);
@@ -1774,6 +1813,7 @@ async function handleCredentialsCheck(
 
 		const eligible = new Set<number>();
 		for (const [provider, liveIds] of liveIdsByProvider) {
+			if (excludeProviders?.has(provider)) continue;
 			const catalogModels = bundledCatalogModelsForProvider(provider);
 			const providerAccess =
 				catalogModels.length > 0
@@ -1792,7 +1832,7 @@ async function handleCredentialsCheck(
 			for (const credentialId of poolSelection.credentialIds) eligible.add(credentialId);
 		}
 
-		const credentials = await storage.health.check({ signal, credentialIds: [...eligible] });
+		const credentials = await storage.health.check({ signal, credentialIds: [...eligible], excludeProviders });
 		const filtered = credentials
 			.slice()
 			.sort((a, b) => a.provider.localeCompare(b.provider) || a.type.localeCompare(b.type) || a.id - b.id);
@@ -1819,7 +1859,7 @@ async function handleCredentialsCheck(
 			}),
 		});
 	}
-	const credentials = await storage.health.check({ signal });
+	const credentials = await storage.health.check({ signal, excludeProviders });
 	return json(200, { generatedAt: Date.now(), credentials });
 }
 
@@ -1921,11 +1961,7 @@ function gatewayCredentialScopeFor(
 			return keyless ? { keyless: true } : {};
 		}
 		const rules = opts.accessStore.listAclRules(principal.userId);
-		const access = evaluateAuthGatewayAccess(principal, rules, {
-			route: aclRoute,
-			provider: model.provider,
-			qualifiedModel: qualifiedModelId(model),
-		});
+		const access = evaluateAuthGatewayAccess(principal, rules, requestModelAccessScope(opts, aclRoute, model));
 		const denied: GatewayErrorClassification = {
 			status: 403,
 			type: "permission_error",
@@ -2115,7 +2151,7 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouterOptions): AuthGat
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 			// same client struct.
 			if (req.method === "GET" && pathname === "/v1/usage") {
-				const response = await handleUsage(opts.storage, req, principal, opts.accessStore);
+				const response = await handleUsage(opts, req, principal);
 				audit?.record(auditOutcomeForStatus(response.status), response.status);
 				return response;
 			}
@@ -2124,7 +2160,7 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouterOptions): AuthGat
 			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
 			// credentials, so we need a separate endpoint that captures errors.
 			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				const response = await handleCredentialsCheck(opts.storage, req.signal, principal, opts.accessStore);
+				const response = await handleCredentialsCheck(opts, req.signal, principal);
 				audit?.record(auditOutcomeForStatus(response.status), response.status);
 				return response;
 			}
