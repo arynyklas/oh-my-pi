@@ -1,16 +1,16 @@
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 7d67ef4..7de9def 100644
+index 4a3d730..50820ca 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
-@@ -36,6 +36,7 @@ import {
+@@ -37,6 +37,7 @@ import {
  import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
  import { processFileArguments } from "./cli/file-processor";
  import { buildInitialMessage } from "./cli/initial-message";
 +import { getLatestReleaseForVersion, isForkVersion } from "./cli/release-info";
  import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
  import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
- import { applyStartupCwd } from "./cli/startup-cwd";
-@@ -230,13 +231,14 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
+ import { fetchBuild } from "./cli/build-service";
+@@ -232,7 +233,7 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
  	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
  }
  
@@ -19,17 +19,21 @@ index 7d67ef4..7de9def 100644
  	if (!cfgStartupCheckUpdate.get(settings)) {
  		return;
  	}
- 	try {
--		const channel = cfgUpdateChannel.get(settings);
--		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
-+		const release = isForkVersion(currentVersion)
-+			? await getLatestReleaseForVersion(currentVersion, 5_000)
-+			: await getLatestRelease({ timeoutMs: 5_000, channel: cfgUpdateChannel.get(settings) });
- 		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
- 	} catch {
- 		return undefined;
+@@ -240,6 +241,12 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+ 		// Checkouts update through git and a manager (Tern) updates its omp itself:
+ 		// "run omp update" would be wrong advice for both.
+ 		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
++		// Fork builds track the fork's GitHub release line, never upstream's
++		// build service or npm.
++		if (isForkVersion(currentVersion)) {
++			const release = await getLatestReleaseForVersion(currentVersion, 5_000);
++			return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
++		}
+ 		const channel = cfgUpdateChannel.get(settings);
+ 		// A compiled binary updates from the build service; naming the running
+ 		// version lets the service prepare the patch `omp update` will then use.
 diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
-index f74f13d..5e83177 100644
+index 3d5a349..8196a54 100644
 --- a/packages/coding-agent/src/modes/controllers/command-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
 @@ -1,6 +1,7 @@
@@ -56,7 +60,7 @@ index f74f13d..5e83177 100644
  import {
  	type Component,
  	Loader,
-@@ -105,6 +115,87 @@ function formatCreditValue(value: number): string {
+@@ -125,6 +135,87 @@ function formatCreditValue(value: number): string {
  	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
  }
  
@@ -141,10 +145,10 @@ index f74f13d..5e83177 100644
 +	return merged;
 +}
 +
- export class CommandController {
- 	/** The open native report sheet. */
- 	#reportSheet: OverlayHandle | undefined;
-@@ -207,6 +298,71 @@ export class CommandController {
+ interface ForkTerminalDependencies {
+ 	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
+ 	environment: () => NodeJS.ProcessEnv;
+@@ -292,6 +383,71 @@ export class CommandController {
  		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
  	}
  
@@ -216,7 +220,7 @@ index f74f13d..5e83177 100644
  	async #restoreAfterMoveFailure(
  		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
  		initialError?: unknown,
-@@ -776,20 +932,39 @@ export class CommandController {
+@@ -869,20 +1025,39 @@ export class CommandController {
  
  	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
  		let usageReports = reports ?? null;
@@ -260,7 +264,7 @@ index f74f13d..5e83177 100644
  	}
  
  	async handleChangelogCommand(args = ""): Promise<void> {
-@@ -2243,6 +2418,7 @@ export function renderUsageReports(
+@@ -2521,6 +2696,7 @@ export function renderUsageReports(
  	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
  	usageModelSelectors: readonly string[] = [],
  	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
@@ -268,7 +272,7 @@ index f74f13d..5e83177 100644
  ): string {
  	const displayReports = collapseSharedUsageReports(reports);
  	const lines: string[] = [];
-@@ -2326,6 +2502,10 @@ ): string {
+@@ -2604,6 +2780,10 @@ export function renderUsageReports(
  		if (activeAccountLabel) {
  			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
  		}
@@ -280,10 +284,10 @@ index f74f13d..5e83177 100644
  		if (reportingModels.length > 0) {
  			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
 diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
-index 47dbcac..0977124 100644
+index efe6207..b458d97 100644
 --- a/packages/coding-agent/src/modes/controllers/event-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
-@@ -51,6 +51,7 @@ import {
+@@ -53,6 +53,7 @@ import {
  import {
  	assistantHasVisibleContent,
  	assistantUsageIsBilled,
@@ -291,7 +295,7 @@ index 47dbcac..0977124 100644
  	splitAssistantMessageToolTimeline,
  } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
  import { isWarpCliAgentProtocolActive } from "../warp-events";
-@@ -213,6 +214,7 @@ export class EventController {
+@@ -232,6 +233,7 @@ export class EventController {
  	// restored when the banner clears at the next `agent_start` (see
  	// #handleMessageEnd / #handleAgentStart).
  	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
@@ -299,7 +303,7 @@ index 47dbcac..0977124 100644
  	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
  	#restorePinnedErrorInline = true;
  	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
-@@ -1036,6 +1038,7 @@ export class EventController {
+@@ -1066,6 +1068,7 @@ export class EventController {
  		this.#orphanedToolCompletions.clear();
  		this.#postToolAssistantComponents.clear();
  		this.#lastIntent = undefined;
@@ -307,7 +311,7 @@ index 47dbcac..0977124 100644
  		this.#readToolCallArgs.clear();
  		this.#readToolCallAssistantComponents.clear();
  		this.#resetReadGroup();
-@@ -1787,15 +1790,18 @@ export class EventController {
+@@ -1822,15 +1825,18 @@ export class EventController {
  			// errors are known intermediate attempts: hide them entirely while
  			// session recovery continues, but retain the component so a terminal
  			// retry-cap event can promote its final error into the one banner.
@@ -335,7 +339,7 @@ index 47dbcac..0977124 100644
  			}
  			this.ctx.statusLine.invalidate();
  			this.ctx.ui.requestRender();
-@@ -2172,6 +2178,18 @@ export class EventController {
+@@ -2209,6 +2215,18 @@ export class EventController {
  			}
  		}
  	}
@@ -354,9 +358,9 @@ index 47dbcac..0977124 100644
  	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
  		// A superseded agent_end: the agent is already streaming a fresh turn, so
  		// this event belongs to a turn that has already been replaced. The session
-@@ -2215,7 +2233,13 @@ export class EventController {
+@@ -2249,7 +2267,13 @@ export class EventController {
  		}
- 		setTerminalTitleState("idle");
+ 		setRunStatus(this.#settledRunStatus(event));
  
 +		const fallback = this.#terminalErrorPresented ? undefined : this.#agentEndErrorMessage(event);
  		await this.#finishAgentEnd(event);
@@ -368,7 +372,7 @@ index 47dbcac..0977124 100644
  		// This settle may belong to an extension-started turn while the main
  		// input loop remains asleep. Do not await session-idle from its own event.
  		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
-@@ -2558,6 +2582,7 @@ export class EventController {
+@@ -2628,6 +2652,7 @@ export class EventController {
  		}
  		this.#clearRetrySupersededAssistantComponents();
  		if (!event.success) {
@@ -377,10 +381,10 @@ index 47dbcac..0977124 100644
  				const terminalError = this.#restorePinnedErrorInline
  					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
 diff --git a/packages/coding-agent/src/modes/controllers/mcp-command-controller.ts b/packages/coding-agent/src/modes/controllers/mcp-command-controller.ts
-index 29fad86..22d0921 100644
+index 11b61f9..d6d05bd 100644
 --- a/packages/coding-agent/src/modes/controllers/mcp-command-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/mcp-command-controller.ts
-@@ -4,7 +4,7 @@ /**
+@@ -4,7 +4,7 @@
   * Handles /mcp subcommands for managing MCP servers.
   */
  import * as path from "node:path";
@@ -389,7 +393,7 @@ index 29fad86..22d0921 100644
  import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
  import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
  import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-@@ -60,13 +60,13 @@ import type {
+@@ -59,13 +59,13 @@ import type {
  	MCPServerConnection,
  } from "../../mcp/types";
  import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -404,7 +408,7 @@ index 29fad86..22d0921 100644
  import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { parseCommandArgs } from "../../utils/command-args";
  import { theme } from "@oh-my-pi/pi-tui/theme";
-@@ -176,38 +176,6 @@ async function claimMCPOAuthFlow(owner: object, cancel: (reason: string) => void): Promise<{ release: () => void }> {
+@@ -175,38 +175,6 @@ async function claimMCPOAuthFlow(owner: object, cancel: (reason: string) => void
  	}
  }
  
@@ -443,7 +447,7 @@ index 29fad86..22d0921 100644
  /**
   * Renders the MCP OAuth fallback URL. Always shows the full authorization URL
   * as the primary `Copy URL:` target — that works from any machine, including
-@@ -256,16 +224,7 @@ export class MCPAuthorizationLinkPrompt implements Component {
+@@ -255,16 +223,7 @@ export class MCPAuthorizationLinkPrompt implements Component {
  	}
  
  	render(width: number): readonly string[] {
@@ -462,7 +466,7 @@ index 29fad86..22d0921 100644
  }
  
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index af2a715..e16be45 100644
+index bba4f51..4919d2a 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
 @@ -1,6 +1,7 @@
@@ -470,10 +474,10 @@ index af2a715..e16be45 100644
  import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
  import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
 +import { AuthGatewayAdminClient } from "@oh-my-pi/pi-ai/auth-gateway";
- import type { getOAuthProviders as GetOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
- import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
- import * as vcs from "@oh-my-pi/pi-natives/vcs";
-@@ -22,6 +23,9 @@ import {
+ import type {
+ 	getOAuthCredentialProvider as GetOAuthCredentialProvider,
+ 	getOAuthProviders as GetOAuthProviders,
+@@ -26,6 +27,9 @@ import {
  	resolveAdvisorConfigEditPath,
  	saveWatchdogConfigFile,
  } from "../../advisor";
@@ -483,7 +487,7 @@ index af2a715..e16be45 100644
  import { reset as resetCapabilities } from "../../capability";
  import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { showGitOverlay } from "../../cli/git-tui";
-@@ -66,6 +70,11 @@ import type { SessionInfo } from "../../session/session-listing";
+@@ -71,6 +75,11 @@ import { readSessionInfo, type SessionInfo } from "../../session/session-listing
  import { SessionManager } from "../../session/session-manager";
  import { loadPinnedSessionIds } from "../../session/session-pins";
  import { FileSessionStorage } from "../../session/session-storage";
@@ -492,10 +496,10 @@ index af2a715..e16be45 100644
 +	moveAccountPriority,
 +	setDefaultAccount,
 +} from "../../slash-commands/helpers/account-priority";
- import { toLogoutAccounts } from "../../slash-commands/helpers/logout";
+ import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
  import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
  import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-@@ -93,6 +102,11 @@ import { copyToClipboard } from "../../utils/clipboard";
+@@ -98,6 +107,11 @@ import { copyToClipboard } from "../../utils/clipboard";
  import { openPath } from "../../utils/open";
  import { setSessionTerminalTitle } from "../../utils/title-generator";
  import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
@@ -507,7 +511,7 @@ index af2a715..e16be45 100644
  import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { createAgentsHubDeps } from "../agents-hub-deps";
  import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-@@ -125,6 +139,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+@@ -130,6 +144,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
  import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
  import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -515,21 +519,21 @@ index af2a715..e16be45 100644
  import { renderUsageReports } from "./command-controller";
  import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
  
-@@ -280,6 +295,12 @@ export class SelectorController {
- 					model: this.ctx.session.model,
- 					imageBudget: this.ctx.ui.imageBudget,
- 					requestRender: () => this.ctx.ui.requestRender(),
-+					gatewayProfiles: createGatewaySettingsHost({
-+						profileStore: AuthGatewayProfileStore.open(),
-+						createClient: connection =>
-+							new AuthGatewayAdminClient({ url: connection.profile.url, token: connection.token }),
-+						requestRender: () => this.ctx.ui.requestRender(),
-+					}),
- 					composerPreviewStatus: this.ctx.statusLine,
- 				},
- 				{
-@@ -347,12 +368,29 @@ export class SelectorController {
- 		});
+@@ -353,6 +368,12 @@ export class SelectorController {
+ 						model: this.ctx.session.model,
+ 						imageBudget: this.ctx.ui.imageBudget,
+ 						requestRender: () => this.ctx.ui.requestRender(),
++						gatewayProfiles: createGatewaySettingsHost({
++							profileStore: AuthGatewayProfileStore.open(),
++							createClient: connection =>
++								new AuthGatewayAdminClient({ url: connection.profile.url, token: connection.token }),
++							requestRender: () => this.ctx.ui.requestRender(),
++						}),
+ 						composerPreviewStatus: this.ctx.statusLine,
+ 					},
+ 					{
+@@ -425,12 +446,29 @@ export class SelectorController {
+ 			});
  	}
  
 +	async showAuthGatewayConsole(connection?: string): Promise<void> {
@@ -556,10 +560,10 @@ index af2a715..e16be45 100644
  	 */
 -	showUsageDashboard(reports: UsageReport[]): void {
 +	showUsageDashboard(reports: UsageReport[], gatewayUser?: string, gatewaySummary?: string): void {
- 		const authStorage = this.ctx.session.modelRegistry.authStorage;
- 		const accounts = selectReportableAccounts(
- 			collectStoredAccounts(authStorage),
-@@ -379,8 +417,8 @@ export class SelectorController {
+ 		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
+ 		// while the first dashboard is open focuses it instead of stacking a copy.
+ 		if (this.#focusOpenMenu("usage-dashboard")) return;
+@@ -461,8 +499,8 @@ export class SelectorController {
  		const dashboard = new UsageDashboardComponent({
  			reports,
  			unavailableAccounts,
@@ -570,7 +574,7 @@ index af2a715..e16be45 100644
  					current,
  					theme,
  					Date.now(),
-@@ -388,7 +426,14 @@ export class SelectorController {
+@@ -470,7 +508,14 @@ export class SelectorController {
  					provider => (provider === currentProvider ? activeAccount : undefined),
  					usageModelSelectors,
  					unavailableAccounts,
@@ -586,7 +590,7 @@ index af2a715..e16be45 100644
  			loadActivity: loadDailyActivity,
  			refresh: () => this.ctx.session.fetchUsageReports(),
  			requestRender: () => this.ctx.ui.requestRender(),
-@@ -2116,6 +2161,146 @@ export class SelectorController {
+@@ -2302,6 +2347,146 @@ export class SelectorController {
  		});
  	}
  
@@ -734,10 +738,10 @@ index af2a715..e16be45 100644
  		const session = this.ctx.session;
  		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index 28d23aa..0d30f77 100644
+index de06f1a..d36c296 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -7799,8 +7799,12 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -7962,8 +7962,12 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#selectorController.showSettingsSelector();
  	}
  
@@ -752,7 +756,7 @@ index 28d23aa..0d30f77 100644
  	}
  
  	showAdvisorConfigure(): void {
-@@ -7870,6 +7874,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -8033,6 +8037,10 @@ export class InteractiveMode implements InteractiveModeContext {
  		return this.#selectorController.showSessionPinSelector();
  	}
  
@@ -764,19 +768,19 @@ index 28d23aa..0d30f77 100644
  		return this.#selectorController.showResetUsageSelector();
  	}
 diff --git a/packages/coding-agent/src/modes/status-line-host.ts b/packages/coding-agent/src/modes/status-line-host.ts
-index afe5271..35c52fc 100644
+index 208af45..1b75076 100644
 --- a/packages/coding-agent/src/modes/status-line-host.ts
 +++ b/packages/coding-agent/src/modes/status-line-host.ts
-@@ -2,7 +2,7 @@ import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
- import { Settings, settings } from "../config/settings";
+@@ -3,7 +3,7 @@ import { Settings, settings } from "../config/settings";
  import type { AgentSession } from "../session/agent-session";
  import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
+ import { classifyResetExpiry, formatResetExpiryNotice } from "../session/reset-expiry";
 -import { limitMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 +import { formatAccountLabelAmong, limitMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
  import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
  import { GH_COMMAND_TIMEOUT_MS, github } from "../utils/github";
  import { calculateTokensPerSecond } from "../utils/token-rate";
-@@ -29,7 +29,9 @@ /**
+@@ -30,7 +30,9 @@ import { cfgGoalStatusInFooter } from "../goals/settings";
   * fixtures) still render; a live `AgentSession` satisfies it structurally.
   */
  export type StatusLineHostSession = StatusLineSession &
@@ -787,7 +791,7 @@ index afe5271..35c52fc 100644
  
  /** Application policy and runtime services consumed by the portable status renderer. */
  export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
-@@ -54,6 +56,52 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
+@@ -55,6 +57,52 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
  	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
  	activeAccount: (session, provider) =>
  		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
@@ -841,10 +845,10 @@ index afe5271..35c52fc 100644
  	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
  	resolveActiveRepo: resolveActiveRepoContextSync,
 diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
-index 0a93922..c154714 100644
+index b705c71..6d5548d 100644
 --- a/packages/coding-agent/src/modes/types.ts
 +++ b/packages/coding-agent/src/modes/types.ts
-@@ -476,8 +476,9 @@ export interface InteractiveModeContext {
+@@ -489,8 +489,9 @@ export interface InteractiveModeContext {
  
  	// Selector handling
  	showSettingsSelector(): void;
@@ -855,35 +859,35 @@ index 0a93922..c154714 100644
  	showAdvisorConfigure(): void;
  	showHistorySearch(): void;
  	showExtensionsDashboard(): void;
-@@ -500,6 +501,7 @@ export interface InteractiveModeContext {
+@@ -513,6 +514,7 @@ export interface InteractiveModeContext {
  	handleSessionDeleteCommand(): Promise<void>;
  	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
  	showSessionPinSelector(): Promise<void>;
 +	showAccountManager(): Promise<void>;
  	showResetUsageSelector(): Promise<void>;
  	showProviderSetup(): Promise<void>;
- 	showHookConfirm(title: string, message: string): Promise<boolean>;
+ 	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index 04a6cd8..e8461f7 100644
+index 813ac66..7f32967 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -200,6 +200,7 @@ import {
- } from "../secrets/message-transform";
+@@ -207,6 +207,7 @@ import {
  import type { SecretObfuscator } from "../secrets/obfuscator";
+ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
  import { cfgSecretsEnabled } from "../secrets/settings";
 +import { formatDefaultAccountFalloverNotice } from "../slash-commands/helpers/active-oauth-account";
  import { releaseSharpshooterSession } from "../sharpshooter/backend";
  import { flushSharpshooterExtraction } from "../sharpshooter/extract";
  import { toolReadsSkillUris } from "../system-prompt";
-@@ -381,6 +382,7 @@ import {
- } from "./queued-messages";
+@@ -404,6 +405,7 @@ import {
+ import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
  import type { ServingModel } from "./retry-fallback-chains";
  import {
 +	type AdvisorAccountBinding,
  	type AdvisorCatchupOptions,
  	type AdvisorStats,
  	type AdvisorStatusOverviewEntry,
-@@ -417,7 +419,12 @@ import { YieldQueue } from "./yield-queue";
+@@ -451,7 +453,12 @@ import { YieldQueue } from "./yield-queue";
  
  export * from "./agent-session-events";
  export * from "./agent-session-types";
@@ -897,7 +901,7 @@ index 04a6cd8..e8461f7 100644
  
  const SESSION_STOP_CONTINUATION_CAP = 8;
  /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
-@@ -3811,6 +3818,20 @@ export class AgentSession implements SettingsScope {
+@@ -4120,6 +4127,20 @@ export class AgentSession implements SettingsScope {
  					this.sessionId,
  					assistantMsg.provider,
  				);
@@ -918,7 +922,7 @@ index 04a6cd8..e8461f7 100644
  			}
  			if (event.message.role === "toolResult") {
  				const { toolName, toolCallId, isError, content } = event.message;
-@@ -12761,6 +12782,15 @@ export class AgentSession implements SettingsScope {
+@@ -13600,6 +13621,15 @@ export class AgentSession implements SettingsScope {
  		return this.#advisors.getAdvisorStatusOverview();
  	}
  
@@ -935,10 +939,10 @@ index 04a6cd8..e8461f7 100644
  	getAdvisorCost(): number {
  		return this.#advisors.getAdvisorCost();
 diff --git a/packages/coding-agent/src/session/settings.ts b/packages/coding-agent/src/session/settings.ts
-index 7af2052..2a1b24a 100644
+index 4d3a9dd..7524e3a 100644
 --- a/packages/coding-agent/src/session/settings.ts
 +++ b/packages/coding-agent/src/session/settings.ts
-@@ -30,6 +30,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
+@@ -31,6 +31,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
  
  const EMPTY_STRING_ARRAY: string[] = [];
  const EMPTY_NUMBER_RECORD: Record<string, number> = {};
@@ -946,7 +950,7 @@ index 7af2052..2a1b24a 100644
  const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
  const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
  
-@@ -137,6 +138,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
+@@ -138,6 +139,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
  	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
  );
  
@@ -980,7 +984,7 @@ index 7af2052..2a1b24a 100644
  	id: "providers.openai-codex.codeMode",
  	type: "enum",
 diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-index 1f6b44d..567a0e4 100644
+index 3924567..9e487e3 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
 @@ -304,6 +304,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -1013,10 +1017,10 @@ index 1f6b44d..567a0e4 100644
  		name: "setup",
  		aliases: ["providers"],
 diff --git a/packages/coding-agent/src/slash-commands/builtin-session.ts b/packages/coding-agent/src/slash-commands/builtin-session.ts
-index 830fbcf..97e82bf 100644
+index 3079935..1be36eb 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-session.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-session.ts
-@@ -182,6 +182,65 @@ ): Promise<void> {
+@@ -179,6 +179,65 @@ async function handleSessionPinCommand(
  	await output(`Pinned ${account.label} to this session for ${providerName}.`);
  }
  
@@ -1082,7 +1086,7 @@ index 830fbcf..97e82bf 100644
  /**
   * Start (or reuse) the stats dashboard for this session. The Frustration page
   * judges through this session's settings and registry; its cost lands on this
-@@ -320,6 +379,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+@@ -317,6 +376,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
  			clearSubmittedText(runtime);
  		},
  	},
@@ -1115,10 +1119,10 @@ index 830fbcf..97e82bf 100644
  		name: "jobs",
  		icon: "jobs",
 diff --git a/packages/coding-agent/src/slash-commands/helpers/reset-usage.ts b/packages/coding-agent/src/slash-commands/helpers/reset-usage.ts
-index 090da41..07be6f7 100644
+index bb94f9f..dcaa630 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/reset-usage.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/reset-usage.ts
-@@ -7,7 +7,7 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
+@@ -9,7 +9,7 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTar
  import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
  import { summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
  
@@ -1131,7 +1135,7 @@ diff --git a/packages/coding-agent/src/utils/clipboard.ts b/packages/coding-agen
 index f824646..bca678a 100644
 --- a/packages/coding-agent/src/utils/clipboard.ts
 +++ b/packages/coding-agent/src/utils/clipboard.ts
-@@ -15,8 +15,8 @@ type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<string, string | undefined> };
+@@ -15,8 +15,8 @@ type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<st
  /**
   * Run a subprocess and capture its stdout without blocking the event loop.
   *
@@ -1151,10 +1155,10 @@ index f824646..bca678a 100644
  // PNG on stdout, or nothing when the clipboard does not hold image data. Used
  // for native Windows fallback and WSL interop because arboard can miss host
 diff --git a/packages/coding-agent/test/acp-builtins.test.ts b/packages/coding-agent/test/acp-builtins.test.ts
-index 1e18f09..f740b67 100644
+index 7527109..a658055 100644
 --- a/packages/coding-agent/test/acp-builtins.test.ts
 +++ b/packages/coding-agent/test/acp-builtins.test.ts
-@@ -71,6 +71,7 @@ interface FakeAcpBuiltinSession {
+@@ -73,6 +73,7 @@ interface FakeAcpBuiltinSession {
  	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	scopedModels: Array<{ model: { provider: string; id: string } }>;
  	modelRegistry: {
@@ -1162,7 +1166,7 @@ index 1e18f09..f740b67 100644
  		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
  		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	};
-@@ -173,6 +174,7 @@ function createRuntime() {
+@@ -180,6 +181,7 @@ function createRuntime() {
  		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
  		scopedModels: [],
  		modelRegistry: {
@@ -1486,6 +1490,35 @@ index 0000000..2ba0781
 +		expect(ctx.showError).not.toHaveBeenCalled();
 +	});
 +});
+diff --git a/packages/coding-agent/test/cli/update-cli.test.ts b/packages/coding-agent/test/cli/update-cli.test.ts
+index 5b77c5b..57e4549 100644
+--- a/packages/coding-agent/test/cli/update-cli.test.ts
++++ b/packages/coding-agent/test/cli/update-cli.test.ts
+@@ -1,10 +1,11 @@
+-import { afterEach, describe, expect, it, vi } from "bun:test";
++import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+ import { currentBuildHost } from "../../src/cli/build-service";
+ import { fixedNpmRegistry } from "../../src/cli/npm-registry";
++import * as releaseInfo from "../../src/cli/release-info";
+ import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
+ import { cfgUpdateChannel } from "../../src/modes/settings";
+ 
+@@ -18,6 +19,11 @@ describe("runUpdateCommand version source", () => {
+ 	const previousBuildUrl = process.env.PI_BUILD_URL;
+ 	const dirs: string[] = [];
+ 
++	// A `-fork.N` build updates from the fork's GitHub releases; these cases cover upstream's sources.
++	beforeEach(() => {
++		vi.spyOn(releaseInfo, "isForkVersion").mockReturnValue(false);
++	});
++
+ 	afterEach(async () => {
+ 		vi.restoreAllMocks();
+ 		process.env.PATH = previousPath;
 diff --git a/packages/coding-agent/test/event-controller-error-banner.test.ts b/packages/coding-agent/test/event-controller-error-banner.test.ts
 index 1867c20..61a55a3 100644
 --- a/packages/coding-agent/test/event-controller-error-banner.test.ts
@@ -1536,7 +1569,7 @@ index 1867c20..61a55a3 100644
  		const message = makeAssistantMessage({
  			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
 diff --git a/packages/coding-agent/test/model-discovery.test.ts b/packages/coding-agent/test/model-discovery.test.ts
-index 53ad08a..e501aa6 100644
+index 2576512..9576f58 100644
 --- a/packages/coding-agent/test/model-discovery.test.ts
 +++ b/packages/coding-agent/test/model-discovery.test.ts
 @@ -3,8 +3,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
@@ -1550,21 +1583,22 @@ index 53ad08a..e501aa6 100644
  import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 +import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 +import { AuthStorage as GatewayAuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+ import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
  import { buildModel } from "@oh-my-pi/pi-catalog/build";
  import { Effort } from "@oh-my-pi/pi-catalog/effort";
- import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-@@ -19,8 +23,9 @@ import {
+@@ -21,9 +25,10 @@ import {
  } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
  import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
  import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 +import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+ import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
  import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 -import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
  import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
  import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
  
-@@ -2796,6 +2801,125 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -2953,6 +2958,125 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(rosterFor("image")).toEqual(["image-generator"]);
  	});
  
@@ -1690,7 +1724,7 @@ index 53ad08a..e501aa6 100644
  	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
  		// Gateways like opper.ai root their OpenAI-compatible surface at a
  		// versioned path (`https://api.opper.ai/v3/compat`); the default
-@@ -2991,6 +3115,236 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -3148,6 +3272,236 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(model?.name).toBe("GPT-5");
  	});
  
@@ -1925,29 +1959,27 @@ index 53ad08a..e501aa6 100644
 +	});
 +
  	test("litellm discovery maps rich model metadata and keeps runtime /v1 baseUrl", async () => {
- 		writeRawModelsJson({
- 			"litellm-test": {
+ 		const fetchMock: FetchImpl = async input => {
+ 			const url = String(input);
 diff --git a/packages/coding-agent/test/modes/components/settings-multiselect.test.ts b/packages/coding-agent/test/modes/components/settings-multiselect.test.ts
-index 7ec5964..34c1932 100644
+index d6901ab..f703f65 100644
 --- a/packages/coding-agent/test/modes/components/settings-multiselect.test.ts
 +++ b/packages/coding-agent/test/modes/components/settings-multiselect.test.ts
-@@ -1,9 +1,15 @@
- import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-+import * as fs from "node:fs/promises";
-+import * as os from "node:os";
-+import * as path from "node:path";
+@@ -2,11 +2,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
 +import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
  import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
  import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
  import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
  import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 +import { createGatewaySettingsHost } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/profile-settings";
  import { initTheme } from "@oh-my-pi/pi-tui/theme";
-+import { removeWithRetries } from "@oh-my-pi/pi-utils";
- 
- import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
- 
-@@ -12,17 +18,21 @@ beforeAll(async () => {
+ import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
+ import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
+@@ -21,17 +23,21 @@ beforeAll(async () => {
  });
  
  let geometryStub: { restore(): void } | undefined;
@@ -1970,7 +2002,7 @@ index 7ec5964..34c1932 100644
  });
  
  function stubStdoutGeometry(cols: number): { restore(): void } {
-@@ -51,6 +61,16 @@ function createSelector(): SettingsSelectorComponent {
+@@ -60,6 +66,16 @@ function createSelector(): SettingsSelectorComponent {
  			providers: [],
  			settings: createSettingsHost(),
  			plugins: createPluginSettingsHost(process.cwd()),
@@ -2037,7 +2069,7 @@ index 68a8204..c153c6d 100644
  });
  
  function stubStdoutGeometry(cols: number): { restore(): void } {
-@@ -54,6 +70,13 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorComponent {
+@@ -54,6 +70,13 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
  			providers: [],
  			settings: createSettingsHost(),
  			plugins: createPluginSettingsHost(process.cwd()),
@@ -2100,10 +2132,10 @@ index 7b30ac1..3d43682 100644
  
  	it("tears the loader down on the live turn's own final agent_end", async () => {
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index 438bd2e..7953b65 100644
+index d2d55cb..7a65481 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
-@@ -1102,6 +1102,9 @@ ### Changed
+@@ -1332,6 +1332,9 @@
  
  - Improved row alignment and spacing for `align`, `gather`, and `array` environments
  - Updated matrix environments to render as baseline-aligned grids with stretched brackets
@@ -2114,7 +2146,7 @@ index 438bd2e..7953b65 100644
  ## [16.4.0] - 2026-07-10
  
 diff --git a/packages/tui/src/components/input.ts b/packages/tui/src/components/input.ts
-index 2048eef..1e305a0 100644
+index 23327c5..e2692ac 100644
 --- a/packages/tui/src/components/input.ts
 +++ b/packages/tui/src/components/input.ts
 @@ -66,10 +66,18 @@ export class Input implements Component, Focusable {
@@ -2157,7 +2189,7 @@ index 2048eef..1e305a0 100644
  	setUseTerminalCursor(useTerminalCursor: boolean): void {
  		this.#useTerminalCursor = useTerminalCursor;
  	}
-@@ -606,10 +627,10 @@ export class Input implements Component, Focusable {
+@@ -614,10 +635,10 @@ export class Input implements Component, Focusable {
  		let cursorIndex = this.#cursor;
  		// Ensure we always have a grapheme to invert at the cursor (space at end).
  		let visibleValue = this.#value;
@@ -2172,7 +2204,7 @@ index 2048eef..1e305a0 100644
  		// At end of text the cursor sits on trailing padding, sized to fit a (possibly wide) cursor override.
  		const atEnd = this.#cursor >= this.#value.length;
 diff --git a/packages/tui/src/overlays/settings-selector.ts b/packages/tui/src/overlays/settings-selector.ts
-index c7d8666..55af013 100644
+index 780eddc..c4f038a 100644
 --- a/packages/tui/src/overlays/settings-selector.ts
 +++ b/packages/tui/src/overlays/settings-selector.ts
 @@ -154,6 +154,8 @@ interface SettingsNativeMemo {
@@ -2184,7 +2216,7 @@ index c7d8666..55af013 100644
  /**
   * Free-text string setting field backed by the shared text form field.
   * Current values prefill, including secrets retained behind Input masking;
-@@ -543,15 +545,31 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number {
+@@ -543,15 +545,31 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number
  	return Math.min(22, nameWidth) + 4;
  }
  
@@ -2250,7 +2282,7 @@ index c7d8666..55af013 100644
  	#searchQuery = "";
  	/** Single-line editor backing the search banner (cursor, word ops, paste). */
  	#searchInput = new Input();
-@@ -648,12 +673,12 @@ export class SettingsSelectorComponent implements Component {
+@@ -654,12 +679,12 @@ export class SettingsSelectorComponent implements Component {
  		this.#sidebarWidth = settingsSidebarWidth(context.settings.entries);
  		// No label prefix (the frame title already says Settings) and no
  		// "(tab to cycle)" hint (folded into the footer hint line).
@@ -2265,7 +2297,7 @@ index c7d8666..55af013 100644
  			if (this.#searchList) {
  				// While searching, tabs act as jump targets into the result list.
  				const firstId = this.#searchFirstMatch.get(tabId);
-@@ -672,6 +697,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -678,6 +703,7 @@ export class SettingsSelectorComponent implements Component {
  		this.#currentList?.invalidate();
  		this.#searchList?.invalidate();
  		this.#pluginComponent?.invalidate();
@@ -2273,7 +2305,7 @@ index c7d8666..55af013 100644
  	}
  
  	/** Swap the active content (per-tab list, search list, or plugins). */
-@@ -679,14 +705,17 @@ export class SettingsSelectorComponent implements Component {
+@@ -685,14 +711,17 @@ export class SettingsSelectorComponent implements Component {
  		this.#currentList = null;
  		this.#searchList = null;
  		this.#pluginComponent = null;
@@ -2292,7 +2324,7 @@ index c7d8666..55af013 100644
  			} else {
  				this.#showSettingsTab(tabId);
  			}
-@@ -701,7 +730,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -707,7 +736,7 @@ export class SettingsSelectorComponent implements Component {
  		if (this.#searchList) {
  			return `${confirm} to change · ${tab} to jump tabs · ${cancel} to exit search`;
  		}
@@ -2301,7 +2333,7 @@ index c7d8666..55af013 100644
  			return `${tab} to switch tabs · ${cancel} to close`;
  		}
  		if (this.#currentList?.sectionFocused) {
-@@ -750,6 +779,8 @@ export class SettingsSelectorComponent implements Component {
+@@ -756,6 +785,8 @@ export class SettingsSelectorComponent implements Component {
  			contentLines = list.render(innerWidth);
  		} else if (this.#pluginComponent) {
  			contentLines = this.#pluginComponent.render(innerWidth);
@@ -2310,7 +2342,7 @@ index c7d8666..55af013 100644
  		} else {
  			contentLines = [];
  		}
-@@ -811,11 +842,15 @@ export class SettingsSelectorComponent implements Component {
+@@ -817,11 +848,15 @@ export class SettingsSelectorComponent implements Component {
  		const entries = this.#context.settings.entries;
  		const plugins = this.#currentTabId === "plugins" ? this.#pluginComponent : null;
  		const pluginPage = plugins?.prefsPage();
@@ -2329,7 +2361,7 @@ index c7d8666..55af013 100644
  		});
  		pages.push({ id: PLUGINS_PAGE, label: "Installed", icon: "plugins", group: "Plugins" });
  
-@@ -850,6 +885,9 @@ export class SettingsSelectorComponent implements Component {
+@@ -856,6 +891,9 @@ export class SettingsSelectorComponent implements Component {
  						: col([open.component], { role: PREFS_EDITOR_ROLE }),
  				);
  			}
@@ -2339,16 +2371,16 @@ index c7d8666..55af013 100644
  		}
  
  		if (tab === "appearance" && !searching) {
-@@ -1112,7 +1150,7 @@ export class SettingsSelectorComponent implements Component {
- 	/** Rebuilds the visible items after a change made outside a list's own `onChange` (changed flags, conditions). */
- 	#refreshItems(): void {
- 		if (this.#searchList) this.#setSearchQuery(this.#searchQuery);
--		else if (this.#currentTabId !== "plugins")
-+		else if (this.#currentTabId !== "plugins" && this.#currentTabId !== "gateway")
+@@ -1120,7 +1158,7 @@ export class SettingsSelectorComponent implements Component {
+ 		if (this.#searchList) {
+ 			this.#searchCorpora = null;
+ 			this.#setSearchQuery(this.#searchQuery);
+-		} else if (this.#currentTabId !== "plugins")
++		} else if (this.#currentTabId !== "plugins" && this.#currentTabId !== "gateway")
  			this.#refreshCurrentTabItems(getSettingsForTab(this.#context.settings.entries, this.#currentTabId));
  	}
  
-@@ -1154,7 +1192,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1162,7 +1200,7 @@ export class SettingsSelectorComponent implements Component {
  			children.push(memo.search.node);
  		}
  
@@ -2357,7 +2389,7 @@ index c7d8666..55af013 100644
  		if (content) children.push(content);
  
  		if (!searching && this.#currentTabId === "appearance") {
-@@ -1179,7 +1217,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1187,7 +1225,7 @@ export class SettingsSelectorComponent implements Component {
  
  		const mode: SettingsHintMode = searching
  			? "search"
@@ -2366,7 +2398,7 @@ index c7d8666..55af013 100644
  				? "plugins"
  				: this.#currentList?.sectionFocused
  					? "sections"
-@@ -1375,12 +1413,12 @@ export class SettingsSelectorComponent implements Component {
+@@ -1388,13 +1426,13 @@ export class SettingsSelectorComponent implements Component {
  		if (!this.#searchList) return;
  		const selected = jumpToSelection ? this.#searchList.getSelectedItem() : undefined;
  		const selectedDef = selected ? getSettingDef(this.#context.settings.entries, selected.id) : undefined;
@@ -2374,6 +2406,7 @@ index c7d8666..55af013 100644
 +		const targetTab: TabId = selectedDef?.tab ?? this.#preSearchTabId;
  
  		this.#searchQuery = "";
+ 		this.#searchCorpora = null;
  		this.#searchFirstMatch.clear();
  		this.#searchMatchCount = 0;
 -		this.#tabs = getSettingsTabs();
@@ -2381,7 +2414,7 @@ index c7d8666..55af013 100644
  		this.#tabBar.setTabs(this.#tabs, targetTab);
  		this.#switchToTab(targetTab);
  		if (selectedDef) {
-@@ -1407,7 +1445,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1421,7 +1459,11 @@ export class SettingsSelectorComponent implements Component {
  			const icon = theme.symbol(meta.icon);
  			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
  		}
@@ -2394,7 +2427,7 @@ index c7d8666..55af013 100644
  		empty.push({
  			id: "plugins",
  			label: `${theme.icon.package} Plugins`,
-@@ -1846,7 +1888,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1870,7 +1912,7 @@ export class SettingsSelectorComponent implements Component {
  
  	/** Re-evaluate condition gates against the current settings and refresh the active list. */
  	#refreshCurrentTabItems(defs: SettingDef[]): void {
@@ -2403,7 +2436,7 @@ index c7d8666..55af013 100644
  		this.#currentList.setItems(this.#buildItemsForDefs(defs));
  	}
  
-@@ -1883,6 +1925,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1907,6 +1949,11 @@ export class SettingsSelectorComponent implements Component {
  		});
  	}
  
@@ -2415,7 +2448,7 @@ index c7d8666..55af013 100644
  	handleInput(data: string): void {
  		// SGR mouse reports (the fullscreen overlay enables tracking).
  		if (data.startsWith("\x1b[<")) {
-@@ -1910,6 +1957,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1934,6 +1981,11 @@ export class SettingsSelectorComponent implements Component {
  			return;
  		}
  
@@ -2427,7 +2460,7 @@ index c7d8666..55af013 100644
  		// Tab toggles keyboard focus between section headings and setting rows
  		// (fast section hopping); tabs without sections keep Tab switching tabs.
  		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-@@ -1927,7 +1979,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1951,7 +2003,7 @@ export class SettingsSelectorComponent implements Component {
  
  		// Printable characters start a search across every settings tab. The
  		// plugins tab keeps its own local filtering instead.
@@ -2436,7 +2469,7 @@ index c7d8666..55af013 100644
  			const printable = extractPrintableText(data);
  			if (printable !== undefined && printable.trim().length > 0) {
  				this.#startSearch(printable);
-@@ -1939,6 +1991,8 @@ export class SettingsSelectorComponent implements Component {
+@@ -1963,6 +2015,8 @@ export class SettingsSelectorComponent implements Component {
  			this.#currentList.handleInput(data);
  		} else if (this.#pluginComponent) {
  			this.#pluginComponent.handleInput(data);
@@ -2446,10 +2479,10 @@ index c7d8666..55af013 100644
  	}
  
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index 92b2878..7430891 100644
+index 6ece374..61307d3 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
-@@ -2377,6 +2377,7 @@ {
+@@ -2527,6 +2527,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			sessionAccent: sessionAccentEnabled,
  			previewTitle,
  			activeRepo: activeRepoCache.activeRepo,
@@ -2457,7 +2490,7 @@ index 92b2878..7430891 100644
  			width,
  			options: segmentOptions ?? {},
  			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
-@@ -2444,6 +2445,13 @@ {
+@@ -2594,6 +2595,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			};
  		}
  
@@ -2472,19 +2505,19 @@ index 92b2878..7430891 100644
  			? (this.#settings.leftSegments ?? presetDef.leftSegments)
  			: presetDef.leftSegments;
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index 3c4e0a4..21be0b4 100644
+index c5517f0..454b086 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
 @@ -2,7 +2,7 @@ import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
  import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
  import type { Model } from "@oh-my-pi/pi-catalog/types";
  import type { CompactionBoundaries } from "./context-usage";
--import type { StatusLineSettings } from "./types";
-+import type { ActiveAccountStatus, StatusLineSettings } from "./types";
+-import type { StatusLineSettings, StatusResetExpiry } from "./types";
++import type { ActiveAccountStatus, StatusLineSettings, StatusResetExpiry } from "./types";
  
  export interface StatusAccountIdentity {
  	accountId?: string;
-@@ -87,6 +87,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineSession> {
+@@ -87,6 +87,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
  	getSessionSettingsRevision(session: TSession): number;
  	goalStatusInFooter(session: TSession): boolean;
  	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
@@ -2500,10 +2533,10 @@ index 3c4e0a4..21be0b4 100644
  	fetchUsageReports(session: TSession, signal: AbortSignal): Promise<unknown>;
  	resolveActiveRepo(cwd: string): ActiveRepoContext | null;
 diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
-index af65718..baf02ff 100644
+index 2592f4b..92ebac1 100644
 --- a/packages/tui/src/status-line/segments.ts
 +++ b/packages/tui/src/status-line/segments.ts
-@@ -36,6 +36,12 @@ // ═══════════════════════════════════════════════════════════════════════════
+@@ -36,6 +36,12 @@ export type { SegmentContext } from "./types";
  // Helpers
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -2516,7 +2549,7 @@ index af65718..baf02ff 100644
  function withIcon(icon: string, text: string): string {
  	return icon ? `${icon} ${text}` : text;
  }
-@@ -335,6 +341,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeColor } | undefined {
+@@ -337,6 +343,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
  	return icon ? { icon, color } : undefined;
  }
  
@@ -2565,7 +2598,7 @@ index af65718..baf02ff 100644
  const modelSegment: StatusLineSegment = {
  	id: "model",
  	render(ctx) {
-@@ -362,6 +410,7 @@ const modelSegment: StatusLineSegment = {
+@@ -364,6 +412,7 @@ const modelSegment: StatusLineSegment = {
  		// `statusLineModel` is aliased to `accent` in many themes, so the badge
  		// uses status colors to stay visibly distinct from the model name color.
  		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
@@ -2573,7 +2606,7 @@ index af65718..baf02ff 100644
  		// Per-advisor detail lives in `/advisor status`.
  		const advisor = modelAdvisorBadge(ctx);
  		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
-@@ -380,6 +429,7 @@ const modelSegment: StatusLineSegment = {
+@@ -382,6 +431,7 @@ const modelSegment: StatusLineSegment = {
  		// quiet separator; the terminal draws the model icon.
  		const token = accentToken(ctx, "statusLineModel");
  		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
@@ -2582,7 +2615,7 @@ index af65718..baf02ff 100644
  		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
  		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
-index 5c59616..8ff8c24 100644
+index 14fe693..ebff219 100644
 --- a/packages/tui/src/status-line/types.ts
 +++ b/packages/tui/src/status-line/types.ts
 @@ -36,7 +36,7 @@ export interface CollabStatus {
@@ -2594,7 +2627,7 @@ index 5c59616..8ff8c24 100644
  	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
  	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
  	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
-@@ -71,6 +71,24 @@ // ═══════════════════════════════════════════════════════════════════════════
+@@ -71,6 +71,24 @@ export type EffectiveStatusLineSettings = Required<
  // Segment Rendering
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -2619,8 +2652,8 @@ index 5c59616..8ff8c24 100644
  export type RGB = readonly [number, number, number];
  
  export interface SegmentContext {
-@@ -204,6 +222,13 @@ export interface SegmentContext {
- 			unavailableReason?: string;
+@@ -205,6 +223,13 @@ export interface SegmentContext {
+ 			expiring?: StatusResetExpiry;
  		};
  	} | null;
 +	/**
@@ -2632,9 +2665,9 @@ index 5c59616..8ff8c24 100644
 +	account?: ActiveAccountStatus | null;
  }
  
- export interface RenderedSegment {
+ /** How close an account's saved resets are to expiring, when it is worth a warning. */
 diff --git a/packages/tui/src/theme/symbols.ts b/packages/tui/src/theme/symbols.ts
-index 9d7650a..a9dff6e 100644
+index 158ab5d..e57aa18 100644
 --- a/packages/tui/src/theme/symbols.ts
 +++ b/packages/tui/src/theme/symbols.ts
 @@ -97,6 +97,8 @@ export type SymbolKey =
@@ -2646,7 +2679,7 @@ index 9d7650a..a9dff6e 100644
  	| "icon.time"
  	| "icon.omp"
  	| "icon.ghost"
-@@ -477,6 +479,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
+@@ -478,6 +480,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "👁",
  	"icon.advisorClosed": "🙈",
@@ -2655,7 +2688,7 @@ index 9d7650a..a9dff6e 100644
  	"icon.time": "⏱",
  	"icon.omp": "π",
  	"icon.ghost": "👻",
-@@ -853,6 +857,10 @@ const NERD_SYMBOLS: SymbolMap = {
+@@ -855,6 +859,10 @@ const NERD_SYMBOLS: SymbolMap = {
  	"icon.advisor": "\uea70",
  	// pick:  (nf-oct-eye_closed)
  	"icon.advisorClosed": "\ueae7",
@@ -2666,7 +2699,7 @@ index 9d7650a..a9dff6e 100644
  	// pick:  | alt: ◷ ◴
  	"icon.time": "\uf017",
  	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
-@@ -1257,6 +1265,8 @@ const ASCII_SYMBOLS: SymbolMap = {
+@@ -1261,6 +1269,8 @@ const ASCII_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "(adv)",
  	"icon.advisorClosed": "(adv)",
@@ -2676,10 +2709,10 @@ index 9d7650a..a9dff6e 100644
  	"icon.omp": "pi",
  	"icon.ghost": "@",
 diff --git a/packages/tui/src/theme/theme-class.ts b/packages/tui/src/theme/theme-class.ts
-index 538aabf..9b250cf 100644
+index e66b758..ab649dc 100644
 --- a/packages/tui/src/theme/theme-class.ts
 +++ b/packages/tui/src/theme/theme-class.ts
-@@ -612,6 +612,8 @@ export class Theme {
+@@ -637,6 +637,8 @@ export class Theme {
  			subscription: this.#symbols["icon.subscription"],
  			advisor: this.#symbols["icon.advisor"],
  			advisorClosed: this.#symbols["icon.advisorClosed"],
@@ -2689,10 +2722,10 @@ index 538aabf..9b250cf 100644
  			omp: this.#symbols["icon.omp"],
  			ghost: this.#symbols["icon.ghost"],
 diff --git a/packages/tui/test/input.test.ts b/packages/tui/test/input.test.ts
-index 8761bda..fe5a6fd 100644
+index cce192a..d2d18ff 100644
 --- a/packages/tui/test/input.test.ts
 +++ b/packages/tui/test/input.test.ts
-@@ -353,6 +353,60 @@ describe("Input component", () => {
+@@ -354,6 +354,60 @@ describe("Input component", () => {
  		expect(visibleWidth(wideLine.slice(0, wideLine.indexOf(CURSOR_MARKER)))).toBe(promptWidth + 16);
  	});
  
@@ -2845,7 +2878,7 @@ index 067ade3..0d53066 100644
 +	});
 +});
 diff --git a/packages/utils/src/dirs.ts b/packages/utils/src/dirs.ts
-index 9e4ccd9..0eae1f3 100644
+index 5fb8c48..11c86bb 100644
 --- a/packages/utils/src/dirs.ts
 +++ b/packages/utils/src/dirs.ts
 @@ -620,6 +620,14 @@ export function getAgentDir(): string {

@@ -254,22 +254,22 @@ index 0000000..9bf777b
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
 +connection profiles. Delete it separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index 37ee91f..1d5d846 100644
+index b93a7a0..f31d9f1 100644
 --- a/package.json
 +++ b/package.json
-@@ -21,11 +21,11 @@ {
- 			"@oh-my-pi/pi-agent-core": "18.6.1",
- 			"@oh-my-pi/pi-ai": "18.6.1",
- 			"@oh-my-pi/pi-catalog": "18.6.1",
--			"@oh-my-pi/pi-coding-agent": "18.6.1",
-+			"@oh-my-pi/pi-coding-agent": "18.6.1-fork.3",
- 			"@oh-my-pi/pi-mnemopi": "18.6.1",
- 			"@oh-my-pi/pi-natives": "18.6.1",
- 			"@oh-my-pi/pi-tui": "18.6.1",
--			"@oh-my-pi/pi-utils": "18.6.1",
-+			"@oh-my-pi/pi-utils": "18.6.1-fork.3",
- 			"@oh-my-pi/pi-wire": "18.6.1",
- 			"@oh-my-pi/snapcompact": "18.6.1",
+@@ -21,11 +21,11 @@
+ 			"@oh-my-pi/pi-agent-core": "18.9.2",
+ 			"@oh-my-pi/pi-ai": "18.9.2",
+ 			"@oh-my-pi/pi-catalog": "18.9.2",
+-			"@oh-my-pi/pi-coding-agent": "18.9.2",
++			"@oh-my-pi/pi-coding-agent": "18.9.2-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.9.2",
+ 			"@oh-my-pi/pi-natives": "18.9.2",
+ 			"@oh-my-pi/pi-tui": "18.9.2",
+-			"@oh-my-pi/pi-utils": "18.9.2",
++			"@oh-my-pi/pi-utils": "18.9.2-fork.1",
+ 			"@oh-my-pi/pi-wire": "18.9.2",
+ 			"@oh-my-pi/snapcompact": "18.9.2",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
 index e9c269b..02a9c21 100644
@@ -285,14 +285,14 @@ index e9c269b..02a9c21 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index fcce940..9ff06fb 100644
+index dd42859..b00a23a 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.6.1",
-+	"version": "18.6.1-fork.3",
+-	"version": "18.9.2",
++	"version": "18.9.2-fork.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -437,165 +437,63 @@ index 0000000..b935289
 +	return release;
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index dd97a07..05e12b4 100644
+index 6159a1c..cd17e90 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -9,7 +9,7 @@ import * as os from "node:os";
- import * as path from "node:path";
- import { Transform } from "node:stream";
+@@ -11,6 +11,7 @@ import { Transform } from "node:stream";
  import { pipeline } from "node:stream/promises";
--import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
-+import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+ import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
+ import {
++	$env,
+ 	$which,
+ 	APP_NAME,
+ 	compareVersions,
+@@ -19,6 +20,7 @@ import {
+ 	isCompiledBinary,
+ 	isEnoent,
+ 	VERSION,
++	WhichCachePolicy,
+ } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
- import { $ } from "bun";
-@@ -28,10 +28,15 @@ import {
+@@ -31,7 +33,14 @@ import {
+ 	unsupportedProxyMessage,
+ 	withTimeoutSignal,
+ } from "../utils/fetch-timeout";
+-import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
++import {
++	type BuildAnswer,
++	type BuildPatch,
++	currentBuildHost,
++	type Fetch,
++	fetchBuild,
++	type UpdateChannel,
++} from "./build-service";
+ import {
+ 	DEFAULT_NPM_REGISTRY,
+ 	loadNpmRegistryResolver,
+@@ -39,6 +48,12 @@ import {
  	type NpmRegistryResolver,
  	npmRegistryPackageUrl,
  } from "./npm-registry";
 +import {
 +	buildBinaryDownloadUrl,
++	type ReleaseInfo as ForkReleaseInfo,
 +	getLatestReleaseForVersion,
 +	isForkVersion,
-+	UPSTREAM_RELEASE_REPO,
 +} from "./release-info";
  
  import { cfgUpdateChannel } from "../modes/settings";
  
--const REPO = "can1357/oh-my-pi";
- const PACKAGE = "@oh-my-pi/pi-coding-agent";
+@@ -46,6 +61,7 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
  const MISE_TOOL = "github:can1357/oh-my-pi";
-@@ -87,6 +92,11 @@ export interface ReleaseRename {
- const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
+ const NIX_STORE_DIR = "/nix/store";
++const GITHUB_API = "https://api.github.com";
+ const RELEASE_METADATA_TIMEOUT_MS = 30_000;
+ const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
  
- export interface ReleaseInfo {
-+	/**
-+	 * GitHub repo the binary asset is fetched from. Defaults to the upstream
-+	 * channel; the fork release line sets its own repo.
-+	 */
-+	repo?: string;
- 	tag: string;
- 	version: string;
- 	/** Parsed `omp.dist` from the registry manifest; undefined when absent. */
-@@ -199,7 +209,6 @@ export function resolveReleaseRename(manifest: unknown): ReleaseRename | undefined {
- 		natives: typeof natives === "string" && natives.length > 0 ? natives : undefined,
- 	};
- }
--
- function majorVersion(version: string): number {
- 	const major = Number.parseInt(version, 10);
- 	return Number.isNaN(major) ? 0 : major;
-@@ -227,6 +236,10 @@ ): boolean {
- /**
-  * Select and validate the binary asset from GitHub release metadata.
-  *
-+ * `repo` defaults to the upstream channel; the fork release line passes its own
-+ * repo. Both channels publish stable (non-draft, non-prerelease) releases, so
-+ * the integrity gate is identical for either.
-+ *
-  * Draft releases are always rejected. Prereleases are rejected unless
-  * `options.allowPrerelease` is set, which the canary channel passes: canary
-  * GitHub releases are published as prereleases, and the exact-tag match below
-@@ -236,8 +249,9 @@ export function resolveReleaseBinaryAsset(
- 	release: unknown,
- 	expectedTag: string,
- 	binaryName: string,
--	options: { allowPrerelease?: boolean } = {},
-+	options: { repo?: string; allowPrerelease?: boolean } = {},
- ): ReleaseBinaryAsset {
-+	const repo = options.repo ?? UPSTREAM_RELEASE_REPO;
- 	if (!isRecord(release)) {
- 		throw new Error("Invalid GitHub release metadata");
- 	}
-@@ -274,7 +288,7 @@ ): ReleaseBinaryAsset {
- 		throw new Error(`GitHub release asset ${binaryName} has an unsupported digest`);
- 	}
- 
--	const expectedUrl = `https://github.com/${REPO}/releases/download/${expectedTag}/${binaryName}`;
-+	const expectedUrl = buildBinaryDownloadUrl(repo, expectedTag, binaryName);
- 	if (asset.browser_download_url !== expectedUrl) {
- 		throw new Error(`GitHub release asset ${binaryName} has an unexpected download URL`);
- 	}
-@@ -306,7 +320,7 @@ export function selectFallbackBinaryAsset(
- 	releases: unknown,
- 	binaryName: string,
- 	minVersion: string,
--	options: { allowPrerelease?: boolean } = {},
-+	options: { repo?: string; allowPrerelease?: boolean } = {},
- ): ReleaseBinaryAsset | undefined {
- 	if (!Array.isArray(releases)) return undefined;
- 	const candidates: Array<{ tag: string; release: unknown }> = [];
-@@ -359,28 +373,29 @@ /** Releases scanned when the requested tag has no GitHub release; one page spans months of releases. */
- const RELEASE_LISTING_PAGE_SIZE = 30;
- 
- async function getReleaseBinaryAsset(
--	expectedVersion: string,
-+	release: ReleaseInfo,
- 	binaryName: string,
- 	fetchImpl: Fetch = fetch,
- 	githubToken?: string,
- 	allowPrerelease = false,
- ): Promise<ReleaseBinaryAsset> {
--	const tag = `v${expectedVersion}`;
-+	const repo = release.repo ?? UPSTREAM_RELEASE_REPO;
-+	const tag = release.tag;
- 	const token = githubToken ?? (await resolveGitHubToken());
- 	const response = await fetchReleaseMetadata(
--		`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`,
-+		`${GITHUB_API}/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`,
- 		fetchImpl,
- 		token,
- 	);
- 	if (response.ok) {
--		return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { allowPrerelease });
-+		return resolveReleaseBinaryAsset(await response.json(), tag, binaryName, { repo, allowPrerelease });
- 	}
- 	if (response.status !== 404) {
- 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
- 	}
- 
- 	const listing = await fetchReleaseMetadata(
--		`${GITHUB_API}/repos/${REPO}/releases?per_page=${RELEASE_LISTING_PAGE_SIZE}`,
-+		`${GITHUB_API}/repos/${repo}/releases?per_page=${RELEASE_LISTING_PAGE_SIZE}`,
- 		fetchImpl,
- 		token,
- 	);
-@@ -389,10 +404,10 @@ ): Promise<ReleaseBinaryAsset> {
- 			`GitHub release ${tag} is not published and listing published releases failed: ${listing.statusText}`,
- 		);
- 	}
--	const fallback = selectFallbackBinaryAsset(await listing.json(), binaryName, VERSION, { allowPrerelease });
-+	const fallback = selectFallbackBinaryAsset(await listing.json(), binaryName, VERSION, { repo, allowPrerelease });
- 	if (!fallback) {
- 		throw new Error(
--			`npm advertises ${expectedVersion} but GitHub release ${tag} is not published, and no newer published release ships ${binaryName}; retry once the release finishes publishing, or reinstall with: ${installerHint()}`,
-+			`npm advertises ${release.version} but GitHub release ${tag} is not published, and no newer published release ships ${binaryName}; retry once the release finishes publishing, or reinstall with: ${installerHint()}`,
- 		);
- 	}
- 	console.log(
-@@ -472,7 +487,6 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOptions): Promise<void> {
- 		throw err;
- 	}
- }
--
- /** Result from running the installed binary and parsing its reported version. */
- export interface InstalledVersionVerification {
- 	ok: boolean;
-@@ -883,6 +897,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): Promise<UpdateTarget> {
- 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
- }
- 
-+function resolveOmpBinaryPathForUpdate(): string {
-+	const targetPath = resolveOmpPath();
-+	if (!targetPath) throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
-+	return targetPath;
-+}
-+
- /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
- const MAX_RENAME_HOPS = 3;
- 
-@@ -1315,7 +1335,7 @@ /**
+@@ -1055,7 +1071,7 @@ async function pruneBunCacheAfterGlobalInstall(): Promise<BunInstallCachePruneRe
   * Resolve the path that `omp` maps to in the user's PATH.
   */
  function resolveOmpPath(): string | undefined {
@@ -604,108 +502,169 @@ index dd97a07..05e12b4 100644
  }
  
  /**
-@@ -1981,6 +2001,7 @@ export async function updateViaBinaryAt(
- 		binaryName?: string;
- 		fetchImpl?: Fetch;
- 		githubToken?: string;
-+		release?: ReleaseInfo;
- 		allowPrerelease?: boolean;
- 		/** Refuse replacement unless the existing path is a non-script OMP executable. */
- 		validateExistingTarget?: boolean;
-@@ -1989,6 +2010,13 @@ export async function updateViaBinaryAt(
- ): Promise<void> {
- 	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);
- 	const binaryName = options.binaryName ?? getBinaryName();
-+	const release = options.release ?? {
-+		repo: UPSTREAM_RELEASE_REPO,
-+		tag: `v${expectedVersion}`,
-+		version: expectedVersion,
-+		packages: CURRENT_PACKAGES,
-+		registry: DEFAULT_NPM_REGISTRY,
-+	};
- 	// Unique per attempt so two overlapping `omp update` runs never share a temp
- 	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
- 	// pre-download unlink delete the first run's still-downloading temp file; the
-@@ -2002,7 +2030,7 @@ ): Promise<void> {
- 	const tempPath = `${targetPath}.${attempt}.new`;
- 	const backupPath = `${targetPath}.${attempt}.bak`;
- 	const asset = await getReleaseBinaryAsset(
--		expectedVersion,
-+		release,
- 		binaryName,
- 		options.fetchImpl,
- 		options.githubToken,
-@@ -2085,17 +2113,25 @@ export async function updateViaShimTakeover(
- 		binaryName?: string;
- 		fetchImpl?: Fetch;
- 		githubToken?: string;
-+		release?: ReleaseInfo;
- 		allowPrerelease?: boolean;
- 		verifyBinary?: typeof verifyBinaryAtPath;
- 	} = {},
- ): Promise<void> {
- 	const binaryName = options.binaryName ?? getBinaryName();
-+	const release = options.release ?? {
-+		repo: UPSTREAM_RELEASE_REPO,
-+		tag: `v${expectedVersion}`,
-+		version: expectedVersion,
-+		packages: CURRENT_PACKAGES,
-+		registry: DEFAULT_NPM_REGISTRY,
-+	};
- 	const launcherDir = path.dirname(shimPath);
- 	const exePath = path.join(launcherDir, `${APP_NAME}.exe`);
- 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
- 	const tempPath = `${exePath}.${attempt}.new`;
- 	const asset = await getReleaseBinaryAsset(
--		expectedVersion,
-+		release,
- 		binaryName,
- 		options.fetchImpl,
- 		options.githubToken,
-@@ -2226,6 +2262,7 @@ export async function runUpdateCommand(opts: {
- 	check: boolean;
- 	channel?: UpdateChannel;
- }): Promise<void> {
-+	const isForkBuild = isForkVersion();
- 	console.log(chalk.dim(`Current version: ${VERSION}`));
- 	const persistedChannel = readPersistedChannel() ?? "stable";
- 	const channel = opts.channel ?? persistedChannel;
-@@ -2235,7 +2272,9 @@ export async function runUpdateCommand(opts: {
- 	// Check for updates
- 	let release: ReleaseInfo;
- 	try {
--		release = await getLatestRelease({ channel });
-+		release = isForkBuild
-+			? { ...(await getLatestReleaseForVersion()), packages: CURRENT_PACKAGES, registry: DEFAULT_NPM_REGISTRY }
-+			: await getLatestRelease({ channel });
- 	} catch (err) {
- 		console.error(chalk.red(`Failed to check for updates: ${err}`));
- 		process.exit(1);
-@@ -2269,6 +2308,16 @@ export async function runUpdateCommand(opts: {
- 		return;
+@@ -2219,6 +2235,151 @@ async function runManagedUpdate(
  	}
+ }
  
-+	if (isForkBuild) {
-+		try {
-+			await updateViaBinaryAt(resolveOmpBinaryPathForUpdate(), release.version, { release });
-+		} catch (err) {
-+			console.error(chalk.red(`Update failed: ${err}`));
-+			process.exit(1);
++async function readGitHubCliToken(ghPath: string): Promise<string | undefined> {
++	try {
++		const result = await $`${ghPath} auth token --hostname github.com`.quiet().nothrow();
++		if (result.exitCode !== 0) return undefined;
++		const token = result.text().trim();
++		return token.length > 0 ? token : undefined;
++	} catch {
++		return undefined;
++	}
++}
++
++/** GitHub API credential for release metadata: `GITHUB_TOKEN`/`GH_TOKEN`, else the `gh` CLI login. */
++async function resolveGitHubToken(): Promise<string | undefined> {
++	const envToken = $env.GITHUB_TOKEN || $env.GH_TOKEN;
++	if (envToken) return envToken;
++	const ghPath = $which("gh");
++	if (!ghPath) return undefined;
++	return (await readGitHubCliToken(ghPath))?.trim() || undefined;
++}
++
++/** Release metadata request with the shared headers, timeout, and rate-limit mapping. */
++async function fetchReleaseMetadata(url: string, token: string | undefined): Promise<Response> {
++	const headers: Record<string, string> = {
++		Accept: "application/vnd.github+json",
++		"X-GitHub-Api-Version": "2022-11-28",
++	};
++	if (token) headers.Authorization = `Bearer ${token}`;
++
++	let response: Response;
++	try {
++		response = await fetch(url, { headers, signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS) });
++	} catch (err) {
++		if (isTimeoutError(err)) {
++			throw new Error("Timed out fetching GitHub release metadata after 30s", { cause: err });
 +		}
-+		return;
++		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
++		throw err;
++	}
++	if ((response.status === 403 && !token) || response.status === 429) {
++		throw new Error(
++			"GitHub API rate limit exceeded while fetching release metadata; retry later or set GITHUB_TOKEN or GH_TOKEN",
++		);
++	}
++	return response;
++}
++
++/**
++ * Validate a fork GitHub release's binary asset and describe it as a
++ * {@link BuildAnswer}, so it installs through the same verified download and
++ * swap as a build-service answer. Drafts and prereleases are rejected, the tag
++ * must match exactly, and the asset must be fully uploaded with a SHA-256
++ * digest and the canonical download URL.
++ */
++function resolveReleaseBinaryAsset(
++	release: unknown,
++	expectedTag: string,
++	binaryName: string,
++	repo: string,
++): BuildAnswer {
++	if (!isRecord(release)) {
++		throw new Error("Invalid GitHub release metadata");
++	}
++	if (release.tag_name !== expectedTag) {
++		throw new Error(`GitHub release tag mismatch: expected ${expectedTag}`);
++	}
++	if (release.draft !== false) {
++		throw new Error(`GitHub release ${expectedTag} is a draft, not a published release`);
++	}
++	if (release.prerelease !== false) {
++		throw new Error(`GitHub release ${expectedTag} is a prerelease`);
++	}
++	if (!Array.isArray(release.assets)) {
++		throw new Error(`GitHub release ${expectedTag} has no asset list`);
 +	}
 +
- 	// Choose update method based on the prioritized omp binary in PATH. For
- 	// binary-only releases the package managers are never consulted: a bun/npm
- 	// symlink resolves to method "binary" and is replaced in place, keeping the
-@@ -2314,6 +2363,7 @@ export async function runUpdateCommand(opts: {
- 				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
- 			}
- 			await updateViaBinaryAt(target.path, release.version, {
-+				release,
- 				allowPrerelease,
- 				validateExistingTarget: target.validateExistingTarget,
- 			});
++	const matches = release.assets.filter(asset => isRecord(asset) && asset.name === binaryName);
++	if (matches.length !== 1) {
++		throw new Error(`GitHub release ${expectedTag} has ${matches.length} assets named ${binaryName}`);
++	}
++
++	const asset = matches[0];
++	if (!isRecord(asset) || asset.state !== "uploaded") {
++		throw new Error(`GitHub release asset ${binaryName} is not fully uploaded`);
++	}
++	if (typeof asset.size !== "number" || !Number.isSafeInteger(asset.size) || asset.size <= 0) {
++		throw new Error(`GitHub release asset ${binaryName} has an invalid size`);
++	}
++	if (typeof asset.digest !== "string") {
++		throw new Error(`GitHub release asset ${binaryName} has no digest`);
++	}
++	const digest = /^sha256:([0-9a-f]{64})$/i.exec(asset.digest)?.[1];
++	if (!digest) {
++		throw new Error(`GitHub release asset ${binaryName} has an unsupported digest`);
++	}
++
++	const expectedUrl = buildBinaryDownloadUrl(repo, expectedTag, binaryName);
++	if (asset.browser_download_url !== expectedUrl) {
++		throw new Error(`GitHub release asset ${binaryName} has an unexpected download URL`);
++	}
++
++	return {
++		version: expectedTag.replace(/^v/, ""),
++		file: { name: binaryName, size: asset.size, sha256: digest.toLowerCase() },
++		download: expectedUrl,
++	};
++}
++
++/** This host's binary asset of a fork release, resolved from its GitHub release metadata. */
++async function fetchForkReleaseBuild(release: ForkReleaseInfo): Promise<BuildAnswer> {
++	const { fileName } = await currentBuildHost();
++	const response = await fetchReleaseMetadata(
++		`${GITHUB_API}/repos/${release.repo}/releases/tags/${encodeURIComponent(release.tag)}`,
++		await resolveGitHubToken(),
++	);
++	if (!response.ok) {
++		throw new Error(`Failed to fetch GitHub release ${release.tag} metadata: ${response.statusText}`);
++	}
++	return resolveReleaseBinaryAsset(await response.json(), release.tag, fileName, release.repo);
++}
++
++/**
++ * Update a fork build (`vX.Y.Z-fork.N`) from the fork's GitHub release line.
++ * Upstream's build service and npm never serve fork builds, so the PATH `omp`
++ * is replaced in place with the verified release asset whatever installed it.
++ */
++async function runForkReleaseUpdate(request: UpdateRequest): Promise<void> {
++	let release: ForkReleaseInfo;
++	try {
++		release = await getLatestReleaseForVersion();
++	} catch (err) {
++		console.error(chalk.red(`Failed to check for updates: ${err}`));
++		process.exit(1);
++	}
++	if (!announceOffer(release.version, request) || request.check) return;
++
++	try {
++		const targetPath = resolveOmpPath();
++		if (!targetPath) throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
++		await updateViaBinaryAt(targetPath, await fetchForkReleaseBuild(release));
++	} catch (err) {
++		console.error(chalk.red(`Update failed: ${err}`));
++		process.exit(1);
++	}
++}
++
+ /**
+  * Run the update command.
+  *
+@@ -2253,6 +2414,10 @@ export async function runUpdateCommand(opts: {
+ 		isChannelSwitch: opts.channel !== undefined && opts.channel !== persistedChannel,
+ 		persistChannel: opts.channel !== undefined,
+ 	};
++	if (isForkVersion()) {
++		await runForkReleaseUpdate(request);
++		return;
++	}
+ 
+ 	let target: UpdateTarget | undefined;
+ 	let targetError: unknown;
 diff --git a/packages/coding-agent/test/release-info.test.ts b/packages/coding-agent/test/release-info.test.ts
 new file mode 100644
 index 0000000..94434c3
@@ -732,11 +691,12 @@ index 0000000..94434c3
 +});
 diff --git a/packages/coding-agent/test/startup-update-check.test.ts b/packages/coding-agent/test/startup-update-check.test.ts
 new file mode 100644
-index 0000000..4d0e6f5
+index 0000000..25c6094
 --- /dev/null
 +++ b/packages/coding-agent/test/startup-update-check.test.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,31 @@
 +import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
++import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 +import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 +import { checkForNewVersion } from "@oh-my-pi/pi-coding-agent/main";
 +
@@ -752,6 +712,8 @@ index 0000000..4d0e6f5
 +
 +describe("startup update check", () => {
 +	it("checks fork GitHub releases for fork builds", async () => {
++		// Tests run from the source checkout, which skips the startup check entirely.
++		spyOn(updateCli, "isSourceCheckout").mockReturnValue(false);
 +		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
 +			Response.json([{ tag_name: "v16.5.0-fork.3", draft: false, prerelease: false }]),
 +		);
@@ -765,10 +727,10 @@ index 0000000..4d0e6f5
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index 5b75e05..4ae14db 100644
+index 9e64e56..e0a7b25 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -122,6 +122,118 @@ describe("update command plugin dispatch", () => {
+@@ -139,6 +139,118 @@ describe("update command plugin dispatch", () => {
  	});
  });
  
@@ -888,14 +850,14 @@ index 5b75e05..4ae14db 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 7238a5c..cf1aa4f 100644
+index fa96edc..1091b6b 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.6.1",
-+	"version": "18.6.1-fork.3",
+-	"version": "18.9.2",
++	"version": "18.9.2-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
@@ -913,15 +875,14 @@ index e406047..b1b6b2a 100644
  		try {
  			await Bun.write(
 diff --git a/scripts/ci-test-ts.test.ts b/scripts/ci-test-ts.test.ts
-index 18504d6..77953bd 100644
---- a/scripts/ci-test-ts.test.ts
+new file mode 100644
+index 0000000..93b76dd
+--- /dev/null
 +++ b/scripts/ci-test-ts.test.ts
-@@ -1,7 +1,111 @@
- import { describe, expect, test } from "bun:test";
+@@ -0,0 +1,105 @@
++import { describe, expect, test } from "bun:test";
 +import * as path from "node:path";
- import { ptree, TempDir } from "@oh-my-pi/pi-utils";
- import { selectShard } from "./ci-test-ts";
- 
++
 +async function runCiTestTs(args: string[]): Promise<{
 +	stdout: string;
 +	stderr: string;
@@ -1024,12 +985,8 @@ index 18504d6..77953bd 100644
 +		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/typo.test.ts");
 +	}, 30_000);
 +});
-+
- describe("test runner watchdog", () => {
- 	// Parent fake timers cannot drive the real watchdog inside the isolated runner process.
- 	test("kills a stalled chunk, reports failure, and continues the queue", async () => {
 diff --git a/scripts/ci-test-ts.ts b/scripts/ci-test-ts.ts
-index 5d3b3b1..e8762da 100755
+index c00de0d..3b9cf7e 100755
 --- a/scripts/ci-test-ts.ts
 +++ b/scripts/ci-test-ts.ts
 @@ -27,12 +27,21 @@ interface TestCommand {
@@ -1080,7 +1037,7 @@ index 5d3b3b1..e8762da 100755
  function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
  	const { extraArgs = [] } = options;
  	return {
-@@ -299,10 +326,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> {
+@@ -299,10 +326,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition>
  	return codingAgentTestPartitionPromise;
  }
  
@@ -1101,7 +1058,7 @@ index 5d3b3b1..e8762da 100755
  		throw new Error(`No coding-agent ${bucket} tests matched`);
  	}
  	const plan = codingAgentBucketPlans[bucket];
-@@ -319,15 +354,15 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
+@@ -319,15 +354,15 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
  			parallel: plan.parallel,
  		});
  	}
@@ -1179,22 +1136,22 @@ index 5d3b3b1..e8762da 100755
  	}
  }
  
-@@ -946,7 +985,14 @@ if (import.meta.main) {
- 		);
- 	}
+@@ -1003,7 +1042,14 @@ if (!(requestedMode in validModes)) {
+ 	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`);
+ }
  
--	const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
-+	const plan = await commandsForMode(requestedMode as Mode);
-+	const unmatchedCodingAgentTestFiles = requestedCodingAgentTestFiles.filter(
-+		requested => !plan.matchedCodingAgentTestFiles.includes(requested),
-+	);
-+	if (unmatchedCodingAgentTestFiles.length > 0) {
-+		throw new Error(`No coding-agent tests matched requested filter(s): ${unmatchedCodingAgentTestFiles.join(", ")}`);
-+	}
-+	const requestedCommands = selectShard(plan.commands, Bun.env.OMP_TEST_SHARD);
- 	const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
- 	// CI defaults to one process at a time, but memory-sized workflow buckets
- 	// explicitly opt into bounded process concurrency. Local runs fan out by
+-const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
++const plan = await commandsForMode(requestedMode as Mode);
++const unmatchedCodingAgentTestFiles = requestedCodingAgentTestFiles.filter(
++	requested => !plan.matchedCodingAgentTestFiles.includes(requested),
++);
++if (unmatchedCodingAgentTestFiles.length > 0) {
++	throw new Error(`No coding-agent tests matched requested filter(s): ${unmatchedCodingAgentTestFiles.join(", ")}`);
++}
++const requestedCommands = selectShard(plan.commands, Bun.env.OMP_TEST_SHARD);
+ const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
+ // CI defaults to one process at a time, but memory-sized workflow buckets
+ // explicitly opt into bounded process concurrency. Local runs fan out by
 diff --git a/scripts/install-fork.ps1 b/scripts/install-fork.ps1
 new file mode 100644
 index 0000000..dd0743d

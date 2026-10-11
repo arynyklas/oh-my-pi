@@ -1,17 +1,17 @@
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index ee2c879..4a2057e 100644
+index 4b2038e..dcf3c33 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -21,8 +21,6 @@ import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
- 
- const MAX_ATTEMPTS = 3;
+@@ -24,8 +24,6 @@ const MAX_ATTEMPTS = 3;
  const BASE_RETRY_DELAY_MS = 500;
+ /** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
+ const FAILURE_BACKOFF_MS = 60_000;
 -/** Shared windows that gate every Claude request, whatever the model. */
 -const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
  
  const CLAUDE_USAGE_BETAS =
  	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-@@ -939,40 +937,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+@@ -946,40 +944,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	/**
  	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
  	 * Anthropic can restore the tier earlier (plan change, corrected counter),
@@ -320,10 +320,10 @@ index 0000000..c8cc54a
 +});
 diff --git a/packages/ai/src/usage/match.ts b/packages/ai/src/usage/match.ts
 new file mode 100644
-index 0000000..e368867
+index 0000000..e67a4eb
 --- /dev/null
 +++ b/packages/ai/src/usage/match.ts
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,288 @@
 +import type { UsageReport } from "../usage";
 +
 +const EMAIL_CANONICAL_PROVIDERS: Record<string, true> = { anthropic: true, "openai-codex": true };
@@ -417,9 +417,14 @@ index 0000000..e368867
 +		};
 +	}
 +	const orgless = candidates.filter(report => normalizedReportOrgIds(report).length === 0);
++	// The sole report stands in for an identity it shares no identity field
++	// with; otherwise exact matching decides, because a report naming another
++	// email, account or project is a sibling's pool whose fetch succeeded where
++	// this identity's failed.
 +	return {
 +		candidates: orgless,
-+		allowLoneFallback: candidates.length === 1 && orgless.length === 1,
++		allowLoneFallback:
++			candidates.length === 1 && orgless.length === 1 && !reportHasComparableIdentity(orgless[0]!, identity),
 +	};
 +}
 +
@@ -527,6 +532,15 @@ index 0000000..e368867
 +	return email !== undefined && emails.length > 0 && !emails.includes(email);
 +}
 +
++/** Whether the report names an email, account or project the identity can compare against. */
++function reportHasComparableIdentity(report: UsageReport, identity: UsageReportIdentity): boolean {
++	if (normalizeIdentity(identity.email) !== undefined && normalizedReportEmails(report).length > 0) return true;
++	if (normalizeIdentity(identity.accountId) !== undefined && normalizedReportAccountIds(report).length > 0) {
++		return true;
++	}
++	return normalizeIdentity(identity.projectId) !== undefined && normalizedReportProjectIds(report).length > 0;
++}
++
 +function normalizedReportOrgIds(report: UsageReport): string[] {
 +	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
 +	return uniqueDefined([
@@ -602,7 +616,7 @@ diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/
 index db1bd56..70bff4c 100644
 --- a/packages/coding-agent/src/cli/stats-cli.ts
 +++ b/packages/coding-agent/src/cli/stats-cli.ts
-@@ -6,6 +6,7 @@ /**
+@@ -6,6 +6,7 @@
  
  import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
  import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
@@ -610,7 +624,7 @@ index db1bd56..70bff4c 100644
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { openStandaloneJudge } from "../judgment/standalone";
  import { openPath } from "../utils/open";
-@@ -15,7 +16,13 @@ /**
+@@ -15,7 +16,13 @@ import { openPath } from "../utils/open";
   * the final "Synced ..." summary still prints either way.
   */
  function createSyncProgressReporter(): {
@@ -641,38 +655,55 @@ index db1bd56..70bff4c 100644
  			const trimmed = truncateToWidth(line, columns - 1);
  			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
-index ada0606..e2f7cf8 100644
+index d40f352..2dac45f 100644
 --- a/packages/coding-agent/src/cli/usage-cli.ts
 +++ b/packages/coding-agent/src/cli/usage-cli.ts
-@@ -7,39 +7,36 @@ /**
-  * credentials produced no usage report are listed too, so the output
+@@ -8,41 +8,25 @@
   * always covers the full credential pool.
   */
--import {
+ import {
 -	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 -	type AuthAccountPolicy,
--	type DisabledCredentialSummary,
--	type OAuthAccountIdentity,
+ 	type AuthStorage,
+ 	type DisabledCredentialSummary,
+ 	type OAuthAccountIdentity,
+-	type OAuthAccountSummary,
+ 	type ResetCreditRedeemOutcome,
+-	isWithinUsageReserve,
+ 	resolveCredentialIdentityKey,
 -	resolveUsedFraction,
--	type UsageHistoryEntry,
+ 	type UsageHistoryEntry,
 -	type UsageLimit,
--	type UsageReport,
+ 	type UsageReport,
 -	type UsageUnit,
--} from "@oh-my-pi/pi-ai";
-+import type { DisabledCredentialSummary, OAuthAccountIdentity, UsageHistoryEntry, UsageReport } from "@oh-my-pi/pi-ai";
- import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+ } from "@oh-my-pi/pi-ai";
+ import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
  import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 -import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
--import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
-+import { formatDuration, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+ import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { ModelRegistry } from "../config/model-registry";
  import { Settings } from "../config/settings";
  import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 +import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
  import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+ import { resetAccountLockKey } from "../session/codex-auto-reset";
+ import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
 -import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
--import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+-import { reportMatchesStatus } from "../session/claude-auto-reset";
+-import {
+-	classifyResetExpiry,
+-	type ResetExpiryWarning,
+-	type ResetSpendVerdict,
+-	resetSpendVerdict,
+-} from "../session/reset-expiry";
+-import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
+ import { errorMessage } from "../slash-commands/helpers/parse";
+ import {
+ 	describeRedeemOutcome,
+@@ -55,16 +39,27 @@ import {
+ 	toResetUsageAccount,
+ } from "../slash-commands/helpers/reset-usage";
  import {
 -	accountIdentityLabel,
  	collectStoredAccounts,
@@ -683,12 +714,14 @@ index ada0606..e2f7cf8 100644
 +import {
 +	computeProviderWindowStats,
 +	formatProviderName,
++	formatQualifiedIdentity,
 +	formatUsageBreakdown,
 +	isActionableDisable,
 +	type LimitStatus,
 +	type ProviderWindowStat,
 +	STATUS_COLOR,
 +	type UsagePolicyDiagnosticsOptions,
++	type UsageResetExpiryOptions,
 +} from "../utils/usage-format";
  
  import { cfgRetryUsageReservePct } from "../session/settings";
@@ -698,16 +731,7 @@ index ada0606..e2f7cf8 100644
  
  export interface UsageCommandArgs {
  	action?: string;
-@@ -48,7 +45,7 @@ export interface UsageCommandArgs {
- 	redact?: boolean;
- 	/** Show recorded usage-limit history instead of a live snapshot. */
- 	history?: boolean;
--	/** History window in days (with `history` or the `clients` action). */
-+	/** History window in days (with `history`). */
- 	days?: number;
- 	/** CLI `-e <path>` extension paths to load before fetching live reports. */
- 	extensions?: string[];
-@@ -56,13 +53,6 @@ export interface UsageCommandArgs {
+@@ -83,20 +78,6 @@ export interface UsageCommandArgs {
  	noExtensions?: boolean;
  }
  
@@ -718,10 +742,17 @@ index ada0606..e2f7cf8 100644
 -	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 -}
 -
+-export interface UsageResetExpiryOptions {
+-	/** Settings that decide whether an expiring saved reset is spent automatically. */
+-	settings: Settings;
+-	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
+-	accounts: (provider: string) => readonly OAuthAccountSummary[];
+-}
+-
  /**
   * Minimal-reveal masks for identity strings (`--redact`).
   *
-@@ -182,562 +172,6 @@ ): string[] {
+@@ -216,679 +197,6 @@ function collectIdentityStrings(
  	return values;
  }
  
@@ -832,6 +863,37 @@ index ada0606..e2f7cf8 100644
 -	return `account ${index + 1}`;
 -}
 -
+-/** Bold identity plus the dim same-email qualifier and plan the main view shows. */
+-function formatQualifiedIdentity(
+-	report: UsageReport,
+-	peers: readonly UsageReport[],
+-	label: string,
+-	redaction?: Map<string, string>,
+-): string {
+-	const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
+-	const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
+-	return `${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
+-}
+-
+-/** Account identity as the breakdown shows it: bold label, then the dim organization and plan. */
+-function formatReportIdentity(
+-	report: UsageReport,
+-	peers: readonly UsageReport[],
+-	index: number,
+-	redaction?: Map<string, string>,
+-): string {
+-	const label = reportAccountLabel(report, index);
+-	if (report.provider === "openai-codex") return formatQualifiedIdentity(report, peers, label, redaction);
+-	let identity = chalk.bold(redaction?.get(label) ?? label);
+-	const metaOrgName = report.metadata?.orgName;
+-	const metaOrgId = report.metadata?.orgId;
+-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+-	if (typeof org === "string" && org && org !== label) identity += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+-	const plan = report.metadata?.planType;
+-	if (typeof plan === "string" && plan.trim()) identity += chalk.dim(` · plan: ${plan.trim()}`);
+-	return identity;
+-}
+-
 -function formatAccountHeader(
 -	report: UsageReport,
 -	peers: readonly UsageReport[],
@@ -840,21 +902,7 @@ index ada0606..e2f7cf8 100644
 -	redaction?: Map<string, string>,
 -): string {
 -	const status = aggregateStatus(report.limits);
--	const icon = STATUS_COLOR[status]("●");
--	const label = reportAccountLabel(report, index);
--	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
--	if (report.provider === "openai-codex") {
--		const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
--		const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
--		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
--	} else {
--		const metaOrgName = report.metadata?.orgName;
--		const metaOrgId = report.metadata?.orgId;
--		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
--		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
--		const plan = report.metadata?.planType;
--		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
--	}
+-	let header = `${STATUS_COLOR[status]("●")} ${formatReportIdentity(report, peers, index, redaction)}`;
 -	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 -	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 -	if (resets && resets.bankedCount > 0) {
@@ -862,7 +910,14 @@ index ada0606..e2f7cf8 100644
 -		if (resets.redeemableCount !== resets.bankedCount) {
 -			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 -		}
--		if (resets.soonestExpiry) {
+-		const expiring = classifyResetExpiry(report, nowMs);
+-		if (expiring) {
+-			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
+-			header +=
+-				expiring.tier === "imminent"
+-					? chalk.red(text)
+-					: chalk.yellow(`${text} (${new Date(expiring.expiresAtMs).toISOString().slice(0, 10)})`);
+-		} else if (resets.soonestExpiry) {
 -			const expiryMs = Date.parse(resets.soonestExpiry);
 -			if (expiryMs > nowMs) {
 -				header += chalk.dim(
@@ -902,18 +957,54 @@ index ada0606..e2f7cf8 100644
 -}
 -
 -interface ProviderLimitTemplate {
--	id: string;
+-	key: string;
 -	title: string;
 -}
 -
--function collectProviderLimitTemplates(reports: UsageReport[]): ProviderLimitTemplate[] {
--	const seen = new Set<string>();
+-/**
+- * One row per meter (label and window), not per limit id: Codex ids name a slot, and an
+- * account without a 5-hour window reports its 7-day one as `primary`. Most providers put the
+- * subscription plan in the tier (see {@link meterForLimit}), so the tier joins the key only for
+- * meters a single report repeats per tier (e.g. Antigravity's `Usage (<tier>)` rows).
+- */
+-function meterKey(limit: UsageLimit): string {
+-	return `${limit.label}|${limit.window?.id ?? limit.scope.windowId ?? ""}`;
+-}
+-
+-function createLimitRowKey(reports: UsageReport[]): (limit: UsageLimit) => string {
+-	const tiered = new Set<string>();
+-	for (const report of reports) {
+-		const seen = new Set<string>();
+-		for (const limit of report.limits) {
+-			const key = meterKey(limit);
+-			if (seen.has(key)) tiered.add(key);
+-			seen.add(key);
+-		}
+-	}
+-	return limit => {
+-		const key = meterKey(limit);
+-		return tiered.has(key) ? `${key}|${limit.scope.tier ?? ""}` : key;
+-	};
+-}
+-
+-function collectProviderLimitTemplates(
+-	reports: UsageReport[],
+-	rowKey: (limit: UsageLimit) => string,
+-): ProviderLimitTemplate[] {
 -	const templates: ProviderLimitTemplate[] = [];
 -	for (const report of reports) {
+-		// A row first seen in a later report goes right after its predecessor in that report,
+-		// so each account keeps its own row order.
+-		let insertAt = 0;
 -		for (const limit of report.limits) {
--			if (seen.has(limit.id)) continue;
--			seen.add(limit.id);
--			templates.push({ id: limit.id, title: limitTitle(limit) });
+-			const key = rowKey(limit);
+-			const existing = templates.findIndex(template => template.key === key);
+-			if (existing >= 0) {
+-				insertAt = existing + 1;
+-				continue;
+-			}
+-			templates.splice(insertAt, 0, { key, title: limitTitle(limit) });
+-			insertAt++;
 -		}
 -	}
 -	return templates;
@@ -1084,28 +1175,6 @@ index ada0606..e2f7cf8 100644
 -	return `${masked} · ${redaction?.get(org) ?? org}`;
 -}
 -
--function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
--	const metadata = report.metadata ?? {};
--	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
--		const value = metadata[key];
--		return typeof value === "string" && value.length > 0 ? value : undefined;
--	};
--	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
--		for (const limit of report.limits) {
--			const value = limit.scope[key];
--			if (value) return value;
--		}
--		return undefined;
--	};
--	return {
--		email: read("email"),
--		accountId: read("accountId") ?? firstScoped("accountId"),
--		projectId: read("projectId") ?? firstScoped("projectId"),
--		orgId: read("orgId") ?? firstScoped("orgId"),
--		orgName: read("orgName"),
--	};
--}
--
 -function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
 -	return {
 -		email: account.email,
@@ -1129,7 +1198,7 @@ index ada0606..e2f7cf8 100644
 -		}
 -	}
 -	for (const report of reports) {
--		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
+-		if (options.getAccountPolicy(report.provider, usageReportIdentity(report))) providers.add(report.provider);
 -	}
 -	return providers;
 -}
@@ -1149,15 +1218,81 @@ index ada0606..e2f7cf8 100644
 -	// `omp usage` has no model/session context, so report the conservative
 -	// account-wide state from the most-consumed visible window. Actual routing
 -	// still scopes limits and selection in AuthStorage.
+-	// Exhaustion follows the same status-first rule as the limit rows and routing's
+-	// `isUsageLimitReached`: a provider-reported "exhausted" wins over the fraction.
+-	const exhausted = (limits ?? []).some(limit => resolveStatus(limit) === "exhausted");
 -	const usedFractions = (limits ?? [])
 -		.map(resolveUsedFraction)
 -		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
 -	if (usedFractions.length === 0) {
--		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
+-		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
+-		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
 -	}
--	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
--	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
--	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
+-	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+-	let state = "eligible";
+-	if (exhausted || remainingFraction <= 0) state = "exhausted";
+-	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
+-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
+-}
+-
+-/** `1 expires in 6h`, or `2 expire, soonest in 6h`. */
+-function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): string {
+-	const due = formatDuration(warning.expiresAtMs - nowMs);
+-	return warning.count === 1 ? `1 expires in ${due}` : `${warning.count} expire, soonest in ${due}`;
+-}
+-
+-function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
+-	const outcome =
+-		verdict.kind === "auto"
+-			? "an open interactive omp session spends it by its last 5 min if eligible then"
+-			: verdict.kind === "ask"
+-				? "an open interactive omp session asks before spending it"
+-				: "not spent automatically";
+-	return `→ ${outcome}  (${verdict.setting}: ${verdict.mode})${verdict.eligibleNow ? "" : " · not eligible now"}`;
+-}
+-
+-/**
+- * Saved resets expiring within 24 hours on accounts worth restoring: what the
+- * provider's `autoRedeem` setting does with each one, whether it is eligible
+- * now, and the `/usage reset` target that spends it now when the provider allows.
+- */
+-function formatResetExpiryBanner(
+-	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
+-	reportsByProvider: ReadonlyMap<string, UsageReport[]>,
+-	nowMs: number,
+-	redaction: Map<string, string> | undefined,
+-	options: UsageResetExpiryOptions,
+-): string[] {
+-	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
+-	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
+-	const lost = verdicts.every(verdict => verdict.kind === "off");
+-	const lines = [
+-		chalk.red.bold(
+-			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
+-		),
+-	];
+-	expiring.forEach(({ report, warning }, index) => {
+-		const peers = reportsByProvider.get(report.provider) ?? [report];
+-		const identity = formatReportIdentity(report, peers, peers.indexOf(report), redaction);
+-		const expiry = new Date(warning.expiresAtMs);
+-		const expiresAt = `${expiry.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${expiry.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
+-		const used = `${limitTitle(warning.limit)} ${Math.round(warning.usedFraction * 100)}% used`;
+-		lines.push(
+-			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
+-		);
+-		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdicts[index]!))}`);
+-		if (!warning.usableNow) return;
+-		// Codex usage reports carry no credential id; the stored account with the same identity has it.
+-		const stored = options
+-			.accounts(warning.provider)
+-			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
+-		const command =
+-			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
+-		lines.push(
+-			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
+-		);
+-	});
+-	return lines;
 -}
 -
 -/**
@@ -1172,6 +1307,7 @@ index ada0606..e2f7cf8 100644
 -	redaction?: Map<string, string>,
 -	disabled: DisabledCredentialSummary[] = [],
 -	policyOptions?: UsagePolicyDiagnosticsOptions,
+-	resetOptions?: UsageResetExpiryOptions,
 -): string {
 -	const displayReports = collapseSharedUsageReports(reports);
 -	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -1204,6 +1340,13 @@ index ada0606..e2f7cf8 100644
 -	const latestFetchedAt = Math.max(0, ...displayReports.map(report => report.fetchedAt ?? 0));
 -	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
 -	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
+-	const expiring = displayReports.flatMap(report => {
+-		const warning = classifyResetExpiry(report, nowMs);
+-		return warning?.tier === "imminent" ? [{ report, warning }] : [];
+-	});
+-	if (resetOptions && expiring.length > 0) {
+-		lines.push("", ...formatResetExpiryBanner(expiring, reportsByProvider, nowMs, redaction, resetOptions));
+-	}
 -
 -	for (const provider of providers) {
 -		const providerReports = reportsByProvider.get(provider) ?? [];
@@ -1218,29 +1361,34 @@ index ada0606..e2f7cf8 100644
 -		for (const note of providerNotes)
 -			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
 -
--		const providerLimitTemplates = collectProviderLimitTemplates(providerReports);
--		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
+-		const limitRowKey = createLimitRowKey(providerReports);
+-		const providerLimitTemplates = collectProviderLimitTemplates(providerReports, limitRowKey);
+-		// Rows sharing a key can carry different titles (plan tiers), so measure every rendered title.
+-		const labelWidth = Math.max(
+-			0,
+-			...providerLimitTemplates.map(template => template.title.length),
+-			...providerReports.flatMap(report => report.limits.map(limit => limitTitle(limit).length)),
+-		);
 -
 -		providerReports.forEach((report, index) => {
 -			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 -			if (policyOptions && policyProviders.has(provider)) {
 -				lines.push(
--					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
+-					`      ${chalk.dim(formatPolicyLine(provider, usageReportIdentity(report), report.limits, policyOptions))}`,
 -				);
 -			}
 -			if (report.limits.length === 0) {
 -				lines.push(`      ${chalk.dim("no limits reported")}`);
 -				return;
 -			}
--			const limitsById = new Map<string, UsageLimit>();
--			for (const limit of report.limits) limitsById.set(limit.id, limit);
+-			const limitsByKey = Map.groupBy(report.limits, limitRowKey);
 -			for (const template of providerLimitTemplates) {
--				const limit = limitsById.get(template.id);
--				if (limit) {
--					lines.push(...formatLimitLine(limit, labelWidth, nowMs));
--				} else {
+-				const limits = limitsByKey.get(template.key);
+-				if (!limits) {
 -					lines.push(formatMissingLimitLine(template, labelWidth));
+-					continue;
 -				}
+-				for (const limit of limits) lines.push(...formatLimitLine(limit, labelWidth, nowMs));
 -			}
 -		});
 -
@@ -1284,7 +1432,15 @@ index ada0606..e2f7cf8 100644
  const HISTORY_SPARK_WIDTH = 48;
  const SPARK_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
  
-@@ -1164,8 +598,27 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+@@ -1194,7 +502,6 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs:
+ 	}
+ 	return lines.join("\n");
+ }
+-
+ /** The configured auth broker's client, or undefined when this machine reads its own store. */
+ async function resolveBrokerClient(): Promise<AuthBrokerClient | undefined> {
+ 	const config = await resolveAuthBrokerConfig();
+@@ -1680,12 +987,31 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
  			return;
  		}
  
@@ -1307,12 +1463,16 @@ index ada0606..e2f7cf8 100644
 +			const label = formatActiveAccountLabel(maskedIdentity);
 +			if (label) defaultAccountLabels.set(provider, label);
 +		}
+ 		const resetOptions: UsageResetExpiryOptions = {
+ 			settings,
+ 			accounts: provider => authStorage.oauth.accounts(provider),
+ 		};
  		process.stdout.write(
--			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
-+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, defaultAccountLabels)}\n`,
+-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
++			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions, defaultAccountLabels)}\n`,
  		);
- 	} finally {
- 		authStorage.close();
+ 	} catch (error) {
+ 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or
 diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts b/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
 index 73d3a4e..06ed5fb 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/usage-report.ts
@@ -1338,7 +1498,7 @@ index 73d3a4e..06ed5fb 100644
  	usageModelSelectors: readonly string[] = [],
  ): string {
  	const displayReports = collapseSharedUsageReports(reports);
-@@ -77,6 +82,10 @@ ): string {
+@@ -77,6 +82,10 @@ function renderUsageReports(
  			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
  		}
  		const activeAccount = resolveActiveAccount?.(provider);
@@ -1349,7 +1509,7 @@ index 73d3a4e..06ed5fb 100644
  		// Provider-wide disclaimers render once per provider, not per limit.
  		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
  		for (const note of providerNotes)
-@@ -181,6 +190,9 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+@@ -181,6 +190,9 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
  				reports,
  				Date.now(),
  				providerId => (providerId === currentProvider ? activeAccount : undefined),
@@ -1361,21 +1521,32 @@ index 73d3a4e..06ed5fb 100644
  		}
 diff --git a/packages/coding-agent/src/utils/usage-format.ts b/packages/coding-agent/src/utils/usage-format.ts
 new file mode 100644
-index 0000000..456a7ae
+index 0000000..147bea7
 --- /dev/null
 +++ b/packages/coding-agent/src/utils/usage-format.ts
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,772 @@
 +import {
 +	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 +	type AuthAccountPolicy,
 +	type DisabledCredentialSummary,
++	isWithinUsageReserve,
 +	type OAuthAccountIdentity,
++	type OAuthAccountSummary,
 +} from "@oh-my-pi/pi-ai";
 +import { resolveUsedFraction, type UsageLimit, type UsageReport, type UsageUnit } from "@oh-my-pi/pi-ai/usage";
 +import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 +import chalk from "@oh-my-pi/pi-utils/chalk";
 +import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
-+import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
++import type { Settings } from "../config/settings";
++import { reportMatchesStatus } from "../session/claude-auto-reset";
++import {
++	classifyResetExpiry,
++	type ResetExpiryWarning,
++	type ResetSpendVerdict,
++	resetSpendVerdict,
++} from "../session/reset-expiry";
++import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
++import { formatResetProviderName } from "../slash-commands/helpers/reset-usage";
 +import { collectUnreportedAccounts, type UsageAccountIdentity } from "../slash-commands/helpers/usage-accounts";
 +
 +const BAR_WIDTH = 28;
@@ -1389,6 +1560,13 @@ index 0000000..456a7ae
 +	globalReservePct: number;
 +	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
 +	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
++}
++
++export interface UsageResetExpiryOptions {
++	/** Settings that decide whether an expiring saved reset is spent automatically. */
++	settings: Settings;
++	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
++	accounts: (provider: string) => readonly OAuthAccountSummary[];
 +}
 +
 +export type LimitStatus = NonNullable<UsageLimit["status"]>;
@@ -1516,6 +1694,39 @@ index 0000000..456a7ae
 +	return `${masked} · ${redaction?.get(org) ?? sanitizeUsageText(org)}`;
 +}
 +
++/** Bold identity plus the dim same-email qualifier and plan the main view shows. */
++export function formatQualifiedIdentity(
++	report: UsageReport,
++	peers: readonly UsageReport[],
++	label: string,
++	redaction?: Map<string, string>,
++): string {
++	const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
++	const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
++	return `${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
++}
++
++/** Account identity as the breakdown shows it: bold label, then the dim organization and plan. */
++function formatReportIdentity(
++	report: UsageReport,
++	peers: readonly UsageReport[],
++	index: number,
++	redaction?: Map<string, string>,
++): string {
++	const label = reportAccountLabel(report, index);
++	if (report.provider === "openai-codex") return formatQualifiedIdentity(report, peers, label, redaction);
++	let identity = chalk.bold(redaction?.get(label) ?? sanitizeUsageText(label));
++	const metaOrgName = report.metadata?.orgName;
++	const metaOrgId = report.metadata?.orgId;
++	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
++	if (typeof org === "string" && org && org !== label) {
++		identity += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
++	}
++	const plan = report.metadata?.planType;
++	if (typeof plan === "string" && plan.trim()) identity += chalk.dim(` · plan: ${sanitizeUsageText(plan.trim())}`);
++	return identity;
++}
++
 +function formatAccountHeader(
 +	report: UsageReport,
 +	peers: readonly UsageReport[],
@@ -1524,24 +1735,7 @@ index 0000000..456a7ae
 +	redaction?: Map<string, string>,
 +): string {
 +	const status = aggregateStatus(report.limits);
-+	const icon = STATUS_COLOR[status]("●");
-+	const rawLabel = reportAccountLabel(report, index);
-+	const label = redaction?.get(rawLabel) ?? sanitizeUsageText(rawLabel);
-+	let header = `${icon} ${chalk.bold(label)}`;
-+	if (report.provider === "openai-codex") {
-+		const identity = sanitizeText((redaction?.get(rawLabel) ?? rawLabel).replace(/[\r\n\t]+/g, " "));
-+		const rendered = formatCodexUsageReportLabel(report, peers, rawLabel, redaction, true, "inline");
-+		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
-+	} else {
-+		const metaOrgName = report.metadata?.orgName;
-+		const metaOrgId = report.metadata?.orgId;
-+		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-+		if (typeof org === "string" && org && org !== rawLabel) {
-+			header += chalk.dim(` · ${redaction?.get(org) ?? sanitizeUsageText(org)}`);
-+		}
-+		const plan = report.metadata?.planType;
-+		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${sanitizeUsageText(plan.trim())}`);
-+	}
++	let header = `${STATUS_COLOR[status]("●")} ${formatReportIdentity(report, peers, index, redaction)}`;
 +	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 +	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 +	if (resets && resets.bankedCount > 0) {
@@ -1549,7 +1743,14 @@ index 0000000..456a7ae
 +		if (resets.redeemableCount !== resets.bankedCount) {
 +			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 +		}
-+		if (resets.soonestExpiry) {
++		const expiring = classifyResetExpiry(report, nowMs);
++		if (expiring) {
++			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
++			header +=
++				expiring.tier === "imminent"
++					? chalk.red(text)
++					: chalk.yellow(`${text} (${new Date(expiring.expiresAtMs).toISOString().slice(0, 10)})`);
++		} else if (resets.soonestExpiry) {
 +			const expiryMs = Date.parse(resets.soonestExpiry);
 +			if (expiryMs > nowMs) {
 +				header += chalk.dim(
@@ -1588,18 +1789,54 @@ index 0000000..456a7ae
 +}
 +
 +interface ProviderLimitTemplate {
-+	id: string;
++	key: string;
 +	title: string;
 +}
 +
-+function collectProviderLimitTemplates(reports: UsageReport[]): ProviderLimitTemplate[] {
-+	const seen = new Set<string>();
++/**
++ * One row per meter (label and window), not per limit id: Codex ids name a slot, and an
++ * account without a 5-hour window reports its 7-day one as `primary`. Most providers put the
++ * subscription plan in the tier (see {@link meterForLimit}), so the tier joins the key only for
++ * meters a single report repeats per tier (e.g. Antigravity's `Usage (<tier>)` rows).
++ */
++function meterKey(limit: UsageLimit): string {
++	return `${limit.label}|${limit.window?.id ?? limit.scope.windowId ?? ""}`;
++}
++
++function createLimitRowKey(reports: UsageReport[]): (limit: UsageLimit) => string {
++	const tiered = new Set<string>();
++	for (const report of reports) {
++		const seen = new Set<string>();
++		for (const limit of report.limits) {
++			const key = meterKey(limit);
++			if (seen.has(key)) tiered.add(key);
++			seen.add(key);
++		}
++	}
++	return limit => {
++		const key = meterKey(limit);
++		return tiered.has(key) ? `${key}|${limit.scope.tier ?? ""}` : key;
++	};
++}
++
++function collectProviderLimitTemplates(
++	reports: UsageReport[],
++	rowKey: (limit: UsageLimit) => string,
++): ProviderLimitTemplate[] {
 +	const templates: ProviderLimitTemplate[] = [];
 +	for (const report of reports) {
++		// A row first seen in a later report goes right after its predecessor in that report,
++		// so each account keeps its own row order.
++		let insertAt = 0;
 +		for (const limit of report.limits) {
-+			if (seen.has(limit.id)) continue;
-+			seen.add(limit.id);
-+			templates.push({ id: limit.id, title: sanitizeUsageText(limitTitle(limit)) });
++			const key = rowKey(limit);
++			const existing = templates.findIndex(template => template.key === key);
++			if (existing >= 0) {
++				insertAt = existing + 1;
++				continue;
++			}
++			templates.splice(insertAt, 0, { key, title: sanitizeUsageText(limitTitle(limit)) });
++			insertAt++;
 +		}
 +	}
 +	return templates;
@@ -1623,8 +1860,14 @@ index 0000000..456a7ae
 +export function formatUsageReportLines(report: UsageReport, options: FormatUsageReportLinesOptions = {}): string[] {
 +	const nowMs = options.nowMs ?? Date.now();
 +	const providerReports = options.reports ?? [report];
-+	const templates = collectProviderLimitTemplates(providerReports);
-+	const labelWidth = templates.reduce((max, template) => Math.max(max, template.title.length), 0);
++	const limitRowKey = createLimitRowKey(providerReports);
++	const templates = collectProviderLimitTemplates(providerReports, limitRowKey);
++	// Rows sharing a key can carry different titles (plan tiers), so measure every rendered title.
++	const labelWidth = Math.max(
++		0,
++		...templates.map(template => template.title.length),
++		...providerReports.flatMap(peer => peer.limits.map(limit => sanitizeUsageText(limitTitle(limit)).length)),
++	);
 +	const lines: string[] = [];
 +	if (options.includeNotes !== false) {
 +		for (const note of report.notes ?? []) lines.push(`  ${chalk.dim(sanitizeUsageText(note))}`);
@@ -1635,15 +1878,14 @@ index 0000000..456a7ae
 +		lines.push(`      ${chalk.dim("no limits reported")}`);
 +		return lines;
 +	}
-+	const limitsById = new Map<string, UsageLimit>();
-+	for (const limit of report.limits) limitsById.set(limit.id, limit);
++	const limitsByKey = Map.groupBy(report.limits, limitRowKey);
 +	for (const template of templates) {
-+		const limit = limitsById.get(template.id);
-+		if (limit) {
-+			lines.push(...formatLimitLine(limit, labelWidth, nowMs));
-+		} else {
++		const limits = limitsByKey.get(template.key);
++		if (!limits) {
 +			lines.push(formatMissingLimitLine(template, labelWidth));
++			continue;
 +		}
++		for (const limit of limits) lines.push(...formatLimitLine(limit, labelWidth, nowMs));
 +	}
 +	return lines;
 +}
@@ -1815,28 +2057,6 @@ index 0000000..456a7ae
 +	return `${masked} · ${redaction?.get(org) ?? org}`;
 +}
 +
-+function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
-+	const metadata = report.metadata ?? {};
-+	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
-+		const value = metadata[key];
-+		return typeof value === "string" && value.length > 0 ? value : undefined;
-+	};
-+	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
-+		for (const limit of report.limits) {
-+			const value = limit.scope[key];
-+			if (value) return value;
-+		}
-+		return undefined;
-+	};
-+	return {
-+		email: read("email"),
-+		accountId: read("accountId") ?? firstScoped("accountId"),
-+		projectId: read("projectId") ?? firstScoped("projectId"),
-+		orgId: read("orgId") ?? firstScoped("orgId"),
-+		orgName: read("orgName"),
-+	};
-+}
-+
 +function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
 +	return {
 +		email: account.email,
@@ -1860,7 +2080,7 @@ index 0000000..456a7ae
 +		}
 +	}
 +	for (const report of reports) {
-+		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
++		if (options.getAccountPolicy(report.provider, usageReportIdentity(report))) providers.add(report.provider);
 +	}
 +	return providers;
 +}
@@ -1880,15 +2100,81 @@ index 0000000..456a7ae
 +	// `omp usage` has no model/session context, so report the conservative
 +	// account-wide state from the most-consumed visible window. Actual routing
 +	// still scopes limits and selection in AuthStorage.
++	// Exhaustion follows the same status-first rule as the limit rows and routing's
++	// `isUsageLimitReached`: a provider-reported "exhausted" wins over the fraction.
++	const exhausted = (limits ?? []).some(limit => resolveStatus(limit) === "exhausted");
 +	const usedFractions = (limits ?? [])
 +		.map(resolveUsedFraction)
 +		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
 +	if (usedFractions.length === 0) {
-+		return `policy: priority ${priority} · reserve ${reserveLabel} · reserve unknown`;
++		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
++		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
 +	}
-+	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
-+	const state = remainingPct <= reservePct ? "inside reserve" : "eligible";
-+	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
++	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
++	let state = "eligible";
++	if (exhausted || remainingFraction <= 0) state = "exhausted";
++	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
++	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
++}
++
++/** `1 expires in 6h`, or `2 expire, soonest in 6h`. */
++function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): string {
++	const due = formatDuration(warning.expiresAtMs - nowMs);
++	return warning.count === 1 ? `1 expires in ${due}` : `${warning.count} expire, soonest in ${due}`;
++}
++
++function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
++	const outcome =
++		verdict.kind === "auto"
++			? "an open interactive omp session spends it by its last 5 min if eligible then"
++			: verdict.kind === "ask"
++				? "an open interactive omp session asks before spending it"
++				: "not spent automatically";
++	return `→ ${outcome}  (${verdict.setting}: ${verdict.mode})${verdict.eligibleNow ? "" : " · not eligible now"}`;
++}
++
++/**
++ * Saved resets expiring within 24 hours on accounts worth restoring: what the
++ * provider's `autoRedeem` setting does with each one, whether it is eligible
++ * now, and the `/usage reset` target that spends it now when the provider allows.
++ */
++function formatResetExpiryBanner(
++	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
++	reportsByProvider: ReadonlyMap<string, UsageReport[]>,
++	nowMs: number,
++	redaction: Map<string, string> | undefined,
++	options: UsageResetExpiryOptions,
++): string[] {
++	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
++	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
++	const lost = verdicts.every(verdict => verdict.kind === "off");
++	const lines = [
++		chalk.red.bold(
++			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
++		),
++	];
++	expiring.forEach(({ report, warning }, index) => {
++		const peers = reportsByProvider.get(report.provider) ?? [report];
++		const identity = formatReportIdentity(report, peers, peers.indexOf(report), redaction);
++		const expiry = new Date(warning.expiresAtMs);
++		const expiresAt = `${expiry.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${expiry.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
++		const used = `${limitTitle(warning.limit)} ${Math.round(warning.usedFraction * 100)}% used`;
++		lines.push(
++			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
++		);
++		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdicts[index]!))}`);
++		if (!warning.usableNow) return;
++		// Codex usage reports carry no credential id; the stored account with the same identity has it.
++		const stored = options
++			.accounts(warning.provider)
++			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
++		const command =
++			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
++		lines.push(
++			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
++		);
++	});
++	return lines;
 +}
 +
 +/**
@@ -1903,6 +2189,7 @@ index 0000000..456a7ae
 +	redaction?: Map<string, string>,
 +	disabled: DisabledCredentialSummary[] = [],
 +	policyOptions?: UsagePolicyDiagnosticsOptions,
++	resetOptions?: UsageResetExpiryOptions,
 +	defaultAccounts?: ReadonlyMap<string, string>,
 +): string {
 +	const displayReports = collapseSharedUsageReports(reports);
@@ -1936,6 +2223,13 @@ index 0000000..456a7ae
 +	const latestFetchedAt = Math.max(0, ...displayReports.map(report => report.fetchedAt ?? 0));
 +	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
 +	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
++	const expiring = displayReports.flatMap(report => {
++		const warning = classifyResetExpiry(report, nowMs);
++		return warning?.tier === "imminent" ? [{ report, warning }] : [];
++	});
++	if (resetOptions && expiring.length > 0) {
++		lines.push("", ...formatResetExpiryBanner(expiring, reportsByProvider, nowMs, redaction, resetOptions));
++	}
 +
 +	for (const provider of providers) {
 +		const providerReports = reportsByProvider.get(provider) ?? [];
@@ -1961,7 +2255,7 @@ index 0000000..456a7ae
 +					includeNotes: false,
 +					policyLine:
 +						policyOptions && policyProviders.has(provider)
-+							? formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions)
++							? formatPolicyLine(provider, usageReportIdentity(report), report.limits, policyOptions)
 +							: undefined,
 +				}),
 +			);
@@ -2533,10 +2827,10 @@ index 37b08d7..9861d7e 100644
  		const now = Date.now();
  		const report: UsageReport = {
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
-index a9d5080..38b6b4f 100644
+index 59d8a88..e254088 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
 +++ b/packages/coding-agent/test/usage-cli.test.ts
-@@ -735,6 +735,33 @@ describe("formatUsageBreakdown", () => {
+@@ -1012,6 +1012,33 @@ describe("formatUsageBreakdown", () => {
  		expect(text).toContain("✗ truly-dead@example.test — disabled");
  	});
  
@@ -2571,10 +2865,10 @@ index a9d5080..38b6b4f 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index 1d6c53e..c936622 100644
+index c60ba8f..370d03a 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -83,6 +83,13 @@ - Fixed a legacy entry whose malformed token counter was summed into an inflated request total; counters that are not finite numbers now count as absent.
+@@ -103,6 +103,13 @@
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -2589,7 +2883,7 @@ index 1d6c53e..c936622 100644
  
  ### Changed
 diff --git a/packages/stats/src/aggregator.ts b/packages/stats/src/aggregator.ts
-index 702453d..58212d6 100644
+index c0eedc1..e8ffda7 100644
 --- a/packages/stats/src/aggregator.ts
 +++ b/packages/stats/src/aggregator.ts
 @@ -1,6 +1,6 @@
@@ -2600,7 +2894,7 @@ index 702453d..58212d6 100644
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import {
  	applySessionParseResults,
-@@ -81,7 +81,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>): Promise<T> {
+@@ -81,7 +81,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
  }
  
  /**
@@ -2610,9 +2904,9 @@ index 702453d..58212d6 100644
   * `current` is the number of files completed (skipped + parsed),
   * `total` is the size of the work set. `processed` is the running total
   * of inserted rows. Parsed files are reported only after their batch commits.
-@@ -91,6 +92,10 @@ export interface SyncProgress {
- 	total: number;
+@@ -94,6 +95,10 @@ export interface SyncProgress {
  	processed: number;
+ 	changes: number;
  	sessionFile: string;
 +	/** Bytes of `sessionFile` committed so far; equals `fileBytes` once the file completes. */
 +	fileOffset: number;
@@ -2621,7 +2915,7 @@ index 702453d..58212d6 100644
  }
  
  export interface SyncOptions {
-@@ -289,6 +294,28 @@ async function orderForIngest(files: string[]): Promise<string[]> {
+@@ -292,6 +297,28 @@ async function orderForIngest(files: string[]): Promise<string[]> {
  	return ranked.map(entry => entry.file);
  }
  
@@ -2650,7 +2944,7 @@ index 702453d..58212d6 100644
  async function syncAllSessionsLocked(
  	opts?: SyncOptions,
  ): Promise<{ processed: number; files: number; reconcile: boolean }> {
-@@ -301,34 +328,57 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+@@ -305,14 +332,14 @@ async function syncAllSessionsLocked(
  	let completed = 0;
  	let cursor = 0;
  	let reconcile = false;
@@ -2667,8 +2961,9 @@ index 702453d..58212d6 100644
  		completed++;
  		opts?.onProgress?.({
  			current: completed,
- 			total: files.length,
+@@ -320,21 +347,45 @@ async function syncAllSessionsLocked(
  			processed: totalProcessed,
+ 			changes: totalChanges,
  			sessionFile,
 +			fileOffset: fileBytes,
 +			fileBytes,
@@ -2684,6 +2979,7 @@ index 702453d..58212d6 100644
 +			current: completed,
 +			total: files.length,
 +			processed: totalProcessed,
++			changes: totalChanges,
 +			sessionFile,
 +			fileOffset,
 +			fileBytes,
@@ -2701,6 +2997,7 @@ index 702453d..58212d6 100644
  		pending = [];
  		pendingRows = 0;
  		totalProcessed += applied.processed;
+ 		totalChanges += applied.changes;
 -		filesProcessed += applied.files;
 +		if (countFiles) filesProcessed += applied.files;
  		reconcile ||= applied.reconcile;
@@ -2714,7 +3011,7 @@ index 702453d..58212d6 100644
  	};
  
  	const finish = () => {
-@@ -342,15 +392,7 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+@@ -348,15 +399,7 @@ async function syncAllSessionsLocked(
  	};
  	if (files.length === 0) return finish();
  
@@ -2731,7 +3028,7 @@ index 702453d..58212d6 100644
  		if (index >= metadataEnd) {
  			const batch = files.slice(index, index + SYNC_METADATA_FILES);
  			const offsets = getFileOffsets(batch);
-@@ -370,7 +412,9 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+@@ -376,7 +419,9 @@ async function syncAllSessionsLocked(
  		// Capture the position before awaiting: another worker can start the next metadata batch.
  		const metadataIndex = index - metadataStart;
  		const { fileStats, stored } = (await metadata)[metadataIndex];
@@ -2742,7 +3039,7 @@ index 702453d..58212d6 100644
  		if (
  			!replay &&
  			stored?.parserState &&
-@@ -378,34 +422,89 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
+@@ -384,34 +429,92 @@ async function syncAllSessionsLocked(
  			stored.parserState.size === fileStats.size &&
  			matchesSessionFile(stored.parserState, fileStats)
  		) {
@@ -2756,9 +3053,12 @@ index 702453d..58212d6 100644
  		const unknownIdentity = stored !== undefined && !stored.parserState;
  		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
 -		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
++		// Start the parse outside the guard: a synchronous throw is the lane's lazy
++		// worker spawn failing, which must fail the sync instead of skipping the file.
++		const parsing = parse(sessionFile, fromOffset, stored?.parserState, replay);
 +		let result: ParseSessionResult;
 +		try {
-+			result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
++			result = await parsing;
 +		} catch (err) {
 +			// One unreadable or corrupt transcript must not abort the whole sync.
 +			logger.warn("stats: skipping unreadable session file", { sessionFile, error: String(err) });
@@ -2848,9 +3148,9 @@ index 702453d..58212d6 100644
  		pendingRows +=
  			result.stats.length +
  			result.userStats.length +
-@@ -417,17 +516,19 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
- 
- 	const requestedWorkers = Math.max(1, Math.floor(opts?.workers ?? defaultWorkerCount()));
+@@ -429,17 +532,19 @@ async function syncAllSessionsLocked(
+ 		if (files.every(file => offsets.get(file)?.parserState)) requestedWorkers = 1;
+ 	}
  	if (requestedWorkers === 1) {
 +		const parseInline: ParseChunk = (file, fromOffset, state, replayFile) =>
 +			parseSessionFile(file, { fromOffset, state, replay: replayFile });
@@ -2870,19 +3170,28 @@ index 702453d..58212d6 100644
  			}
  		}
  		return finish();
-@@ -438,14 +539,14 @@ ): Promise<{ processed: number; files: number; reconcile: boolean }> {
- 	const handles: WorkerHandle[] = [];
- 
- 	async function drain(handle: WorkerHandle): Promise<void> {
-+		const parseInWorker: ParseChunk = (file, fromOffset, parserState, replayFile) =>
-+			dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile });
+@@ -452,18 +557,19 @@ async function syncAllSessionsLocked(
+ 	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
+ 	async function drain(): Promise<void> {
+ 		let handle: WorkerHandle | null = null;
++		const parseInWorker: ParseChunk = (file, fromOffset, parserState, replayFile) => {
++			if (!handle) {
++				handle = spawnWorker();
++				handles.push(handle);
++			}
++			return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay: replayFile });
++		};
  		try {
  			while (!failed) {
  				const idx = cursor++;
  				if (idx >= files.length) return;
--				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) =>
--					dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
--				);
+-				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) => {
+-					if (!handle) {
+-						handle = spawnWorker();
+-						handles.push(handle);
+-					}
+-					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
+-				});
 -				if (!failed) acceptFile(files[idx], parsed);
 +				const prepared = await prepareFile(idx, parseInWorker);
 +				if (!failed) await acceptFile(files[idx], prepared, parseInWorker);
@@ -2890,10 +3199,10 @@ index 702453d..58212d6 100644
  		} catch (error) {
  			failed = true;
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index a21878e..16966ab 100644
+index e1a6255..4ce5925 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
-@@ -241,6 +241,11 @@ export async function initDb(): Promise<Database> {
+@@ -252,6 +252,11 @@ export async function initDb(): Promise<Database> {
  		);
  	`);
  
@@ -2902,10 +3211,10 @@ index a21878e..16966ab 100644
 +	// re-reads the prefix to recover the tier nor trusts an offset into a file
 +	// that was rewritten. Rows written before this column exists stay SQL NULL,
 +	// which `getFileOffset` reports as "no cursor" — one full re-parse.
- 	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
+ 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
  	if (!offsetColumns.some(column => column.name === "parser_state")) {
  		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
-@@ -571,6 +576,12 @@ /** Persisted transcript identity and parser cursor used to resume stats ingestion. */
+@@ -595,6 +600,12 @@ function backfillNoCacheInputCosts(database: Database): void {
  export interface FileOffset {
  	offset: number;
  	lastModified: number;
@@ -2918,8 +3227,8 @@ index a21878e..16966ab 100644
  	parserState?: SessionParserState;
  }
  
-@@ -785,7 +796,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
- 		updateToolResults(parsedRows(writes, result => result.toolResults));
+@@ -823,7 +834,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
+ 			updateToolResults(parsedRows(writes, result => result.toolResults));
  		for (const { sessionFile, result } of sessions) {
  			if (result.parserState) {
 -				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
@@ -2945,7 +3254,7 @@ index 2ebe24b..b8cc20e 100755
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { formatErrorRate } from "./client/data/formatters";
  import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
-@@ -183,7 +183,11 @@ `);
+@@ -183,7 +183,11 @@ Examples:
  				const idx = event.sessionFile.indexOf(marker);
  				const short = idx >= 0 ? event.sessionFile.slice(idx + marker.length) : event.sessionFile;
  				const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
@@ -2959,10 +3268,10 @@ index 2ebe24b..b8cc20e 100755
  				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
  				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
 diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
-index 21f0829..ded50f0 100644
+index 1d94f1b..7523942 100644
 --- a/packages/stats/src/parser.ts
 +++ b/packages/stats/src/parser.ts
-@@ -12,7 +12,7 @@ import {
+@@ -13,7 +13,7 @@ import {
  	type Usage,
  } from "@oh-my-pi/pi-ai";
  import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -2971,7 +3280,7 @@ index 21f0829..ded50f0 100644
  import type {
  	AgentType,
  	MessageStatsInput,
-@@ -435,53 +435,155 @@ const LF = 0x0a;
+@@ -443,53 +443,155 @@ const LF = 0x0a;
  const CR = 0x0d;
  const jsonLineDecoder = new TextDecoder();
  
@@ -3155,7 +3464,7 @@ index 21f0829..ded50f0 100644
  export interface SessionParserState {
  	version: 1;
  	offset: number;
-@@ -494,6 +596,28 @@ export interface SessionParserState {
+@@ -502,6 +604,28 @@ export interface SessionParserState {
  	serviceTier: ServiceTierByFamily | null;
  }
  
@@ -3184,7 +3493,7 @@ index 21f0829..ded50f0 100644
  export interface ParseSessionResult {
  	stats: MessageStatsInput[];
  	userStats: UserMessageStats[];
-@@ -501,43 +625,64 @@ export interface ParseSessionResult {
+@@ -509,43 +633,64 @@ export interface ParseSessionResult {
  	toolCalls: ToolCallStats[];
  	toolResults: ToolResultLink[];
  	newOffset: number;
@@ -3271,7 +3580,7 @@ index 21f0829..ded50f0 100644
  	const folder = extractFolderFromPath(sessionPath);
  	const agentType = classifyAgentType(sessionPath);
  	const stats: MessageStatsInput[] = [];
-@@ -545,109 +690,115 @@ ): Promise<ParseSessionResult> {
+@@ -553,109 +698,115 @@ export async function parseSessionFile(
  	const userLinks: UserMessageLink[] = [];
  	const toolCalls: ToolCallStats[] = [];
  	const toolResults: ToolResultLink[] = [];
@@ -3481,7 +3790,7 @@ index 21f0829..ded50f0 100644
  }
  
  /**
-@@ -691,19 +842,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+@@ -692,19 +843,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
  }
  
  /**
@@ -3516,7 +3825,7 @@ diff --git a/packages/stats/src/sync-worker.ts b/packages/stats/src/sync-worker.
 index 2eb88a8..f491519 100644
 --- a/packages/stats/src/sync-worker.ts
 +++ b/packages/stats/src/sync-worker.ts
-@@ -5,6 +5,12 @@ /**
+@@ -5,6 +5,12 @@
   * structured-clone-safe result back. One in-flight request per worker so
   * the main thread can fan jobs out 1:1 with the pool size.
   *
@@ -3590,10 +3899,10 @@ index 0c43576..0c50852 100644
 +	});
  });
 diff --git a/packages/stats/test/priority-premium-requests.test.ts b/packages/stats/test/priority-premium-requests.test.ts
-index 97b6f3e..c8a57fb 100644
+index d021dcc..35839cd 100644
 --- a/packages/stats/test/priority-premium-requests.test.ts
 +++ b/packages/stats/test/priority-premium-requests.test.ts
-@@ -188,9 +188,37 @@ describe("priority service-tier premium-request backfill", () => {
+@@ -212,9 +212,37 @@ describe("priority service-tier premium-request backfill", () => {
  		const tierLineEnd = bytes.indexOf(0x0a, bytes.indexOf(Buffer.from("service_tier_change"))) + 1;
  		expect(tierLineEnd).toBeGreaterThan(0);
  
