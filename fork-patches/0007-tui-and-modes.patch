@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 4a3d730..50820ca 100644
+index c071445..cbbf09c 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
-@@ -37,6 +37,7 @@ import {
+@@ -39,6 +39,7 @@ import {
  import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
  import { processFileArguments } from "./cli/file-processor";
  import { buildInitialMessage } from "./cli/initial-message";
@@ -10,7 +10,7 @@ index 4a3d730..50820ca 100644
  import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
  import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
  import { fetchBuild } from "./cli/build-service";
-@@ -232,7 +233,7 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
+@@ -238,7 +239,7 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
  	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
  }
  
@@ -19,7 +19,7 @@ index 4a3d730..50820ca 100644
  	if (!cfgStartupCheckUpdate.get(settings)) {
  		return;
  	}
-@@ -240,6 +241,12 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+@@ -246,6 +247,12 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
  		// Checkouts update through git and a manager (Tern) updates its omp itself:
  		// "run omp update" would be wrong advice for both.
  		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
@@ -33,7 +33,7 @@ index 4a3d730..50820ca 100644
  		// A compiled binary updates from the build service; naming the running
  		// version lets the service prepare the patch `omp update` will then use.
 diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
-index 3d5a349..8196a54 100644
+index 75097de..849d8d0 100644
 --- a/packages/coding-agent/src/modes/controllers/command-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
 @@ -1,6 +1,7 @@
@@ -60,7 +60,7 @@ index 3d5a349..8196a54 100644
  import {
  	type Component,
  	Loader,
-@@ -125,6 +135,87 @@ function formatCreditValue(value: number): string {
+@@ -135,6 +145,87 @@ function formatCreditValue(value: number): string {
  	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
  }
  
@@ -148,7 +148,7 @@ index 3d5a349..8196a54 100644
  interface ForkTerminalDependencies {
  	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
  	environment: () => NodeJS.ProcessEnv;
-@@ -292,6 +383,71 @@ export class CommandController {
+@@ -287,6 +378,71 @@ export class CommandController {
  		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
  	}
  
@@ -220,7 +220,7 @@ index 3d5a349..8196a54 100644
  	async #restoreAfterMoveFailure(
  		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
  		initialError?: unknown,
-@@ -869,20 +1025,39 @@ export class CommandController {
+@@ -883,20 +1039,39 @@ export class CommandController {
  
  	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
  		let usageReports = reports ?? null;
@@ -264,7 +264,7 @@ index 3d5a349..8196a54 100644
  	}
  
  	async handleChangelogCommand(args = ""): Promise<void> {
-@@ -2521,6 +2696,7 @@ export function renderUsageReports(
+@@ -2550,6 +2725,7 @@ export function renderUsageReports(
  	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
  	usageModelSelectors: readonly string[] = [],
  	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
@@ -272,7 +272,7 @@ index 3d5a349..8196a54 100644
  ): string {
  	const displayReports = collapseSharedUsageReports(reports);
  	const lines: string[] = [];
-@@ -2604,6 +2780,10 @@ export function renderUsageReports(
+@@ -2633,6 +2809,10 @@ export function renderUsageReports(
  		if (activeAccountLabel) {
  			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
  		}
@@ -284,10 +284,10 @@ index 3d5a349..8196a54 100644
  		if (reportingModels.length > 0) {
  			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
 diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
-index efe6207..b458d97 100644
+index a0d9732..9e875a4 100644
 --- a/packages/coding-agent/src/modes/controllers/event-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
-@@ -53,6 +53,7 @@ import {
+@@ -62,6 +62,7 @@ import {
  import {
  	assistantHasVisibleContent,
  	assistantUsageIsBilled,
@@ -295,7 +295,7 @@ index efe6207..b458d97 100644
  	splitAssistantMessageToolTimeline,
  } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
  import { isWarpCliAgentProtocolActive } from "../warp-events";
-@@ -232,6 +233,7 @@ export class EventController {
+@@ -254,6 +255,7 @@ export class EventController {
  	// restored when the banner clears at the next `agent_start` (see
  	// #handleMessageEnd / #handleAgentStart).
  	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
@@ -303,7 +303,7 @@ index efe6207..b458d97 100644
  	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
  	#restorePinnedErrorInline = true;
  	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
-@@ -1066,6 +1068,7 @@ export class EventController {
+@@ -1106,6 +1108,7 @@ export class EventController {
  		this.#orphanedToolCompletions.clear();
  		this.#postToolAssistantComponents.clear();
  		this.#lastIntent = undefined;
@@ -311,7 +311,7 @@ index efe6207..b458d97 100644
  		this.#readToolCallArgs.clear();
  		this.#readToolCallAssistantComponents.clear();
  		this.#resetReadGroup();
-@@ -1822,15 +1825,18 @@ export class EventController {
+@@ -1864,15 +1867,18 @@ export class EventController {
  			// errors are known intermediate attempts: hide them entirely while
  			// session recovery continues, but retain the component so a terminal
  			// retry-cap event can promote its final error into the one banner.
@@ -339,7 +339,7 @@ index efe6207..b458d97 100644
  			}
  			this.ctx.statusLine.invalidate();
  			this.ctx.ui.requestRender();
-@@ -2209,6 +2215,18 @@ export class EventController {
+@@ -2262,6 +2268,18 @@ export class EventController {
  			}
  		}
  	}
@@ -358,7 +358,7 @@ index efe6207..b458d97 100644
  	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
  		// A superseded agent_end: the agent is already streaming a fresh turn, so
  		// this event belongs to a turn that has already been replaced. The session
-@@ -2249,7 +2267,13 @@ export class EventController {
+@@ -2315,7 +2333,13 @@ export class EventController {
  		}
  		setRunStatus(this.#settledRunStatus(event));
  
@@ -372,7 +372,7 @@ index efe6207..b458d97 100644
  		// This settle may belong to an extension-started turn while the main
  		// input loop remains asleep. Do not await session-idle from its own event.
  		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
-@@ -2628,6 +2652,7 @@ export class EventController {
+@@ -2702,6 +2726,7 @@ export class EventController {
  		}
  		this.#clearRetrySupersededAssistantComponents();
  		if (!event.success) {
@@ -466,7 +466,7 @@ index 11b61f9..d6d05bd 100644
  }
  
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index bba4f51..4919d2a 100644
+index e0005c6..1f313eb 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
 @@ -1,6 +1,7 @@
@@ -487,7 +487,7 @@ index bba4f51..4919d2a 100644
  import { reset as resetCapabilities } from "../../capability";
  import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { showGitOverlay } from "../../cli/git-tui";
-@@ -71,6 +75,11 @@ import { readSessionInfo, type SessionInfo } from "../../session/session-listing
+@@ -76,6 +80,11 @@ import { readSessionInfo, type SessionInfo } from "../../session/session-listing
  import { SessionManager } from "../../session/session-manager";
  import { loadPinnedSessionIds } from "../../session/session-pins";
  import { FileSessionStorage } from "../../session/session-storage";
@@ -499,7 +499,7 @@ index bba4f51..4919d2a 100644
  import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
  import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
  import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-@@ -98,6 +107,11 @@ import { copyToClipboard } from "../../utils/clipboard";
+@@ -104,6 +113,11 @@ import { copyToClipboard } from "../../utils/clipboard";
  import { openPath } from "../../utils/open";
  import { setSessionTerminalTitle } from "../../utils/title-generator";
  import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
@@ -511,7 +511,7 @@ index bba4f51..4919d2a 100644
  import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { createAgentsHubDeps } from "../agents-hub-deps";
  import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-@@ -130,6 +144,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+@@ -136,6 +150,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
  import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
  import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -519,7 +519,7 @@ index bba4f51..4919d2a 100644
  import { renderUsageReports } from "./command-controller";
  import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
  
-@@ -353,6 +368,12 @@ export class SelectorController {
+@@ -366,6 +381,12 @@ export class SelectorController {
  						model: this.ctx.session.model,
  						imageBudget: this.ctx.ui.imageBudget,
  						requestRender: () => this.ctx.ui.requestRender(),
@@ -532,7 +532,7 @@ index bba4f51..4919d2a 100644
  						composerPreviewStatus: this.ctx.statusLine,
  					},
  					{
-@@ -425,12 +446,29 @@ export class SelectorController {
+@@ -438,12 +459,29 @@ export class SelectorController {
  			});
  	}
  
@@ -563,7 +563,7 @@ index bba4f51..4919d2a 100644
  		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
  		// while the first dashboard is open focuses it instead of stacking a copy.
  		if (this.#focusOpenMenu("usage-dashboard")) return;
-@@ -461,8 +499,8 @@ export class SelectorController {
+@@ -474,8 +512,8 @@ export class SelectorController {
  		const dashboard = new UsageDashboardComponent({
  			reports,
  			unavailableAccounts,
@@ -574,7 +574,7 @@ index bba4f51..4919d2a 100644
  					current,
  					theme,
  					Date.now(),
-@@ -470,7 +508,14 @@ export class SelectorController {
+@@ -483,7 +521,14 @@ export class SelectorController {
  					provider => (provider === currentProvider ? activeAccount : undefined),
  					usageModelSelectors,
  					unavailableAccounts,
@@ -590,7 +590,7 @@ index bba4f51..4919d2a 100644
  			loadActivity: loadDailyActivity,
  			refresh: () => this.ctx.session.fetchUsageReports(),
  			requestRender: () => this.ctx.ui.requestRender(),
-@@ -2302,6 +2347,146 @@ export class SelectorController {
+@@ -2369,6 +2414,146 @@ export class SelectorController {
  		});
  	}
  
@@ -738,10 +738,10 @@ index bba4f51..4919d2a 100644
  		const session = this.ctx.session;
  		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index de06f1a..d36c296 100644
+index 473c5fb..5970f1f 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -7962,8 +7962,12 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -8307,8 +8307,12 @@ export class InteractiveMode implements InteractiveModeContext {
  		this.#selectorController.showSettingsSelector();
  	}
  
@@ -756,7 +756,7 @@ index de06f1a..d36c296 100644
  	}
  
  	showAdvisorConfigure(): void {
-@@ -8033,6 +8037,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -8378,6 +8382,10 @@ export class InteractiveMode implements InteractiveModeContext {
  		return this.#selectorController.showSessionPinSelector();
  	}
  
@@ -845,10 +845,10 @@ index 208af45..1b75076 100644
  	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
  	resolveActiveRepo: resolveActiveRepoContextSync,
 diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
-index b705c71..6d5548d 100644
+index ec5c733..da160fb 100644
 --- a/packages/coding-agent/src/modes/types.ts
 +++ b/packages/coding-agent/src/modes/types.ts
-@@ -489,8 +489,9 @@ export interface InteractiveModeContext {
+@@ -506,8 +506,9 @@ export interface InteractiveModeContext {
  
  	// Selector handling
  	showSettingsSelector(): void;
@@ -859,7 +859,7 @@ index b705c71..6d5548d 100644
  	showAdvisorConfigure(): void;
  	showHistorySearch(): void;
  	showExtensionsDashboard(): void;
-@@ -513,6 +514,7 @@ export interface InteractiveModeContext {
+@@ -530,6 +531,7 @@ export interface InteractiveModeContext {
  	handleSessionDeleteCommand(): Promise<void>;
  	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
  	showSessionPinSelector(): Promise<void>;
@@ -868,10 +868,10 @@ index b705c71..6d5548d 100644
  	showProviderSetup(): Promise<void>;
  	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index 813ac66..7f32967 100644
+index e9e7518..4e8602f 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -207,6 +207,7 @@ import {
+@@ -211,6 +211,7 @@ import {
  import type { SecretObfuscator } from "../secrets/obfuscator";
  import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
  import { cfgSecretsEnabled } from "../secrets/settings";
@@ -879,7 +879,7 @@ index 813ac66..7f32967 100644
  import { releaseSharpshooterSession } from "../sharpshooter/backend";
  import { flushSharpshooterExtraction } from "../sharpshooter/extract";
  import { toolReadsSkillUris } from "../system-prompt";
-@@ -404,6 +405,7 @@ import {
+@@ -421,6 +422,7 @@ import {
  import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
  import type { ServingModel } from "./retry-fallback-chains";
  import {
@@ -887,7 +887,7 @@ index 813ac66..7f32967 100644
  	type AdvisorCatchupOptions,
  	type AdvisorStats,
  	type AdvisorStatusOverviewEntry,
-@@ -451,7 +453,12 @@ import { YieldQueue } from "./yield-queue";
+@@ -468,7 +470,12 @@ import { YieldQueue } from "./yield-queue";
  
  export * from "./agent-session-events";
  export * from "./agent-session-types";
@@ -901,7 +901,7 @@ index 813ac66..7f32967 100644
  
  const SESSION_STOP_CONTINUATION_CAP = 8;
  /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
-@@ -4120,6 +4127,20 @@ export class AgentSession implements SettingsScope {
+@@ -4374,6 +4381,20 @@ export class AgentSession implements SettingsScope {
  					this.sessionId,
  					assistantMsg.provider,
  				);
@@ -922,7 +922,7 @@ index 813ac66..7f32967 100644
  			}
  			if (event.message.role === "toolResult") {
  				const { toolName, toolCallId, isError, content } = event.message;
-@@ -13600,6 +13621,15 @@ export class AgentSession implements SettingsScope {
+@@ -14025,6 +14046,15 @@ export class AgentSession implements SettingsScope {
  		return this.#advisors.getAdvisorStatusOverview();
  	}
  
@@ -939,18 +939,18 @@ index 813ac66..7f32967 100644
  	getAdvisorCost(): number {
  		return this.#advisors.getAdvisorCost();
 diff --git a/packages/coding-agent/src/session/settings.ts b/packages/coding-agent/src/session/settings.ts
-index 4d3a9dd..7524e3a 100644
+index 46ccce4..ed364f3 100644
 --- a/packages/coding-agent/src/session/settings.ts
 +++ b/packages/coding-agent/src/session/settings.ts
-@@ -31,6 +31,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
+@@ -28,6 +28,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
  
- const EMPTY_STRING_ARRAY: string[] = [];
  const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 +const EMPTY_STRING_RECORD: Record<string, string> = {};
  const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
  const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
  
-@@ -138,6 +139,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
+@@ -175,6 +176,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
  	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
  );
  
@@ -980,14 +980,14 @@ index 4d3a9dd..7524e3a 100644
 +	},
 +});
 +
- export const cfgProvidersOpenaiCodexCodeMode = register({
- 	id: "providers.openai-codex.codeMode",
- 	type: "enum",
+ export const cfgImagesDescribeForTextModels = register({
+ 	id: "images.describeForTextModels",
+ 	type: "boolean",
 diff --git a/packages/coding-agent/src/slash-commands/builtin-modes.ts b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-index 3924567..9e487e3 100644
+index a4606b4..1235cd5 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-modes.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-modes.ts
-@@ -304,6 +304,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+@@ -306,6 +306,28 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
  			clearSubmittedText(runtime);
  		},
  	},
@@ -1017,10 +1017,10 @@ index 3924567..9e487e3 100644
  		name: "setup",
  		aliases: ["providers"],
 diff --git a/packages/coding-agent/src/slash-commands/builtin-session.ts b/packages/coding-agent/src/slash-commands/builtin-session.ts
-index 3079935..1be36eb 100644
+index e346032..3231623 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-session.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-session.ts
-@@ -179,6 +179,65 @@ async function handleSessionPinCommand(
+@@ -181,6 +181,65 @@ async function handleSessionPinCommand(
  	await output(`Pinned ${account.label} to this session for ${providerName}.`);
  }
  
@@ -1086,7 +1086,7 @@ index 3079935..1be36eb 100644
  /**
   * Start (or reuse) the stats dashboard for this session. The Frustration page
   * judges through this session's settings and registry; its cost lands on this
-@@ -317,6 +376,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+@@ -319,6 +378,31 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
  			clearSubmittedText(runtime);
  		},
  	},
@@ -1155,10 +1155,10 @@ index f824646..bca678a 100644
  // PNG on stdout, or nothing when the clipboard does not hold image data. Used
  // for native Windows fallback and WSL interop because arboard can miss host
 diff --git a/packages/coding-agent/test/acp-builtins.test.ts b/packages/coding-agent/test/acp-builtins.test.ts
-index 7527109..a658055 100644
+index b8ec316..0bb01bf 100644
 --- a/packages/coding-agent/test/acp-builtins.test.ts
 +++ b/packages/coding-agent/test/acp-builtins.test.ts
-@@ -73,6 +73,7 @@ interface FakeAcpBuiltinSession {
+@@ -75,6 +75,7 @@ interface FakeAcpBuiltinSession {
  	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	scopedModels: Array<{ model: { provider: string; id: string } }>;
  	modelRegistry: {
@@ -1166,7 +1166,7 @@ index 7527109..a658055 100644
  		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
  		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	};
-@@ -180,6 +181,7 @@ function createRuntime() {
+@@ -183,6 +184,7 @@ function createRuntime() {
  		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
  		scopedModels: [],
  		modelRegistry: {
@@ -1569,7 +1569,7 @@ index 1867c20..61a55a3 100644
  		const message = makeAssistantMessage({
  			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
 diff --git a/packages/coding-agent/test/model-discovery.test.ts b/packages/coding-agent/test/model-discovery.test.ts
-index 2576512..9576f58 100644
+index a9515cc..d44de37 100644
 --- a/packages/coding-agent/test/model-discovery.test.ts
 +++ b/packages/coding-agent/test/model-discovery.test.ts
 @@ -3,8 +3,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
@@ -1586,7 +1586,7 @@ index 2576512..9576f58 100644
  import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
  import { buildModel } from "@oh-my-pi/pi-catalog/build";
  import { Effort } from "@oh-my-pi/pi-catalog/effort";
-@@ -21,9 +25,10 @@ import {
+@@ -26,9 +30,10 @@ import {
  } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
  import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
  import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1598,7 +1598,7 @@ index 2576512..9576f58 100644
  import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
  import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
  
-@@ -2953,6 +2958,125 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -3191,6 +3196,125 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(rosterFor("image")).toEqual(["image-generator"]);
  	});
  
@@ -1724,7 +1724,7 @@ index 2576512..9576f58 100644
  	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
  		// Gateways like opper.ai root their OpenAI-compatible surface at a
  		// versioned path (`https://api.opper.ai/v3/compat`); the default
-@@ -3148,6 +3272,236 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -3386,6 +3510,236 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(model?.name).toBe("GPT-5");
  	});
  
@@ -2084,10 +2084,10 @@ index 68a8204..c153c6d 100644
  		{
  			onChange: () => {},
 diff --git a/packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts b/packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts
-index 7b30ac1..3d43682 100644
+index dad8fe0..dd67b1e 100644
 --- a/packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts
 +++ b/packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts
-@@ -38,6 +38,29 @@ function createContext() {
+@@ -41,6 +41,29 @@ function createContext() {
  
  const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
  const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
@@ -2117,7 +2117,7 @@ index 7b30ac1..3d43682 100644
  
  describe("EventController superseded agent_end", () => {
  	beforeAll(async () => {
-@@ -73,11 +96,12 @@ describe("EventController superseded agent_end", () => {
+@@ -77,11 +100,12 @@ describe("EventController superseded agent_end", () => {
  		// The interrupted turn's agent_end finally propagates. Because the agent is
  		// already streaming the resumed turn, it must not tear down the live loader —
  		// otherwise "Working…" vanishes while the agent keeps running.
@@ -2132,10 +2132,10 @@ index 7b30ac1..3d43682 100644
  
  	it("tears the loader down on the live turn's own final agent_end", async () => {
 diff --git a/packages/tui/CHANGELOG.md b/packages/tui/CHANGELOG.md
-index d2d55cb..7a65481 100644
+index 76732bc..64f089a 100644
 --- a/packages/tui/CHANGELOG.md
 +++ b/packages/tui/CHANGELOG.md
-@@ -1332,6 +1332,9 @@
+@@ -1567,6 +1567,9 @@
  
  - Improved row alignment and spacing for `align`, `gather`, and `array` environments
  - Updated matrix environments to render as baseline-aligned grids with stretched brackets
@@ -2204,7 +2204,7 @@ index 23327c5..e2692ac 100644
  		// At end of text the cursor sits on trailing padding, sized to fit a (possibly wide) cursor override.
  		const atEnd = this.#cursor >= this.#value.length;
 diff --git a/packages/tui/src/overlays/settings-selector.ts b/packages/tui/src/overlays/settings-selector.ts
-index 780eddc..c4f038a 100644
+index 5154d07..adad828 100644
 --- a/packages/tui/src/overlays/settings-selector.ts
 +++ b/packages/tui/src/overlays/settings-selector.ts
 @@ -154,6 +154,8 @@ interface SettingsNativeMemo {
@@ -2371,7 +2371,7 @@ index 780eddc..c4f038a 100644
  		}
  
  		if (tab === "appearance" && !searching) {
-@@ -1120,7 +1158,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1123,7 +1161,7 @@ export class SettingsSelectorComponent implements Component {
  		if (this.#searchList) {
  			this.#searchCorpora = null;
  			this.#setSearchQuery(this.#searchQuery);
@@ -2380,7 +2380,7 @@ index 780eddc..c4f038a 100644
  			this.#refreshCurrentTabItems(getSettingsForTab(this.#context.settings.entries, this.#currentTabId));
  	}
  
-@@ -1162,7 +1200,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1165,7 +1203,7 @@ export class SettingsSelectorComponent implements Component {
  			children.push(memo.search.node);
  		}
  
@@ -2389,7 +2389,7 @@ index 780eddc..c4f038a 100644
  		if (content) children.push(content);
  
  		if (!searching && this.#currentTabId === "appearance") {
-@@ -1187,7 +1225,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1190,7 +1228,7 @@ export class SettingsSelectorComponent implements Component {
  
  		const mode: SettingsHintMode = searching
  			? "search"
@@ -2398,7 +2398,7 @@ index 780eddc..c4f038a 100644
  				? "plugins"
  				: this.#currentList?.sectionFocused
  					? "sections"
-@@ -1388,13 +1426,13 @@ export class SettingsSelectorComponent implements Component {
+@@ -1391,13 +1429,13 @@ export class SettingsSelectorComponent implements Component {
  		if (!this.#searchList) return;
  		const selected = jumpToSelection ? this.#searchList.getSelectedItem() : undefined;
  		const selectedDef = selected ? getSettingDef(this.#context.settings.entries, selected.id) : undefined;
@@ -2414,7 +2414,7 @@ index 780eddc..c4f038a 100644
  		this.#tabBar.setTabs(this.#tabs, targetTab);
  		this.#switchToTab(targetTab);
  		if (selectedDef) {
-@@ -1421,7 +1459,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1424,7 +1462,11 @@ export class SettingsSelectorComponent implements Component {
  			const icon = theme.symbol(meta.icon);
  			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
  		}
@@ -2427,7 +2427,7 @@ index 780eddc..c4f038a 100644
  		empty.push({
  			id: "plugins",
  			label: `${theme.icon.package} Plugins`,
-@@ -1870,7 +1912,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1873,7 +1915,7 @@ export class SettingsSelectorComponent implements Component {
  
  	/** Re-evaluate condition gates against the current settings and refresh the active list. */
  	#refreshCurrentTabItems(defs: SettingDef[]): void {
@@ -2436,7 +2436,7 @@ index 780eddc..c4f038a 100644
  		this.#currentList.setItems(this.#buildItemsForDefs(defs));
  	}
  
-@@ -1907,6 +1949,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1910,6 +1952,11 @@ export class SettingsSelectorComponent implements Component {
  		});
  	}
  
@@ -2448,7 +2448,7 @@ index 780eddc..c4f038a 100644
  	handleInput(data: string): void {
  		// SGR mouse reports (the fullscreen overlay enables tracking).
  		if (data.startsWith("\x1b[<")) {
-@@ -1934,6 +1981,11 @@ export class SettingsSelectorComponent implements Component {
+@@ -1937,6 +1984,11 @@ export class SettingsSelectorComponent implements Component {
  			return;
  		}
  
@@ -2460,7 +2460,7 @@ index 780eddc..c4f038a 100644
  		// Tab toggles keyboard focus between section headings and setting rows
  		// (fast section hopping); tabs without sections keep Tab switching tabs.
  		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-@@ -1951,7 +2003,7 @@ export class SettingsSelectorComponent implements Component {
+@@ -1954,7 +2006,7 @@ export class SettingsSelectorComponent implements Component {
  
  		// Printable characters start a search across every settings tab. The
  		// plugins tab keeps its own local filtering instead.
@@ -2469,7 +2469,7 @@ index 780eddc..c4f038a 100644
  			const printable = extractPrintableText(data);
  			if (printable !== undefined && printable.trim().length > 0) {
  				this.#startSearch(printable);
-@@ -1963,6 +2015,8 @@ export class SettingsSelectorComponent implements Component {
+@@ -1966,6 +2018,8 @@ export class SettingsSelectorComponent implements Component {
  			this.#currentList.handleInput(data);
  		} else if (this.#pluginComponent) {
  			this.#pluginComponent.handleInput(data);
@@ -2479,10 +2479,10 @@ index 780eddc..c4f038a 100644
  	}
  
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index 6ece374..61307d3 100644
+index d60baa7..ce52774 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
-@@ -2527,6 +2527,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2595,6 +2595,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			sessionAccent: sessionAccentEnabled,
  			previewTitle,
  			activeRepo: activeRepoCache.activeRepo,
@@ -2490,7 +2490,7 @@ index 6ece374..61307d3 100644
  			width,
  			options: segmentOptions ?? {},
  			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
-@@ -2594,6 +2595,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2662,6 +2663,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			};
  		}
  
@@ -2505,7 +2505,7 @@ index 6ece374..61307d3 100644
  			? (this.#settings.leftSegments ?? presetDef.leftSegments)
  			: presetDef.leftSegments;
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index c5517f0..454b086 100644
+index 757e846..b32baed 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
 @@ -2,7 +2,7 @@ import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -2517,7 +2517,7 @@ index c5517f0..454b086 100644
  
  export interface StatusAccountIdentity {
  	accountId?: string;
-@@ -87,6 +87,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+@@ -92,6 +92,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
  	getSessionSettingsRevision(session: TSession): number;
  	goalStatusInFooter(session: TSession): boolean;
  	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
@@ -2533,10 +2533,10 @@ index c5517f0..454b086 100644
  	fetchUsageReports(session: TSession, signal: AbortSignal): Promise<unknown>;
  	resolveActiveRepo(cwd: string): ActiveRepoContext | null;
 diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
-index 2592f4b..92ebac1 100644
+index 06b42e1..dd038f1 100644
 --- a/packages/tui/src/status-line/segments.ts
 +++ b/packages/tui/src/status-line/segments.ts
-@@ -36,6 +36,12 @@ export type { SegmentContext } from "./types";
+@@ -37,6 +37,12 @@ export type { SegmentContext } from "./types";
  // Helpers
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -2549,7 +2549,7 @@ index 2592f4b..92ebac1 100644
  function withIcon(icon: string, text: string): string {
  	return icon ? `${icon} ${text}` : text;
  }
-@@ -337,6 +343,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
+@@ -348,6 +354,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
  	return icon ? { icon, color } : undefined;
  }
  
@@ -2598,7 +2598,7 @@ index 2592f4b..92ebac1 100644
  const modelSegment: StatusLineSegment = {
  	id: "model",
  	render(ctx) {
-@@ -364,6 +412,7 @@ const modelSegment: StatusLineSegment = {
+@@ -375,6 +423,7 @@ const modelSegment: StatusLineSegment = {
  		// `statusLineModel` is aliased to `accent` in many themes, so the badge
  		// uses status colors to stay visibly distinct from the model name color.
  		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
@@ -2606,7 +2606,7 @@ index 2592f4b..92ebac1 100644
  		// Per-advisor detail lives in `/advisor status`.
  		const advisor = modelAdvisorBadge(ctx);
  		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
-@@ -382,6 +431,7 @@ const modelSegment: StatusLineSegment = {
+@@ -393,6 +442,7 @@ const modelSegment: StatusLineSegment = {
  		// quiet separator; the terminal draws the model icon.
  		const token = accentToken(ctx, "statusLineModel");
  		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
@@ -2615,19 +2615,19 @@ index 2592f4b..92ebac1 100644
  		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
  		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
-index 14fe693..ebff219 100644
+index 47917bf..08f38a5 100644
 --- a/packages/tui/src/status-line/types.ts
 +++ b/packages/tui/src/status-line/types.ts
-@@ -36,7 +36,7 @@ export interface CollabStatus {
- }
+@@ -37,7 +37,7 @@ export interface CollabStatus {
  
  export interface StatusLineSegmentOptions {
+ 	pi?: { showProfile?: boolean };
 -	model?: { showThinkingLevel?: boolean };
 +	model?: { showThinkingLevel?: boolean; showAccount?: boolean };
  	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
  	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
  	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
-@@ -71,6 +71,24 @@ export type EffectiveStatusLineSettings = Required<
+@@ -72,6 +72,24 @@ export type EffectiveStatusLineSettings = Required<
  // Segment Rendering
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -2652,7 +2652,7 @@ index 14fe693..ebff219 100644
  export type RGB = readonly [number, number, number];
  
  export interface SegmentContext {
-@@ -205,6 +223,13 @@ export interface SegmentContext {
+@@ -206,6 +224,13 @@ export interface SegmentContext {
  			expiring?: StatusResetExpiry;
  		};
  	} | null;
@@ -2667,7 +2667,7 @@ index 14fe693..ebff219 100644
  
  /** How close an account's saved resets are to expiring, when it is worth a warning. */
 diff --git a/packages/tui/src/theme/symbols.ts b/packages/tui/src/theme/symbols.ts
-index 158ab5d..e57aa18 100644
+index ecdb858..e2165f8 100644
 --- a/packages/tui/src/theme/symbols.ts
 +++ b/packages/tui/src/theme/symbols.ts
 @@ -97,6 +97,8 @@ export type SymbolKey =
@@ -2679,7 +2679,7 @@ index 158ab5d..e57aa18 100644
  	| "icon.time"
  	| "icon.omp"
  	| "icon.ghost"
-@@ -478,6 +480,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
+@@ -479,6 +481,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "👁",
  	"icon.advisorClosed": "🙈",
@@ -2688,7 +2688,7 @@ index 158ab5d..e57aa18 100644
  	"icon.time": "⏱",
  	"icon.omp": "π",
  	"icon.ghost": "👻",
-@@ -855,6 +859,10 @@ const NERD_SYMBOLS: SymbolMap = {
+@@ -856,6 +860,10 @@ const NERD_SYMBOLS: SymbolMap = {
  	"icon.advisor": "\uea70",
  	// pick:  (nf-oct-eye_closed)
  	"icon.advisorClosed": "\ueae7",
@@ -2699,7 +2699,7 @@ index 158ab5d..e57aa18 100644
  	// pick:  | alt: ◷ ◴
  	"icon.time": "\uf017",
  	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
-@@ -1261,6 +1269,8 @@ const ASCII_SYMBOLS: SymbolMap = {
+@@ -1262,6 +1270,8 @@ const ASCII_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "(adv)",
  	"icon.advisorClosed": "(adv)",
@@ -2709,7 +2709,7 @@ index 158ab5d..e57aa18 100644
  	"icon.omp": "pi",
  	"icon.ghost": "@",
 diff --git a/packages/tui/src/theme/theme-class.ts b/packages/tui/src/theme/theme-class.ts
-index e66b758..ab649dc 100644
+index 75feb8c..8a120ea 100644
 --- a/packages/tui/src/theme/theme-class.ts
 +++ b/packages/tui/src/theme/theme-class.ts
 @@ -637,6 +637,8 @@ export class Theme {
@@ -2878,7 +2878,7 @@ index 067ade3..0d53066 100644
 +	});
 +});
 diff --git a/packages/utils/src/dirs.ts b/packages/utils/src/dirs.ts
-index 5fb8c48..11c86bb 100644
+index 6c5317f..7ad476c 100644
 --- a/packages/utils/src/dirs.ts
 +++ b/packages/utils/src/dirs.ts
 @@ -620,6 +620,14 @@ export function getAgentDir(): string {
@@ -2897,7 +2897,7 @@ index 5fb8c48..11c86bb 100644
  export function getProjectAgentDir(cwd: string = getProjectDir()): string {
  	return path.join(cwd, CONFIG_DIR_NAME);
 diff --git a/packages/utils/src/index.ts b/packages/utils/src/index.ts
-index 8ff3a64..3727eda 100644
+index 072453d..4f18d99 100644
 --- a/packages/utils/src/index.ts
 +++ b/packages/utils/src/index.ts
 @@ -1,6 +1,7 @@

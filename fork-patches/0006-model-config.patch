@@ -1,10 +1,10 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index 9c96140..22aa387 100644
+index d4c23cc..96bca61 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -589,6 +589,10 @@ When the active chat model keeps failing (429s, quota walls, provider outages) a
+@@ -590,6 +590,10 @@ A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or
  
- A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or entry: it matches ids under that prefix or prepends the prefix to the failing model's bare id when changing providers. Bare fallback entries inherit the failing turn's thinking level; an explicit suffix can replace it. When a chain is exhausted, recovery can consult the current fallback model's own chain as well, and each hop still consumes a retry attempt. See [Retry policy](./non-compaction-retry-policy.md) for recovery ordering and quota behavior.
+ Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
  
 +Claude account cooldowns are reconciled against fresh usage during `/usage`, account selection, and model-usage health checks. After a five-minute guard against lagging quota reports, healthy shared five-hour and weekly counters can clear a stale block; model-tier blocks also require that tier's counter to be reported and healthy. Missing, unknown, malformed, or header-only quota evidence does not clear a block. Legacy account-wide blocks require every reported shared and model-tier quota counter to be healthy; display-only Extra Usage spend is excluded. Sessions that already fell over from a configured default remain on their chosen sibling; a new session can use the recovered default.
 +
@@ -13,7 +13,7 @@ index 9c96140..22aa387 100644
  ### Tools and approvals
  
  ```yaml
-@@ -879,6 +883,8 @@ The `path` segment abbreviates the home directory to `~`. On Windows, shared pat
+@@ -885,6 +889,8 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
  
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
@@ -22,7 +22,7 @@ index 9c96140..22aa387 100644
  ### Interaction
  
  | Key                    | Type    | Default         | Values                                                                                                  |
-@@ -950,6 +956,8 @@ searxng:
+@@ -956,6 +962,8 @@ searxng:
  | `providers.fetch`                   | enum    | `auto`    | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                              |
  | `providers.tinyModelDevice`         | enum    | `default` | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                         |
  | `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                          |
@@ -32,7 +32,7 @@ index 9c96140..22aa387 100644
  | `tts.localVoice`                    | enum    | `af_heart` | Voice used by the local Kokoro TTS runner. Available local voices remain configurable independently of `modelRoles.speech`.                                                                                                                                                                                                                                                                                                           |
  | `tts.localSpeed`                    | number  | `1`       | Speaking rate of the local Kokoro TTS runner (`tts` tool, `omp say`). `1` is normal; values are clamped to `0.5`–`2.5`.                                                                                                                                                                                                                                                                                                              |
 diff --git a/packages/coding-agent/src/config/custom-models.ts b/packages/coding-agent/src/config/custom-models.ts
-index c5b798a..c7ab818 100644
+index 5b507e0..01da086 100644
 --- a/packages/coding-agent/src/config/custom-models.ts
 +++ b/packages/coding-agent/src/config/custom-models.ts
 @@ -9,7 +9,7 @@ import {
@@ -63,7 +63,7 @@ index c5b798a..c7ab818 100644
  		provider: providerName,
  		api,
  		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
-@@ -125,8 +127,10 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
+@@ -118,8 +120,10 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options:
  		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
  	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
  	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
@@ -74,7 +74,7 @@ index c5b798a..c7ab818 100644
  		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
  		api: resolvedModel.api,
  		kindConfig: resolvedModel.kind,
-@@ -140,8 +144,12 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
+@@ -134,8 +138,12 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options:
  		cost,
  		promptCache: resolvedModel.promptCache,
  		promptCacheConfig: resolvedModel.promptCache,
@@ -90,7 +90,7 @@ index c5b798a..c7ab818 100644
  		resolveHeaders: resolvedModel.resolveHeaders,
  		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 diff --git a/packages/coding-agent/src/config/model-discovery.ts b/packages/coding-agent/src/config/model-discovery.ts
-index e99a397..421e869 100644
+index fd5500c..9c4eddc 100644
 --- a/packages/coding-agent/src/config/model-discovery.ts
 +++ b/packages/coding-agent/src/config/model-discovery.ts
 @@ -9,6 +9,8 @@ import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
@@ -110,7 +110,7 @@ index e99a397..421e869 100644
  import type { ProviderDiscovery } from "./models-config-schema";
  
  // Default cap on `max_tokens` for auto-discovered models that do not advertise
-@@ -804,17 +807,25 @@ function collectModalities(values: readonly unknown[]): Set<string> {
+@@ -810,17 +813,25 @@ function collectModalities(values: readonly unknown[]): Set<string> {
  
  /**
   * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
@@ -140,7 +140,7 @@ index e99a397..421e869 100644
  	if (modalities.size === 0) return undefined;
  	return modalities.has("image") ? ["text", "image"] : ["text"];
  }
-@@ -826,29 +837,51 @@ function extractOpenAIModelsListInputCapabilities(item: {
+@@ -832,29 +843,51 @@ function extractOpenAIModelsListInputCapabilities(item: {
   * `/images/generations` surfaces of the same OpenAI-compatible root the
   * provider already serves its model list from.
   *
@@ -206,7 +206,7 @@ index e99a397..421e869 100644
  }
  
  export async function discoverOpenAIModelsList(
-@@ -908,7 +941,10 @@ export async function discoverOpenAIModelsList(
+@@ -918,7 +951,10 @@ export async function discoverOpenAIModelsList(
  						output?: unknown;
  						output_modalities?: unknown;
  						architecture?: unknown;
@@ -217,7 +217,7 @@ index e99a397..421e869 100644
  					}>;
  				};
  			}),
-@@ -958,6 +994,7 @@ export async function discoverOpenAIModelsList(
+@@ -979,6 +1015,7 @@ export async function discoverOpenAIModelsList(
  		const reportedContextWindow =
  			toPositiveNumberOrUndefined(item.max_model_len) ??
  			toPositiveNumberOrUndefined(item.context_length) ??
@@ -225,7 +225,7 @@ index e99a397..421e869 100644
  			reportedLimitsContextWindow ??
  			nativeMetadataForModel?.contextWindow ??
  			reference?.contextWindow ??
-@@ -992,7 +1029,7 @@ export async function discoverOpenAIModelsList(
+@@ -1013,7 +1050,7 @@ export async function discoverOpenAIModelsList(
  				? resolveLiteLLMApi(undefined, id, providerConfig.api)
  				: providerConfig.api;
  		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
@@ -234,7 +234,7 @@ index e99a397..421e869 100644
  			id,
  			name: reference?.name ?? id,
  			api,
-@@ -1024,7 +1061,9 @@ export async function discoverOpenAIModelsList(
+@@ -1045,7 +1082,9 @@ export async function discoverOpenAIModelsList(
  					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
  					: {}),
  			},
@@ -245,7 +245,7 @@ index e99a397..421e869 100644
  	}
  	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
  	return providerConfig.discovery.type === "litellm"
-@@ -1125,7 +1164,17 @@ export async function discoverProxyModels(
+@@ -1146,7 +1185,17 @@ export async function discoverProxyModels(
  			}
  			headers = h;
  			return (await res.json()) as {
@@ -264,7 +264,7 @@ index e99a397..421e869 100644
  			};
  		});
  	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
-@@ -1137,6 +1186,33 @@ export async function discoverProxyModels(
+@@ -1158,6 +1207,33 @@ export async function discoverProxyModels(
  	for (const item of items) {
  		const id = item.id;
  		if (!id) continue;
@@ -298,7 +298,7 @@ index e99a397..421e869 100644
  		const endpoints = item.supported_endpoint_types ?? [];
  		const api: Api | undefined = endpoints.includes("anthropic")
  			? "anthropic-messages"
-@@ -1146,52 +1222,111 @@ export async function discoverProxyModels(
+@@ -1167,52 +1243,111 @@ export async function discoverProxyModels(
  		if (!api) continue;
  		const isAnthropic = api === "anthropic-messages";
  		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
@@ -447,7 +447,7 @@ index e99a397..421e869 100644
  	const defaultBaseUrl = "http://127.0.0.1:8080";
  	const raw = baseUrl || defaultBaseUrl;
 diff --git a/packages/coding-agent/src/config/model-patch.ts b/packages/coding-agent/src/config/model-patch.ts
-index dfd2e0b..31b4523 100644
+index 43d44b4..7f0a72f 100644
 --- a/packages/coding-agent/src/config/model-patch.ts
 +++ b/packages/coding-agent/src/config/model-patch.ts
 @@ -5,7 +5,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -523,7 +523,7 @@ index dfd2e0b..31b4523 100644
  	name?: string;
  	api?: Api;
  	kind?: ModelKind;
-@@ -279,6 +309,7 @@ export interface ModelPatch {
+@@ -280,6 +310,7 @@ export interface ModelPatch {
  type ModelTransportPolicy = "merge" | "replace";
  export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
  	const result = { ...base };
@@ -532,7 +532,7 @@ index dfd2e0b..31b4523 100644
  	if (patch.api !== undefined) result.api = patch.api;
  	if (patch.kind !== undefined) {
 diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
-index a342ec8..7aa48d9 100644
+index 764a225..6c0d1d2 100644
 --- a/packages/coding-agent/src/config/model-registry.ts
 +++ b/packages/coding-agent/src/config/model-registry.ts
 @@ -326,6 +326,7 @@ export class ModelRegistry {
@@ -543,7 +543,7 @@ index a342ec8..7aa48d9 100644
  	/**
  	 * Local providers registered without a models.yml entry (ollama, llama.cpp,
  	 * lm-studio, apple). Their models sort after every other provider's, so a
-@@ -920,6 +921,7 @@ export class ModelRegistry {
+@@ -924,6 +925,7 @@ export class ModelRegistry {
  		this.#modelsConfigFile.invalidate();
  		this.#customProviderApiKeys.clear();
  		this.#keylessProviders.clear();
@@ -551,7 +551,7 @@ index a342ec8..7aa48d9 100644
  		this.#discoverableProviders = [];
  		// Drop config-sourced apiKeys from AuthStorage before reload; entries
  		// removed from models.yml must actually disappear from the resolver, not
-@@ -1011,6 +1013,7 @@ export class ModelRegistry {
+@@ -1015,6 +1017,7 @@ export class ModelRegistry {
  			error: configError,
  		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
  		this.#configError = configError;
@@ -559,7 +559,7 @@ index a342ec8..7aa48d9 100644
  		this.#keylessProviders = keylessProviders;
  		this.#discoverableProviders = discoverableProviders;
  		this.#customModelOverlays = customModels;
-@@ -1505,9 +1508,22 @@ export class ModelRegistry {
+@@ -1514,9 +1517,22 @@ export class ModelRegistry {
  		return models;
  	}
  
@@ -583,7 +583,7 @@ index a342ec8..7aa48d9 100644
  	}
  
  	#loadCachedDiscoverableModels(): Model<Api>[] {
-@@ -2582,6 +2598,7 @@ export class ModelRegistry {
+@@ -2615,6 +2631,7 @@ export class ModelRegistry {
  			headers?: Record<string, string>;
  			resolveHeaders?: Model<Api>["resolveHeaders"];
  			remoteCompaction?: RemoteCompactionConfig<Api>;
@@ -591,7 +591,7 @@ index a342ec8..7aa48d9 100644
  		},
  	>(
  		entry: T,
-@@ -2590,15 +2607,28 @@ export class ModelRegistry {
+@@ -2623,15 +2640,28 @@ export class ModelRegistry {
  			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
  		>,
  	): T {
@@ -623,7 +623,7 @@ index a342ec8..7aa48d9 100644
  				)
  			: entry.resolveHeaders;
  		return {
-@@ -2925,6 +2955,7 @@ export class ModelRegistry {
+@@ -2944,6 +2974,7 @@ export class ModelRegistry {
  		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
  			const modelDefs = providerConfig.models ?? [];
  			if (modelDefs.length === 0) continue; // Override-only, no custom models
@@ -631,7 +631,7 @@ index a342ec8..7aa48d9 100644
  			if (providerConfig.apiKey) {
  				this.#installProviderApiKey(providerName, providerConfig.apiKey);
  			}
-@@ -3118,6 +3149,14 @@ export class ModelRegistry {
+@@ -3137,6 +3168,14 @@ export class ModelRegistry {
  			.map(provider => provider.provider);
  	}
  
@@ -647,7 +647,7 @@ index a342ec8..7aa48d9 100644
  	getDiscoveryProviderId(requestedId: string): string | undefined {
  		const normalized = requestedId.toLowerCase();
 diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
-index 292bd8a..a449e42 100644
+index 777ad7b..30724ea 100644
 --- a/packages/coding-agent/src/config/model-resolver.ts
 +++ b/packages/coding-agent/src/config/model-resolver.ts
 @@ -490,16 +490,30 @@ export function resolveProviderModelReference(
@@ -685,10 +685,10 @@ index 292bd8a..a449e42 100644
  }
  
 diff --git a/packages/coding-agent/src/config/models-config-schema-bundle.ts b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-index 5fa4ca5..7159c8e 100644
+index e88ea22..ed68d4b 100644
 --- a/packages/coding-agent/src/config/models-config-schema-bundle.ts
 +++ b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-@@ -107,7 +107,7 @@ export const getModelsConfigSchemaBundle = once(() => {
+@@ -117,7 +117,7 @@ export const getModelsConfigSchemaBundle = once(() => {
  	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
  
  	const ApiSchema = type(
@@ -697,7 +697,7 @@ index 5fa4ca5..7159c8e 100644
  	);
  
  	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
-@@ -202,6 +202,7 @@ export const getModelsConfigSchemaBundle = once(() => {
+@@ -212,6 +212,7 @@ export const getModelsConfigSchemaBundle = once(() => {
  
  	const ModelDefinitionSchema = type({
  		id: "string",
@@ -705,7 +705,7 @@ index 5fa4ca5..7159c8e 100644
  		"name?": "string",
  		"api?": ModelApiSchema,
  		"kind?": ModelKindSchema,
-@@ -241,6 +242,13 @@ export const getModelsConfigSchemaBundle = once(() => {
+@@ -252,6 +253,13 @@ export const getModelsConfigSchemaBundle = once(() => {
  		if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
  			return ctx.mustBe("name a non-empty string");
  		}
@@ -1065,7 +1065,7 @@ index 722d362..4dd48fd 100644
  		const tokenFile = path.join(tempDir, "token.txt");
  		const counterFile = path.join(tempDir, "counter.txt");
 diff --git a/packages/coding-agent/test/model-registry.test.ts b/packages/coding-agent/test/model-registry.test.ts
-index 025edb2..9e69afc 100644
+index 0313397..b451bfa 100644
 --- a/packages/coding-agent/test/model-registry.test.ts
 +++ b/packages/coding-agent/test/model-registry.test.ts
 @@ -686,6 +686,46 @@ describe("ModelRegistry", () => {

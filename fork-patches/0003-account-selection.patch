@@ -2971,10 +2971,10 @@ index eb64b2e..131cd78 100644
  	OAuthAccountSummary,
  	OAuthCredential,
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index 2a8f0b5..7034470 100644
+index 43d677a..1c8bb7c 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -530,6 +530,18 @@ export interface AdvisorStatusOverviewEntry {
+@@ -532,6 +532,18 @@ export interface AdvisorStatusOverviewEntry {
  	yielded: boolean;
  }
  
@@ -2993,7 +2993,7 @@ index 2a8f0b5..7034470 100644
  /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
  export class SessionAdvisors {
  	readonly #host: SessionAdvisorsHost;
-@@ -2846,6 +2858,27 @@ export class SessionAdvisors {
+@@ -2845,6 +2857,27 @@ export class SessionAdvisors {
  		return { configured: this.#advisorEnabled, advisors };
  	}
  

@@ -1,9 +1,9 @@
 {
-	"base": "v18.9.2",
-	"baseCommit": "bd4dffd5e617ce732f8a14249b0be1e6c7621886",
+	"base": "v18.12.2",
+	"baseCommit": "1d5aff90b057ce7dbfe32ea557a527c1b3144b72",
 	"head": "HEAD",
-	"headCommit": "f4b5bf8f510d186ae1da189009adc0955244be5b",
-	"generated": "2026-10-11T19:48:23.722Z",
+	"headCommit": "0533bca59eaf055569e874a4ac0b0fbba43ff150",
+	"generated": "2026-10-19T11:15:12.386Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -48,13 +48,6 @@
 				"packages/ai/src/auth-gateway/management-schemas.ts",
 				"packages/ai/src/auth-gateway/management-types.ts",
 				"packages/ai/src/auth-gateway/management.ts",
-				"packages/ai/src/auth-gateway/routes/embeddings.ts",
-				"packages/ai/src/auth-gateway/routes/images.ts",
-				"packages/ai/src/auth-gateway/routes/rerank.ts",
-				"packages/ai/src/auth-gateway/routes/speech.ts",
-				"packages/ai/src/auth-gateway/routes/systemone.ts",
-				"packages/ai/src/auth-gateway/routes/transcriptions.ts",
-				"packages/ai/src/auth-gateway/routes/video.ts",
 				"packages/ai/src/auth-gateway/server.ts",
 				"packages/ai/src/auth-gateway/types.ts",
 				"packages/ai/src/auth/sqlite-credential-store.ts",
@@ -256,7 +249,6 @@
 				"packages/ai/src/registry/types.ts",
 				"packages/ai/src/stream.ts",
 				"packages/ai/src/types.ts",
-				"packages/ai/test/auth-broker-refresh-backoff.test.ts",
 				"packages/ai/test/claude-block-healing.test.ts",
 				"packages/catalog/test/build.test.ts"
 			]

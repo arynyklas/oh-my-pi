@@ -1,8 +1,8 @@
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index 4b2038e..dcf3c33 100644
+index c983e2e..ab9b399 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -24,8 +24,6 @@ const MAX_ATTEMPTS = 3;
+@@ -25,8 +25,6 @@ const MAX_ATTEMPTS = 3;
  const BASE_RETRY_DELAY_MS = 500;
  /** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
  const FAILURE_BACKOFF_MS = 60_000;
@@ -11,7 +11,7 @@ index 4b2038e..dcf3c33 100644
  
  const CLAUDE_USAGE_BETAS =
  	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-@@ -946,40 +944,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+@@ -939,40 +937,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	/**
  	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
  	 * Anthropic can restore the tier earlier (plan change, corrected counter),
@@ -2298,7 +2298,7 @@ index 0000000..147bea7
 +	return lines.join("\n");
 +}
 diff --git a/packages/coding-agent/test/modes/controllers/usage-command.test.ts b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
-index 37b08d7..9861d7e 100644
+index f6b922c..f946eaa 100644
 --- a/packages/coding-agent/test/modes/controllers/usage-command.test.ts
 +++ b/packages/coding-agent/test/modes/controllers/usage-command.test.ts
 @@ -3,13 +3,30 @@ import { stripVTControlCharacters } from "node:util";
@@ -2307,7 +2307,7 @@ index 37b08d7..9861d7e 100644
  import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 +import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
  import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
- import { visibleWidth } from "@oh-my-pi/pi-tui";
+ import { Container, visibleWidth } from "@oh-my-pi/pi-tui";
  import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
  import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
  import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -2827,10 +2827,10 @@ index 37b08d7..9861d7e 100644
  		const now = Date.now();
  		const report: UsageReport = {
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
-index 59d8a88..e254088 100644
+index e2d32a1..a92cd36 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
 +++ b/packages/coding-agent/test/usage-cli.test.ts
-@@ -1012,6 +1012,33 @@ describe("formatUsageBreakdown", () => {
+@@ -1013,6 +1013,33 @@ describe("formatUsageBreakdown", () => {
  		expect(text).toContain("✗ truly-dead@example.test — disabled");
  	});
  
@@ -2865,10 +2865,10 @@ index 59d8a88..e254088 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index c60ba8f..370d03a 100644
+index ebf881b..39c9600 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -103,6 +103,13 @@
+@@ -121,6 +121,13 @@
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -3199,10 +3199,10 @@ index c0eedc1..e8ffda7 100644
  		} catch (error) {
  			failed = true;
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index e1a6255..4ce5925 100644
+index ae30ecb..cb809ba 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
-@@ -252,6 +252,11 @@ export async function initDb(): Promise<Database> {
+@@ -254,6 +254,11 @@ export async function initDb(): Promise<Database> {
  		);
  	`);
  
@@ -3214,7 +3214,7 @@ index e1a6255..4ce5925 100644
  	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
  	if (!offsetColumns.some(column => column.name === "parser_state")) {
  		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
-@@ -595,6 +600,12 @@ function backfillNoCacheInputCosts(database: Database): void {
+@@ -608,6 +613,12 @@ function backfillNoCacheInputCosts(database: Database): void {
  export interface FileOffset {
  	offset: number;
  	lastModified: number;
@@ -3227,7 +3227,7 @@ index e1a6255..4ce5925 100644
  	parserState?: SessionParserState;
  }
  
-@@ -823,7 +834,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
+@@ -836,7 +847,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
  			updateToolResults(parsedRows(writes, result => result.toolResults));
  		for (const { sessionFile, result } of sessions) {
  			if (result.parserState) {
@@ -3268,7 +3268,7 @@ index 2ebe24b..b8cc20e 100755
  				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
  				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
 diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
-index 1d94f1b..7523942 100644
+index 8fcc8be..cd1cf84 100644
 --- a/packages/stats/src/parser.ts
 +++ b/packages/stats/src/parser.ts
 @@ -13,7 +13,7 @@ import {
@@ -3790,7 +3790,7 @@ index 1d94f1b..7523942 100644
  }
  
  /**
-@@ -692,19 +843,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+@@ -713,19 +864,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
  }
  
  /**
