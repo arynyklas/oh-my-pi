@@ -9,6 +9,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
 } from "../dispatch";
@@ -80,11 +81,13 @@ function videoOptions(bootOpts: AuthGatewayRouteOptions, resolved: ResolvedVideo
 }
 
 function logVideoRequest(
+	bootOpts: AuthGatewayRouteOptions,
 	requestId: string,
 	operation: "submit" | "poll" | "content",
-	model: ResolvedVideoRequest["model"],
+	resolved: ResolvedVideoRequest,
 	peer: string,
 ): void {
+	const { model } = resolved;
 	logger.info("auth-gateway request", {
 		requestId,
 		format: `video-${operation}`,
@@ -93,6 +96,7 @@ function logVideoRequest(
 		resolvedModel: model.id,
 		stream: operation === "content",
 		peer,
+		...gatewayRequestLogFields(bootOpts, resolved.apiKey),
 	});
 }
 
@@ -151,6 +155,7 @@ export async function handleVideoSubmit(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 	try {
 		const job = await submitVideo(model, parsed.request, {
@@ -187,7 +192,7 @@ export async function handleVideoPoll(
 	const requestId = crypto.randomUUID();
 	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
 	if (resolved instanceof Response) return resolved;
-	logVideoRequest(requestId, "poll", resolved.model, peer);
+	logVideoRequest(bootOpts, requestId, "poll", resolved, peer);
 	try {
 		const job = await pollVideo(resolved.model, resolved.upstreamId, videoOptions(bootOpts, resolved, peer));
 		recordCompletedUsage(bootOpts, resolved, req, job);
@@ -219,7 +224,7 @@ export async function handleVideoContent(
 	const requestId = crypto.randomUUID();
 	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
 	if (resolved instanceof Response) return resolved;
-	logVideoRequest(requestId, "content", resolved.model, peer);
+	logVideoRequest(bootOpts, requestId, "content", resolved, peer);
 	try {
 		const content = await downloadVideo(resolved.model, resolved.upstreamId, videoOptions(bootOpts, resolved, peer));
 		const headers = new Headers(gatewayResponseHeaders(resolved.model, { requestId, startedAt }));

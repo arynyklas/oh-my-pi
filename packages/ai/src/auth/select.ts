@@ -173,11 +173,16 @@ export class CredentialSelector {
 	/**
 	 * Selects a credential of the specified type for a provider.
 	 * Returns the credential, its durable row id, and its index in the pool
-	 * array (for updates/removal). Uses deterministic hashing for session
-	 * stickiness and skips blocked credentials when possible. With a selection
-	 * policy, only eligible rows participate and the policy's own strategy
-	 * (sticky-session, round-robin, least-used, failover) decides the walk;
-	 * an exhausted policy pool returns undefined instead of a blocked fallback.
+	 * array (for updates/removal). Without a selection policy, `sessionId`
+	 * starts the scan at the session's hashed index; without one the scan starts
+	 * at the first stored credential and never advances round-robin. Model
+	 * discovery peeks through this, and credential-scoped catalogs (e.g. GitHub
+	 * Copilot) key their cache rows on the credential picked, so a rotating pick
+	 * would read another account's cache namespace on every pass. Blocked
+	 * credentials are skipped when possible. With a selection policy, only
+	 * eligible rows participate and the policy's own strategy (sticky-session,
+	 * round-robin, least-used, failover) decides the walk; an exhausted policy
+	 * pool returns undefined instead of a blocked fallback.
 	 */
 	selectByType<T extends AuthCredential["type"]>(
 		provider: string,
@@ -212,12 +217,14 @@ export class CredentialSelector {
 			order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
 		} else if (selection?.strategy === "least-used" || selection?.strategy === "failover") {
 			order = credentials.map((_credential, index) => index);
-		} else {
+		} else if (sessionId) {
 			order = this.#getCredentialOrder(
 				this.#selectionRoundRobinKey(provider, type, selection),
 				sessionId,
 				credentials.length,
 			);
+		} else {
+			order = credentials.map((_credential, index) => index);
 		}
 
 		const fallback = credentials[order[0]];

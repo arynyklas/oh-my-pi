@@ -6,12 +6,14 @@ import {
 	type ResetCreditTarget,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { hashAuthGatewayToken } from "@oh-my-pi/pi-ai/auth-gateway";
 import {
 	closeGatewayHarness,
 	createGatewayHarness,
 	expectObject,
 	type GatewayHarness,
 	jsonHeaders,
+	postChat,
 	readJson,
 } from "./auth-gateway-integration-helpers";
 
@@ -72,6 +74,26 @@ describe("auth-gateway management HTTP", () => {
 			unexpected: true,
 		});
 		expect(response.status).toBe(400);
+	});
+
+	test("admits scoped client tokens beside managed users, never as an admin", async () => {
+		harness = await createGatewayHarness({
+			clients: [{ name: "ci", tokenSha256: hashAuthGatewayToken("ci-token"), models: ["mock/model-a"] }],
+		});
+		const admin = harness.accessStore.createUser({ name: "clientadmin", role: "admin" });
+
+		let response = await requestJson(harness.handle.url, "GET", "/v1/users", "ci-token");
+		expect(response.status).toBe(403);
+		expect(await readJson(response)).toEqual({
+			error: { code: "forbidden", message: "Management routes require an admin token" },
+		});
+		response = await requestJson(harness.handle.url, "GET", "/v1/users", admin.token.value);
+		expect(response.status).toBe(200);
+
+		response = await postChat(harness.handle.url, "ci-token");
+		expect(response.status).toBe(200);
+		const [event] = harness.accessStore.listAudit({ limit: 1 }).events;
+		expect(event).toMatchObject({ userId: null, userName: "ci", routeFamily: "chat", outcome: "success" });
 	});
 
 	test("implements users, one-time tokens, ACLs, pool bindings, usage, and audit pagination", async () => {

@@ -109,9 +109,14 @@ export interface AuthGatewayUserPoolBinding {
 	pool: AuthGatewayPool;
 }
 
+/**
+ * Who a gateway request runs as. `client` is a scoped client token
+ * (`serve --clients`): never an admin, and limited by its own model and
+ * account scope instead of managed-user ACLs and pools.
+ */
 export interface AuthGatewayPrincipal {
-	kind: "managed" | "legacy" | "no-auth";
-	id: number | "legacy-admin" | "no-auth-admin";
+	kind: "managed" | "legacy" | "no-auth" | "client";
+	id: number | "legacy-admin" | "no-auth-admin" | "scoped-client";
 	userId: number | null;
 	name: string;
 	role: AuthGatewayRole;

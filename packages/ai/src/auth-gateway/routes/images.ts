@@ -2,11 +2,13 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
 import { generateImage } from "../../images";
+import { validateImageInput } from "../../images/shared";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayApiKey,
@@ -49,6 +51,7 @@ async function handleImages(
 	let parsed: imagesServer.ImagesParsedRequest;
 	try {
 		parsed = await imagesServer.parseRequest(body, kind);
+		for (const image of parsed.request.inputImages ?? []) validateImageInput(image);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return imagesServer.formatError(400, "invalid_request_error", message);
@@ -87,6 +90,7 @@ async function handleImages(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	try {

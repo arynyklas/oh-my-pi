@@ -341,6 +341,30 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("defaults Codex GPT-6.1 Sol to the 500K window while Astra stays at 272K (#15421)", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					// Discovery may still report the pre-2026-10-11 272K default.
+					models: ["gpt-6.1-sol", "gpt-6.1-sol-wm", "gpt-6-astra"].map(slug => ({
+						slug,
+						context_window: 272_000,
+						max_context_window: 872_000,
+					})),
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({ accessToken: "test-token", fetchFn });
+		const windows = Object.fromEntries(
+			(result?.models ?? []).map(model => [model.id, buildModel(model).contextWindow]),
+		);
+		expect(windows).toMatchObject({
+			"gpt-6.1-sol": 500_000,
+			"gpt-6.1-sol-wm": 500_000,
+			"gpt-6-astra": 272_000,
+		});
+	});
+
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
@@ -466,6 +490,57 @@ describe("Codex model discovery", () => {
 				contextWindow: 128_000,
 				maxTokens: 128_000,
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps bundled display names over Codex's slug-style display_name", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-names-"));
+		// Codex reports `GPT-6.1-Sol` where every other surface (and the bundled
+		// row) says `GPT-6.1 Sol`; the composer chip flipped between the two once
+		// discovery replaced the bundled row.
+		const bundledSol: ModelSpec<"openai-codex-responses"> = {
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		};
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				new Response(
+					JSON.stringify({
+						models: [
+							{ slug: "gpt-6.1-sol", display_name: "GPT-6.1-Sol", supported_in_api: true },
+							{ slug: "gpt-6.2-nova", display_name: "GPT-6.2-Nova", supported_in_api: true },
+						],
+					}),
+				),
+			{ preconnect() {} },
+		);
+		try {
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [{ accessToken: "test-token" }],
+						fetch: fetchFn,
+					}),
+					staticModels: [bundledSol],
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			const names = Object.fromEntries(result.models.map(model => [model.id, model.name]));
+			expect(names["gpt-6.1-sol"]).toBe("GPT-6.1 Sol");
+			// Without a bundled row there is no other name to keep consistent with.
+			expect(names["gpt-6.2-nova"]).toBe("GPT-6.2-Nova");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

@@ -44,9 +44,12 @@ pub mod highlight;
 pub mod hpatch;
 pub mod html;
 pub mod iofs;
+/// Local IPC over Unix domain sockets / Windows named pipes.
+pub mod ipc;
 pub mod js;
 pub mod keys;
 pub mod live;
+pub mod memory;
 pub mod mermaid;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.

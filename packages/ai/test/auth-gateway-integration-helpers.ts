@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import {
+	type AuthGatewayClient,
 	type AuthGatewayServerHandle,
 	SqliteAuthGatewayAccessStore,
 	startAuthGateway,
@@ -29,6 +30,8 @@ export interface GatewayHarnessOptions {
 	keylessProviders?: string[];
 	/** Routing variants served under their own id but not listed, each cloned from a listed `provider/id`. */
 	variants?: Array<{ model: MockModel; base: string }>;
+	/** Scoped client tokens admitted next to the legacy and managed tokens. */
+	clients?: readonly AuthGatewayClient[];
 }
 
 export function jsonHeaders(token?: string): Record<string, string> {
@@ -77,6 +80,7 @@ export async function createGatewayHarness(options: GatewayHarnessOptions = {}):
 		listModels: () => Array.from(modelById.values()).map(model => model.model),
 		isKeylessModel: model => options.keylessProviders?.includes(model.provider) ?? false,
 		resolveVariantBase: model => variantBases.get(model),
+		clients: options.clients,
 	});
 	return { tempDir, credentialStore, storage, accessStore, models, handle };
 }
