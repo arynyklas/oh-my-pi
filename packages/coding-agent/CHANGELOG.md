@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.12.2-fork.2] - 2026-10-21
+
 ### Fixed
 
 - `git worktree add` in bash, `omp worktree add`, `/wt` and `github pr_checkout` no longer clone the checkout into a worktree path inside it, such as `.worktrees/<name>`. The clone copied the destination into itself until the path was too long (can1357/oh-my-pi#16076): on a Windows Dev Drive it ran past the bash timeout and left a directory thousands of levels deep, and a later `du` on that directory crashed omp with `panic(tokio-rt-worker): Stack overflow`. Such a worktree now gets a plain checkout; worktrees outside the checkout are still cloned.
