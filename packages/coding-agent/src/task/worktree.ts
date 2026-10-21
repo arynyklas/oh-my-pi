@@ -6,7 +6,15 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	formatBytes,
+	getWorktreeDir,
+	isEnoent,
+	logger,
+	normalizePathForComparison,
+	relativePathWithinNormalizedRoot,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -576,6 +584,38 @@ export function formatIsolationBackend(backend: IsoBackendKind): Exclude<Isolati
 			return "block-clone";
 		case IsoBackendKind.Rcopy:
 			return "rcopy";
+	}
+}
+
+/**
+ * Whether `worktree add` may clone the checkout at `sourceRoot` into
+ * `worktreePath` (`worktree.clone`). The native clone copies the whole source
+ * checkout, so a destination inside it is copied into itself until the path is
+ * too long (can1357/oh-my-pi#16076); such a worktree gets a plain checkout.
+ */
+export async function canCloneCheckoutInto(sourceRoot: string, worktreePath: string): Promise<boolean> {
+	const root = normalizePathForComparison(sourceRoot);
+	const destination = normalizePathForComparison(await resolveThroughExistingAncestor(worktreePath));
+	return relativePathWithinNormalizedRoot(root, destination) === null;
+}
+
+/**
+ * `target` with its deepest existing ancestor replaced by that ancestor's real
+ * path. A destination that does not exist yet still compares by physical
+ * location when it is reached through a symlink or junction.
+ */
+async function resolveThroughExistingAncestor(target: string): Promise<string> {
+	const missing: string[] = [];
+	let current = path.resolve(target);
+	for (;;) {
+		try {
+			return path.join(await fs.realpath(current), ...missing);
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(target);
+			missing.unshift(path.basename(current));
+			current = parent;
+		}
 	}
 }
 

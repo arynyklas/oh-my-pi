@@ -24,7 +24,7 @@ import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
@@ -149,7 +149,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	}
 	const result = await repository.worktreeAdd(worktreePath, ref, {
 		detach,
-		clone: cfgWorktreeClone.get(settings),
+		clone: cfgWorktreeClone.get(settings) && (await canCloneCheckoutInto(repository.info().repoRoot, worktreePath)),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 	});
 	if (!options.quiet) {

@@ -15,7 +15,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 
 import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
@@ -149,7 +149,7 @@ export async function createSessionWorktree(
 	await repository.createBranch(branch, baseCommit, false);
 	const result = await repository.worktreeAdd(worktreePath, branch, {
 		detach: false,
-		clone: cfgWorktreeClone.get(settings),
+		clone: cfgWorktreeClone.get(settings) && (await canCloneCheckoutInto(repository.info().repoRoot, worktreePath)),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 		keepChanges,
 	});

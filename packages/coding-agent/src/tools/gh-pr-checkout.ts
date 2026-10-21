@@ -6,7 +6,7 @@ import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
 import type { GhPrCheckoutSummary, GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
@@ -498,7 +498,9 @@ export async function checkoutPullRequest(
 					localBranch,
 					{
 						detach: false,
-						clone: cfgWorktreeClone.get(session.settings),
+						clone:
+							cfgWorktreeClone.get(session.settings) &&
+							(await canCloneCheckoutInto(repository.info().repoRoot, finalWorktreePath)),
 						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
 					},
 					signal,

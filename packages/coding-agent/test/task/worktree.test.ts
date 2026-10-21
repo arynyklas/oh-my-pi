@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	applyNestedPatches,
+	canCloneCheckoutInto,
 	captureBaseline,
 	captureDeltaPatch,
 	captureIsolationBaseline,
@@ -571,6 +572,38 @@ describe("getRepoRoot", () => {
 		await initRepo(inner);
 
 		expect(await getRepoRoot(inner)).toBe(inner);
+	});
+});
+
+// #16076: the clone copies the whole source checkout, so a destination inside
+// it (`.worktrees/<name>`) was copied into itself until the path was too long.
+describe("canCloneCheckoutInto", () => {
+	it("refuses the checkout root and destinations inside it", async () => {
+		const repo = await createGitRepo();
+		expect(await canCloneCheckoutInto(repo, repo)).toBe(false);
+		expect(await canCloneCheckoutInto(repo, path.join(repo, ".worktrees", "a"))).toBe(false);
+	});
+
+	it("allows destinations outside the checkout, including siblings sharing its name prefix", async () => {
+		const repo = await createGitRepo();
+		expect(await canCloneCheckoutInto(repo, `${repo}-wt`)).toBe(true);
+		expect(await canCloneCheckoutInto(repo, path.join(path.dirname(repo), "elsewhere", "a"))).toBe(true);
+	});
+
+	it("refuses an in-checkout destination reached through a junction", async () => {
+		const repo = await createGitRepo();
+		const aliasBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clone-alias-"));
+		tempDirs.push(aliasBase);
+		const alias = path.join(aliasBase, "repo-link");
+		await fs.symlink(repo, alias, "junction");
+
+		expect(await canCloneCheckoutInto(repo, path.join(alias, ".worktrees", "a"))).toBe(false);
+		expect(await canCloneCheckoutInto(alias, path.join(repo, ".worktrees", "a"))).toBe(false);
+	});
+
+	it.skipIf(process.platform !== "win32")("compares Windows paths case-insensitively", async () => {
+		const repo = await createGitRepo();
+		expect(await canCloneCheckoutInto(repo, path.join(repo.toUpperCase(), ".WORKTREES", "A"))).toBe(false);
 	});
 });
 
