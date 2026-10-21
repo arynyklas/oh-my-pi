@@ -151,13 +151,19 @@ index 9751981..574f12b 100644
  ## [16.4.0] - 2026-07-10
  
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 8b299b8..29f9b4f 100644
+index 8b299b8..1d587b1 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,83 @@
+@@ -2,6 +2,89 @@
  
  ## [Unreleased]
  
++## [18.12.2-fork.2] - 2026-10-21
++
++### Fixed
++
++- `git worktree add` in bash, `omp worktree add`, `/wt` and `github pr_checkout` no longer clone the checkout into a worktree path inside it, such as `.worktrees/<name>`. The clone copied the destination into itself until the path was too long (can1357/oh-my-pi#16076): on a Windows Dev Drive it ran past the bash timeout and left a directory thousands of levels deep, and a later `du` on that directory crashed omp with `panic(tokio-rt-worker): Stack overflow`. Such a worktree now gets a plain checkout; worktrees outside the checkout are still cloned.
++
 +## [18.12.2-fork.1] - 2026-10-19
 +
 +### Changed
@@ -238,7 +244,7 @@ index 8b299b8..29f9b4f 100644
  ## [18.12.2] - 2026-10-18
  
  ### Added
-@@ -1588,4 +1665,17375 @@
+@@ -1588,4 +1671,17375 @@
  - Fixed auto-compaction re-sending a failed native (server-side) compaction on every turn, re-reading the full context each time; after a failure a retry would repeat, the next configured method runs instead until a compaction succeeds ([#13310](https://github.com/can1357/oh-my-pi/pull/13310) by [@alphastorm](https://github.com/alphastorm))
  - Fixed a `/slow off` session resending requests indefinitely when another session had activated the shared Anthropic low-priority lane ([#13340](https://github.com/can1357/oh-my-pi/pull/13340) by [@H4vC](https://github.com/H4vC))
  

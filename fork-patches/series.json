@@ -2,8 +2,8 @@
 	"base": "v18.12.2",
 	"baseCommit": "1d5aff90b057ce7dbfe32ea557a527c1b3144b72",
 	"head": "HEAD",
-	"headCommit": "0533bca59eaf055569e874a4ac0b0fbba43ff150",
-	"generated": "2026-10-19T11:15:12.386Z",
+	"headCommit": "c490d403a71052778385c8f63a767d196cd6f329",
+	"generated": "2026-10-21T17:26:43.386Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -173,6 +173,7 @@
 				"packages/coding-agent/src/modes/status-line-host.ts",
 				"packages/coding-agent/src/modes/types.ts",
 				"packages/coding-agent/src/session/agent-session.ts",
+				"packages/coding-agent/src/session/session-worktree.ts",
 				"packages/coding-agent/src/session/settings.ts",
 				"packages/coding-agent/src/slash-commands/builtin-modes.ts",
 				"packages/coding-agent/src/slash-commands/builtin-session.ts",
@@ -186,6 +187,7 @@
 				"packages/coding-agent/test/modes/components/settings-multiselect.test.ts",
 				"packages/coding-agent/test/modes/components/settings-selector-memory-refresh.test.ts",
 				"packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts",
+				"packages/coding-agent/test/task/worktree.test.ts",
 				"packages/tui/CHANGELOG.md",
 				"packages/tui/src/components/input.ts",
 				"packages/tui/src/overlays/settings-selector.ts",
@@ -227,6 +229,8 @@
 			"files": [
 				".gitignore",
 				"docs/models.md",
+				"docs/tools/bash.md",
+				"docs/tools/github.md",
 				"packages/ai/src/auth/affinity.ts",
 				"packages/ai/src/auth/cascade.ts",
 				"packages/ai/src/auth/health.ts",
@@ -250,7 +254,11 @@
 				"packages/ai/src/stream.ts",
 				"packages/ai/src/types.ts",
 				"packages/ai/test/claude-block-healing.test.ts",
-				"packages/catalog/test/build.test.ts"
+				"packages/catalog/test/build.test.ts",
+				"packages/coding-agent/src/cli/worktree-cli.ts",
+				"packages/coding-agent/src/task/settings.ts",
+				"packages/coding-agent/src/task/worktree.ts",
+				"packages/coding-agent/src/tools/gh-pr-checkout.ts"
 			]
 		}
 	]
