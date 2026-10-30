@@ -66,18 +66,10 @@ export class Input implements Component, Focusable {
 	#value: string = "";
 	#cursor: number = 0; // Cursor position in the value
 	#useTerminalCursor = false;
-	#mask: string | undefined;
 	/** Rendered before the editable area; set to "" for chrome-less embedding. */
 	prompt = "> ";
 	/** Render the editable value as bullets while retaining the real value internally. */
-	get mask(): boolean {
-		return this.#mask !== undefined;
-	}
-
-	set mask(enabled: boolean) {
-		this.#mask = enabled ? "•" : undefined;
-	}
-
+	mask = false;
 	/** Dim hint a native terminal shows while the value is empty. */
 	placeholder: string | undefined;
 	onSubmit?: (value: string) => void;
@@ -132,19 +124,6 @@ export class Input implements Component, Focusable {
 		this.#value = value;
 		// Callers seed or replace the value wholesale; typing continues at the end.
 		this.#cursor = value.length;
-	}
-
-	setMask(mask: string | undefined): void {
-		this.#mask = mask;
-	}
-
-	clear(): void {
-		this.#value = "";
-		this.#cursor = 0;
-		this.#pasteHandler = new BracketedPasteHandler();
-		this.#killRing = new KillRing();
-		this.#lastAction = null;
-		this.#undoStack = [];
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -635,10 +614,10 @@ export class Input implements Component, Focusable {
 		let cursorIndex = this.#cursor;
 		// Ensure we always have a grapheme to invert at the cursor (space at end).
 		let visibleValue = this.#value;
-		if (this.#mask !== undefined) {
+		if (this.mask) {
 			const graphemes = [...segmenter.segment(this.#value)];
-			visibleValue = this.#mask.repeat(graphemes.length);
-			cursorIndex = this.#mask.length * graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
+			visibleValue = "•".repeat(graphemes.length);
+			cursorIndex = graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
 		}
 		// At end of text the cursor sits on trailing padding, sized to fit a (possibly wide) cursor override.
 		const atEnd = this.#cursor >= this.#value.length;

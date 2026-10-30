@@ -9,7 +9,7 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTar
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 
-export const CODEX_PROVIDER_ID = "openai-codex";
+const CODEX_PROVIDER_ID = "openai-codex";
 const CLAUDE_PROVIDER_ID = "anthropic";
 
 /** Provider name shown beside each exact saved-reset account option. */

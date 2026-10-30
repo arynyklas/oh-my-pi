@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type as arkType } from "@oh-my-pi/omptype";
 import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	getEnvApiKey,
@@ -12,19 +11,11 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import {
-	type AuthGatewaySelfUsageResponse,
-	type AuthGatewayUsageReportsResponse,
-	type AuthGatewayUsageResponse,
-	authGatewayAdminStatusResponseSchema,
-	authGatewaySelfUsageResponseSchema,
-	authGatewayUsageReportsResponseSchema,
-	authGatewayUsageResponseSchema,
-} from "@oh-my-pi/pi-ai/auth-gateway";
-import {
 	type Component,
 	Loader,
 	Markdown,
 	padding,
+	parseSgrMouse,
 	Spacer,
 	Text,
 	visibleWidth,
@@ -58,11 +49,12 @@ import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/m
 import { moveDirectorySource } from "../move-directory-source";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { ContextUsageView, contextUsageHead } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { buildSessionContextView } from "../../session/context-view";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
@@ -145,87 +137,6 @@ function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
-function authGatewayUsageUrl(baseUrl: string): string {
-	const trimmed = baseUrl.replace(/\/+$/, "");
-	return `${trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`}/usage`;
-}
-
-function authGatewayAdminStatusUrl(baseUrl: string): string {
-	const trimmed = baseUrl.replace(/\/+$/, "");
-	return `${trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`}/admin/status`;
-}
-
-function formatGatewayCost(costUsd: number): string {
-	return `$${costUsd.toFixed(2)}`;
-}
-
-function formatGatewayUser(principal: AuthGatewaySelfUsageResponse["principal"]): string {
-	const idSuffix = principal.userId === null ? "" : ` #${principal.userId}`;
-	return `User: ${sanitizeText(principal.name)} (${principal.role}${idSuffix})`;
-}
-
-function formatGatewayUsageSummary(response: AuthGatewaySelfUsageResponse | AuthGatewayUsageResponse): string {
-	const usage = response.usage;
-	const lines = [theme.bold("Gateway Usage")];
-	if ("principal" in response) lines.push(formatGatewayUser(response.principal));
-	else lines.push(`User ID: #${response.usage.userId}`);
-	lines.push(
-		`Requests: ${formatNumber(usage.totals.requests)}`,
-		`Tokens: ${formatNumber(usage.totals.totalTokens)} tokens`,
-		`Cost: ${formatGatewayCost(usage.totals.costUsd)}`,
-	);
-	if (usage.byProviderModel.length > 0) {
-		lines.push("", theme.bold("By model"));
-		for (const row of usage.byProviderModel) {
-			lines.push(
-				`${row.provider}/${row.model}: ${formatNumber(row.requests)} requests, ${formatNumber(row.totalTokens)} tokens, ${formatGatewayCost(row.costUsd)}`,
-			);
-		}
-	}
-	return lines.join("\n");
-}
-
-function usageReportIdentityKeys(report: UsageReport): Set<string> {
-	const keys = new Set<string>();
-	const provider = report.provider.toLowerCase();
-	const add = (value: unknown): void => {
-		if (typeof value === "string" && value) keys.add(`${provider}:${value.toLowerCase()}`);
-	};
-	const meta = report.metadata ?? {};
-	add(meta.email);
-	add(meta.accountId);
-	add(meta.projectId);
-	add(meta.orgId);
-	for (const limit of report.limits) {
-		add(limit.scope.accountId);
-		add(limit.scope.projectId);
-		add(limit.scope.orgId);
-	}
-	return keys;
-}
-
-function mergeUsageReports(reports: UsageReport[], gatewayReports: UsageReport[]): UsageReport[] {
-	const merged = [...reports];
-	const seen = new Set<string>();
-	for (const report of reports) {
-		for (const key of usageReportIdentityKeys(report)) seen.add(key);
-	}
-	for (const report of gatewayReports) {
-		const keys = usageReportIdentityKeys(report);
-		let alreadyRendered = false;
-		for (const key of keys) {
-			if (seen.has(key)) {
-				alreadyRendered = true;
-				break;
-			}
-		}
-		if (alreadyRendered) continue;
-		merged.push(report);
-		for (const key of keys) seen.add(key);
-	}
-	return merged;
-}
-
 interface ForkTerminalDependencies {
 	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
 	environment: () => NodeJS.ProcessEnv;
@@ -278,8 +189,8 @@ function hasForkApiKeyOverride(argv: string[]): boolean {
 }
 
 export class CommandController {
-	/** The open native report sheet. */
-	#reportSheet: OverlayHandle | undefined;
+	/** The open native report sheet and the component it shows. */
+	#reportSheet: { handle: OverlayHandle; component: Component } | undefined;
 	#forkTerminalDependencies: ForkTerminalDependencies;
 
 	constructor(
@@ -325,9 +236,24 @@ export class CommandController {
 		const sheet = this.#reportSheet;
 		if (!sheet) return;
 		this.#reportSheet = undefined;
-		sheet.hide();
+		sheet.handle.hide();
+		// Like the docked report, a closed sheet is never shown again.
+		sheet.component.dispose?.();
 		this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
 		this.ctx.ui.requestRender();
+	}
+
+	/** Open `component` as a focused full-screen page; callers close any previous sheet first. */
+	#showFullscreenSheet(component: Component): void {
+		const handle = this.ctx.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.#reportSheet = { handle, component };
+		this.ctx.ui.setFocus(component);
 	}
 
 	/**
@@ -354,19 +280,15 @@ export class CommandController {
 		});
 		if (isNativeRendering()) {
 			report.holdFocus();
-			this.#reportSheet = this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.#reportSheet = {
+				handle: this.ctx.ui.showOverlay(report, { anchor: "center", width: "90%", maxHeight: "90%" }),
+				component: report,
+			};
 			this.ctx.ui.setFocus(report);
 		} else if (report.heightAt(terminal.columns) > inline) {
 			fullScreen = true;
 			report.holdFocus();
-			this.#reportSheet = this.ctx.ui.showOverlay(report, {
-				anchor: "bottom-center",
-				width: "100%",
-				maxHeight: "100%",
-				margin: 0,
-				fullscreen: true,
-			});
-			this.ctx.ui.setFocus(report);
+			this.#showFullscreenSheet(report);
 		} else {
 			this.ctx.reportContainer.addChild(report);
 		}
@@ -376,71 +298,6 @@ export class CommandController {
 	/** A titled markdown report; see {@link showCommandReport}. */
 	#showMarkdownPanel(title: string, markdown: string): void {
 		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
-	}
-
-	async #fetchGatewayStatusPrincipal(
-		baseUrl: string,
-		token: string,
-	): Promise<AuthGatewaySelfUsageResponse["principal"] | undefined> {
-		let response: Response;
-		try {
-			response = await fetch(authGatewayAdminStatusUrl(baseUrl), {
-				headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
-			});
-		} catch {
-			return undefined;
-		}
-		if (!response.ok) return undefined;
-		let payload: unknown;
-		try {
-			payload = await response.json();
-		} catch {
-			return undefined;
-		}
-		const status = authGatewayAdminStatusResponseSchema(payload);
-		if (status instanceof arkType.errors) return undefined;
-		return status.status.principal;
-	}
-
-	async #fetchGatewayUsageFallback(): Promise<
-		AuthGatewaySelfUsageResponse | AuthGatewayUsageResponse | AuthGatewayUsageReportsResponse | null
-	> {
-		const model = this.ctx.session.model;
-		if (model?.transport !== "pi-native" || !model.baseUrl) return null;
-		const token = await this.ctx.session.modelRegistry.authStorage.getApiKey(
-			model.provider,
-			this.ctx.session.sessionId,
-			{
-				baseUrl: model.baseUrl,
-				modelId: model.id,
-			},
-		);
-		if (!token) return null;
-		let response: Response;
-		try {
-			response = await fetch(authGatewayUsageUrl(model.baseUrl), {
-				headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
-			});
-		} catch {
-			return null;
-		}
-		if (!response.ok) return null;
-		let payload: unknown;
-		try {
-			payload = await response.json();
-		} catch {
-			return null;
-		}
-		const selfUsage = authGatewaySelfUsageResponseSchema(payload);
-		if (!(selfUsage instanceof arkType.errors)) return selfUsage;
-		const usageOnly = authGatewayUsageResponseSchema(payload);
-		if (!(usageOnly instanceof arkType.errors)) {
-			const principal = await this.#fetchGatewayStatusPrincipal(model.baseUrl, token);
-			return principal?.userId === usageOnly.usage.userId ? { ...usageOnly, principal } : usageOnly;
-		}
-		const usageReports = authGatewayUsageReportsResponseSchema(payload);
-		if (usageReports instanceof arkType.errors) return null;
-		return usageReports;
 	}
 
 	async #restoreAfterMoveFailure(
@@ -771,6 +628,16 @@ export class CommandController {
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
 		info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
+		if (stats.editRejections !== undefined) {
+			const kinds = Object.entries(stats.editRejections).sort(
+				([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind),
+			);
+			const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+			const breakdown = kinds
+				.map(([kind, count]) => `${replaceTabs(sanitizeText(kind.replaceAll("_", " ")))} ${count}`)
+				.join(", ");
+			info += `${theme.fg("dim", "Edit Rejections:")} ${total} ${theme.fg("dim", `(${breakdown})`)}\n`;
+		}
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{
@@ -1039,39 +906,20 @@ export class CommandController {
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		let usageReports = reports ?? null;
-		let gatewayUsageUser: string | undefined;
-		let gatewayUsageSummary: string | undefined;
 		if (!usageReports) {
-			if (typeof this.ctx.session.fetchUsageReports !== "function") {
+			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
+			if (!provider.fetchUsageReports) {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
-				usageReports = await this.ctx.session.fetchUsageReports();
+				usageReports = await provider.fetchUsageReports();
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 
-		const gatewayUsage = await this.#fetchGatewayUsageFallback();
-		if (gatewayUsage) {
-			if ("usage" in gatewayUsage) {
-				gatewayUsageSummary = formatGatewayUsageSummary(gatewayUsage);
-			} else {
-				if (gatewayUsage.principal) gatewayUsageUser = formatGatewayUser(gatewayUsage.principal);
-				usageReports =
-					usageReports && usageReports.length > 0
-						? mergeUsageReports(usageReports, gatewayUsage.reports)
-						: gatewayUsage.reports;
-			}
-		}
-
-		if ((!usageReports || usageReports.length === 0) && gatewayUsageSummary) {
-			this.ctx.present([new Spacer(1), new Text(gatewayUsageSummary, 1, 0)]);
-			return;
-		}
-
-		this.ctx.showUsageDashboard(usageReports ?? [], gatewayUsageUser, gatewayUsageSummary);
+		this.ctx.showUsageDashboard(usageReports ?? []);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -1129,17 +977,27 @@ export class CommandController {
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
-		if (breakdown.contextWindow <= 0) {
+		const session = this.ctx.session;
+		if (!session.model) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		// Natively the body is `/context`'s own card (meters, legend, compaction mark).
-		this.showCommandReport({
-			title: "Context Usage",
-			head: contextUsageHead(breakdown),
-			body: new ContextUsageView(breakdown, theme),
+		// Validate capacity before tokenizing the whole history into a snapshot.
+		const breakdown = computeSessionContextBreakdown(session, { snapcompactSavings: true });
+		if (!(breakdown.contextWindow > 0) || !Number.isFinite(breakdown.contextWindow)) {
+			this.ctx.showWarning("Context usage is unavailable: the model's context window is unknown or invalid.");
+			return;
+		}
+		const data = buildSessionContextView(session, breakdown);
+		this.#clearReport();
+		this.#closeReportSheet();
+		const viewer = new ContextViewer(data, {
+			onClose: () => this.#closeReportSheet(),
+			requestRender: () => this.ctx.ui.requestRender(),
+			getRows: () => this.ctx.ui.terminal.rows,
 		});
+		this.#showFullscreenSheet(viewer);
+		this.ctx.ui.requestRender();
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -2026,7 +1884,10 @@ export class CommandController {
 		isDeferred: boolean,
 		shouldPersistCwd: boolean,
 	): Promise<boolean> {
-		this.ctx.bashComponent = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		const component = new BashExecutionComponent(command, this.ctx.ui, excludeFromContext);
+		this.ctx.bashComponent = component;
+		let detachInput: (() => void) | undefined;
+		let finished = false;
 
 		if (isDeferred) {
 			this.ctx.pendingMessagesContainer.addChild(this.ctx.bashComponent);
@@ -2052,6 +1913,15 @@ export class CommandController {
 					pty: {
 						...bashPtyViewport(this.ctx.ui),
 						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+						onStdin: write => {
+							if (finished) return;
+							// A TSP field without a mode handles printable keys itself and sends
+							// `edit` packets instead of raw input. Label it while the PTY owns
+							// the keyboard so Tern delivers those keys to the input listener.
+							detachInput = this.#forwardKeysToPty(component, write);
+							this.ctx.editor.nativeKeyPassthrough = true;
+							this.ctx.ui.requestRender();
+						},
 					},
 				},
 			);
@@ -2080,10 +1950,32 @@ export class CommandController {
 			}
 			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		} finally {
+			finished = true;
+			detachInput?.();
+			if (detachInput) this.ctx.editor.nativeKeyPassthrough = false;
 			this.ctx.bashComponent = undefined;
 			this.ctx.ui.requestRender();
 		}
 		return false;
+	}
+
+	/**
+	 * Routes composer keystrokes to a running `!` command's PTY so it can answer
+	 * its own prompts (`read`, shell-startup questions), like a foreground job.
+	 * The interrupt key still cancels; focused dialogs and mouse reports keep
+	 * their input. Returns the detach function.
+	 */
+	#forwardKeysToPty(component: BashExecutionComponent, write: (data: string) => void): () => void {
+		return this.ctx.ui.addInputListener(
+			data => {
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (this.ctx.keybindings.matches(data, "app.interrupt") || parseSgrMouse(data)) return undefined;
+				const bytes = component.encodePtyInput(data);
+				if (bytes) write(bytes);
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
 	}
 
 	async #applyBashResultCwd(result: BashResult): Promise<boolean> {
@@ -2764,7 +2656,14 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
-				const key = `${formatLimitTitle(limit)}|${windowId}`;
+				// Distinct buckets can share a label and window (Antigravity's Gemini
+				// vs Gemini (Argon) weekly) and must stay separate rows instead of
+				// averaging into "50% free", so the id joins the key. Label and window
+				// stay in it too: some providers build ids positionally or per plan
+				// (kimi's `${index}`, copilot's allowance), where ids differ across
+				// accounts for the same quota. `sharedGroup` keeps the routing copies
+				// of one shared bucket together.
+				const key = limit.scope.sharedGroup ?? `${formatLimitTitle(limit)}|${windowId}|${limit.id}`;
 				const windowLabel = limit.window?.label ?? windowId;
 				const entry = limitGroups.get(key) ?? {
 					label: formatLimitTitle(limit),

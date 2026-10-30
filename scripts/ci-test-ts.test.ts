@@ -39,20 +39,20 @@ describe("ci-test-ts coding-agent requested filters", () => {
 	// stable contract is "exactly one chunk, targeting only the requested file".
 	function expectOnlyRequestedCliTest(planned: string[]): void {
 		expect(planned).toHaveLength(1);
-		expect(planned[0]).toMatch(/^\$ bun test test\/auth-gateway-cli\.test\.ts(?:\s|$)/);
+		expect(planned[0]).toMatch(/^\$ bun test test\/release-info\.test\.ts(?:\s|$)/);
 	}
 
 	test("plans a single coding-agent test from package-relative filter", async () => {
-		const result = await runCiTestTs(["coding-agent-heavy", "test/auth-gateway-cli.test.ts", "--dry-run", "--full"]);
+		const result = await runCiTestTs(["coding-agent-heavy", "test/release-info.test.ts", "--dry-run", "--full"]);
 
 		expect(result.exitCode).toBe(0);
 		expectOnlyRequestedCliTest(result.planned);
 	}, 30_000);
 
 	test.each([
-		"packages/coding-agent/test/auth-gateway-cli.test.ts",
-		"packages\\coding-agent\\test\\auth-gateway-cli.test.ts",
-		"test\\auth-gateway-cli.test.ts",
+		"packages/coding-agent/test/release-info.test.ts",
+		"packages\\coding-agent\\test\\release-info.test.ts",
+		"test\\release-info.test.ts",
 	])(
 		"normalizes %s to the package-relative coding-agent command",
 		async filter => {
@@ -75,7 +75,7 @@ describe("ci-test-ts coding-agent requested filters", () => {
 	test("fails a mixed coding-agent-heavy request before planning matched tests", async () => {
 		const result = await runCiTestTs([
 			"coding-agent-heavy",
-			"test/auth-gateway-cli.test.ts",
+			"test/release-info.test.ts",
 			"test/typo.test.ts",
 			"--dry-run",
 			"--full",
@@ -84,7 +84,7 @@ describe("ci-test-ts coding-agent requested filters", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(result.planned).toEqual([]);
 		expect(result.stderr).toContain("No coding-agent tests matched requested filter(s): test/typo.test.ts");
-		expect(result.stderr).not.toContain("test/auth-gateway-cli.test.ts");
+		expect(result.stderr).not.toContain("test/release-info.test.ts");
 	}, 30_000);
 
 	test("fails an unmatched all-mode coding-agent request before aggregate plans", async () => {

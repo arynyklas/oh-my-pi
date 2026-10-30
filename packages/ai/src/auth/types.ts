@@ -81,6 +81,11 @@ export interface ResolvedAuthCredential {
 	source: CredentialOriginKind;
 	/** Non-secret account scope of the OAuth credential that answered, when one did. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/**
+	 * Access token of the OAuth row that answered, so a later 401 on this bearer
+	 * names the token the provider rejected (see `AuthApiKeyOptions.rejectedAccessToken`).
+	 */
+	oauthAccess?: string;
 }
 
 /** Outcome of an explicit credential-selection resolve. */
@@ -143,10 +148,12 @@ export interface AuthAccountSelector {
 export interface AuthAccountPolicy {
 	readonly provider: string;
 	readonly account: AuthAccountSelector;
-	/** Higher values win after hard, plan, reserve, hot-window, and measured-usage safety checks. */
+	/** Higher values win after hard, plan, reserve and hot-window safety checks, and ahead of a missing usage report. */
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
+	readonly reclaimAbovePct?: number;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -327,8 +334,6 @@ export interface CheckCredentialsOptions {
 	timeoutMs?: number;
 	/** Provider → base URL override, same shape as {@link AuthStorage.usage.reports}. */
 	baseUrlResolver?: (provider: Provider) => string | undefined;
-	/** Restrict stored rows probed by {@link AuthStorage.health.check}. */
-	credentialIds?: readonly number[];
 	/**
 	 * Optional end-to-end probe. When provided, `checkCredentials` invokes it
 	 * for every credential where a usable bearer is available (API key, or
@@ -597,6 +602,13 @@ export type AuthApiKeyOptions = {
 	selection?: AuthCredentialSelectionPolicy;
 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
 	refreshReason?: OAuthRefreshReason;
+	/**
+	 * The access token the provider rejected with a 401, when this resolve is
+	 * that 401's recovery. A refresh adopts a stored token that differs from it
+	 * instead of exchanging the refresh token again: with single-use refresh
+	 * tokens every needless exchange revokes the token its peers are using.
+	 */
+	rejectedAccessToken?: string;
 	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
 	recordAffinity?: boolean;
 };
@@ -726,11 +738,18 @@ export interface StoredOAuthRefreshOptions<T extends OAuthCredential = OAuthCred
 	observedCredential?: T;
 	credentialFromRow: (credential: OAuthCredential) => T | undefined;
 	forceRefresh?: boolean;
+	/**
+	 * The access token a provider just rejected with a 401. A forced refresh
+	 * adopts a still-fresh stored row whose token differs from it: another
+	 * process rotated the row, and its token has not been rejected.
+	 */
+	rejectedAccess?: string;
 	canRefresh?: (credential: T) => boolean;
 	refreshSkewMs?: number;
 	signal?: AbortSignal;
 	keepCredentialOnRefreshFailure?: boolean | ((error: unknown) => boolean);
 	onRefreshFailure?: (error: unknown) => void;
+	/** How long the caller waits (for the lease and the exchange); the exchange itself runs on until its backstop. */
 	refreshTimeoutMs?: number;
 	refresh: (credential: T, signal?: AbortSignal) => Promise<OAuthCredentials>;
 	mergeRefreshedCredential?: (credential: T, refreshed: OAuthCredentials) => T;
@@ -1041,6 +1060,12 @@ export interface KeysApi {
 	 */
 	get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined>;
 	/**
+	 * Warm usage needed by an unpinned OAuth selection without choosing a key,
+	 * advancing round-robin state, or pinning an account. Existing overrides,
+	 * pinned sessions, and pools that do not rank usage do no work.
+	 */
+	prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void>;
+	/**
 	 * Fork feature: resolve the bearer together with its durable stored row and
 	 * the cascade leg that supplied it. With an
 	 * {@link AuthCredentialSelectionPolicy} the walk stays inside the granted
@@ -1166,6 +1191,8 @@ export interface OAuthRefreshByIdOptions {
 	 * Local reuse still requires {@link reuseRecentMint}.
 	 */
 	reason?: OAuthRefreshReason;
+	/** The access token a provider 401 rejected; see {@link AuthApiKeyOptions.rejectedAccessToken}. */
+	rejectedAccess?: string;
 }
 
 /** OAuth login, access, account identity, and refresh operations. */
@@ -1219,17 +1246,6 @@ export interface OAuthApi {
 	accessById(
 		provider: string,
 		credentialId: number,
-		options?: AuthApiKeyOptions,
-	): Promise<OAuthAccessResolution | undefined>;
-	/**
-	 * Fork feature: resolve the stored OAuth account at `position` (0-based in
-	 * {@link AuthStorage.oauth.accounts} order) without refreshing any other row.
-	 * An {@link AuthCredentialSelectionPolicy} in `options` restricts both the
-	 * indexed list and the resolution.
-	 */
-	accessAt(
-		provider: string,
-		position: number,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccessResolution | undefined>;
 	/**
@@ -1348,8 +1364,9 @@ export interface SessionsApi {
 
 /** Usage reporting, observation, and provider configuration. */
 export interface UsageApi {
-	/** Fetch aggregate usage reports for configured providers. */
+	/** Fetch usage reports for configured providers, optionally restricted to one provider. */
 	reports(options?: {
+		provider?: Provider;
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null>;

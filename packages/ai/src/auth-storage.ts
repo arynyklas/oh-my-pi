@@ -15,8 +15,8 @@
  *
  * Fork additions stay flat on this class (they have no upstream namespace):
  * per-provider default-account/priority pinning with its account-selection
- * journal and fallover notices (`pins`), and the auth-gateway credential-pool
- * selection policy (`keys.resolveApiKeySelection`).
+ * journal and fallover notices (`pins`), and the credential-pool selection
+ * policy (`keys.resolveApiKeySelection`) for servers that grant account pools.
  *
  * @example
  * const auth = await AuthStorage.create(getAgentDbPath());
@@ -55,7 +55,6 @@ import type {
 	OAuthApi,
 	ResetsApi,
 	SessionsApi,
-	StoredAuthCredential,
 	UsageApi,
 } from "./auth/types";
 import { UsageService } from "./auth/usage";
@@ -73,7 +72,6 @@ export {
 } from "./auth/sqlite-credential-store";
 export * from "./auth/store";
 export * from "./auth/types";
-export * from "./auth/login";
 export * from "./auth/selection";
 
 /** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
@@ -407,20 +405,5 @@ export class AuthStorage {
 		limit?: number;
 	}): readonly AccountSelectionEvent[] {
 		return this.#modules.pins.listAccountSelectionEvents(options);
-	}
-
-	// ── Fork feature: durable-row access for the gateway management API ─────
-
-	/** List live stored credential rows by id, preserving first requested order. */
-	listStoredCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
-		return this.#modules.pool.listByIds(ids);
-	}
-
-	/**
-	 * Upsert a credential through the authoritative writer, refresh the
-	 * in-memory snapshot, and return the provider's stored rows.
-	 */
-	upsertCredentialAsync(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
-		return this.#modules.pool.upsertStored(provider, credential);
 	}
 }

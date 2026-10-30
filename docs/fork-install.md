@@ -2,8 +2,10 @@
 
 This is [`arynyklas/oh-my-pi`](https://github.com/arynyklas/oh-my-pi), a fork of
 [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi). It tracks upstream releases and adds work
-that is not in upstream — most of it around the auth broker and the multi-account
-[auth gateway](auth-broker-gateway.md).
+that is not in upstream: per-provider default accounts and account priority (`/account`), the serving
+account in the status line, bounded-memory `omp stats` ingestion, gateway model discovery
+(OpenRouter-shaped reasoning ladders, image/speech/transcription runner rows), and this release
+channel.
 
 The important consequence for installing: **the fork ships binaries only.** Nothing is published to
 npm. Every upstream install path that goes through a package manager — `bun install -g
@@ -121,102 +123,6 @@ Check which line you are on:
 omp --version   # ...-fork.N  -> current;  ...-authgw.beta.N -> replace by hand
 ```
 
-## Auth gateway as a service
-
-If you are installing the fork to run the [auth gateway](auth-broker-gateway.md) headlessly, the
-same binary serves both units. A working systemd layout:
-
-```ini
-# /etc/systemd/system/omp-auth-broker.service
-[Unit]
-Description=Oh My Pi auth broker credential vault
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-User=omp-gateway
-Group=omp-gateway
-WorkingDirectory=/var/lib/omp-gateway
-Environment=HOME=/var/lib/omp-gateway
-ExecStart=/usr/local/bin/omp auth-broker serve --bind=127.0.0.1:8765
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/omp-auth-gateway.service
-[Unit]
-Description=Oh My Pi LLM auth gateway
-After=network-online.target omp-auth-broker.service
-Wants=network-online.target
-Requires=omp-auth-broker.service
-[Service]
-Type=simple
-User=omp-gateway
-Group=omp-gateway
-WorkingDirectory=/var/lib/omp-gateway
-Environment=HOME=/var/lib/omp-gateway
-Environment=OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
-ExecStart=/usr/local/bin/omp auth-gateway serve --bind=0.0.0.0:4000
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-```
-
-State lives in `$HOME/.omp` — `auth-gateway.db` (users, tokens, pools, ACLs) and
-`auth-gateway.token` (the bearer token, mode 0600).
-
-Upgrading a deployed gateway:
-
-```sh
-# 1. back up state and the current binary
-TS=$(date +%Y%m%d-%H%M%S)
-mkdir -p /root/omp-upgrade-backups
-tar -czf /root/omp-upgrade-backups/omp-gateway-data-$TS.tar.gz -C /var/lib/omp-gateway .omp
-cp -a /usr/local/bin/omp /root/omp-upgrade-backups/omp-$(/usr/local/bin/omp --version | cut -d/ -f2)
-
-# 2. download + verify (see the Linux section)
-
-# 3. swap and restart -- broker first, it is a Requires= of the gateway
-systemctl stop omp-auth-gateway.service omp-auth-broker.service
-install -m 0755 -o root -g root ./omp-linux-x64 /usr/local/bin/omp
-systemctl start omp-auth-broker.service && sleep 3
-systemctl start omp-auth-gateway.service
-```
-
-Then verify — the health endpoint reports the serving binary's version:
-
-```console
-$ curl -s http://127.0.0.1:4000/healthz
-{"ok":true,"version":"17.2.15-fork.1"}
-```
-
-Only `GET /healthz` is unauthenticated; a `HEAD` returns 401, so point uptime monitors at `GET`.
-Confirm the state survived the upgrade with the admin status endpoint, which wraps its payload under
-`status`:
-
-```sh
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4000/v1/admin/status
-```
-
-and probe the upstream credentials:
-
-```sh
-sudo -u omp-gateway env HOME=/var/lib/omp-gateway OMP_AUTH_BROKER_URL=http://127.0.0.1:8765 \
-  omp auth-gateway check --json
-```
-
-The `Version:` line in the `/gateway` console Overview is this same server-side value. It is the
-remote gateway's build, not the version of the omp you are running locally and not a "latest
-available" lookup — a stale number there means the server binary is old.
-
 ## Build from source
 
 Required for macOS, ARM, and musl, since those artifacts are not published.
@@ -245,5 +151,5 @@ $p = [Environment]::GetEnvironmentVariable("Path", "User")
 
 **Linux** — `sudo rm /usr/local/bin/omp`.
 
-Neither removes your profile at `~/.omp`, which holds sessions, settings, credentials, and gateway
-connection profiles. Delete it separately if you want a clean slate.
+Neither removes your profile at `~/.omp`, which holds sessions, settings, and credentials. Delete it
+separately if you want a clean slate.

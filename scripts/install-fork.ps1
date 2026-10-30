@@ -3,7 +3,7 @@
 # The fork publishes binaries only -- no npm packages -- so this installs the
 # release asset directly. Do not use upstream's scripts/install.ps1 here: its
 # default path installs @oh-my-pi/pi-coding-agent from npm, which is upstream's
-# build and does not carry the fork's auth-gateway work.
+# build and does not carry the fork's changes.
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/arynyklas/oh-my-pi/release/fork/scripts/install-fork.ps1 | iex

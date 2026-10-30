@@ -228,10 +228,10 @@ it.each(["/v1/pi/stream", "/v1/chat/completions"])(
 			fetch: captureFetch(captured, completionsChunks("ok", model.id)),
 			version: "test",
 		});
-		const resolveSelection = storage.keys.resolveApiKeySelection.bind(storage.keys);
+		const getWithCredential = storage.keys.getWithCredential.bind(storage.keys);
 		let replaceToken = false;
-		const bearerSpy = spyOn(storage.keys, "resolveApiKeySelection").mockImplementation(async (...args) => {
-			const selected = await resolveSelection(...args);
+		const bearerSpy = spyOn(storage.keys, "getWithCredential").mockImplementation(async (...args) => {
+			const selected = await getWithCredential(...args);
 			if (replaceToken) {
 				await storage.credentials.set("factory-droid", {
 					...credential,

@@ -36,12 +36,6 @@ export interface CredentialRowStore {
 	acknowledgeLocalChanges?(): void;
 	listAuthCredentials(provider?: string): StoredAuthCredential[];
 	/**
-	 * Optional hook returning live rows for the given ids in first-requested
-	 * order. Stores without cheap id lookups omit it and callers scan
-	 * {@link CredentialRowStore.listAuthCredentials}.
-	 */
-	listAuthCredentialsByIds?(ids: readonly number[]): StoredAuthCredential[];
-	/**
 	 * Optional store hook to re-hydrate the credential snapshot from its
 	 * backing source. Remote broker stores re-fetch `GET /v1/snapshot` so a
 	 * disk-cached snapshot (up to an hour stale) cannot be paired with live
@@ -130,6 +124,20 @@ export interface CredentialRefreshLeaseStore {
 	getCredentialRefreshLeaseExpiresAt(credentialId: number): number | undefined;
 	releaseCredentialRefreshLease(credentialId: number, owner: string): void;
 	renewCredentialRefreshLease(credentialId: number, owner: string, expiresAtMs: number): boolean;
+	/** The lease row as stored, expired or not; `undefined` when no lease row exists. */
+	getCredentialRefreshLeaseHolder?(credentialId: number): CredentialRefreshLeaseHolder | undefined;
+	/**
+	 * Give a lease this owner took back to the holder it replaced, with that
+	 * holder's own expiry, so the holder can still renew it and save the token
+	 * it may have exchanged. Returns false when `owner` no longer holds it.
+	 */
+	handBackCredentialRefreshLease?(credentialId: number, owner: string, holder: CredentialRefreshLeaseHolder): boolean;
+}
+
+/** Owner and expiry of a stored refresh lease row. */
+export interface CredentialRefreshLeaseHolder {
+	owner: string;
+	expiresAtMs: number;
 }
 
 /** Usage history and client-observed request accounting. */
@@ -197,7 +205,7 @@ export interface CredentialUpstream {
 	 *
 	 * `signal` propagates the agent's cancel down to the broker fetch.
 	 */
-	fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null>;
+	fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null>;
 	/**
 	 * Optional store-supplied per-credential usage report lookup. When present,
 	 * `AuthStorage` consults this before its own per-credential upstream fetch

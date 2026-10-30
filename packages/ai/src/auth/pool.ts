@@ -614,32 +614,6 @@ export class CredentialPool implements CredentialsApi {
 		return rows;
 	}
 
-	/**
-	 * List live stored credential rows by id, preserving first requested order.
-	 * Falls back to a full store scan when the backing store has no id hook.
-	 */
-	listByIds(ids: readonly number[]): StoredAuthCredential[] {
-		if (ids.length === 0) return [];
-		const listByIds = this.#store.listAuthCredentialsByIds;
-		if (listByIds) return listByIds.call(this.#store, ids);
-		const uniqueIds: number[] = [];
-		const seen = new Set<number>();
-		for (const id of ids) {
-			if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
-			seen.add(id);
-			uniqueIds.push(id);
-		}
-		if (uniqueIds.length === 0) return [];
-		const rowsById = new Map<number, StoredAuthCredential>();
-		for (const row of this.#store.listAuthCredentials()) rowsById.set(row.id, row);
-		const rows: StoredAuthCredential[] = [];
-		for (const id of uniqueIds) {
-			const row = rowsById.get(id);
-			if (row) rows.push(row);
-		}
-		return rows;
-	}
-
 	async upsertOAuth(provider: string, credential: OAuthCredential): Promise<void> {
 		const prospectiveCredentials = this.dedupe(provider, [
 			...this.#store.listAuthCredentials(provider).map(entry => entry.credential),
@@ -819,23 +793,6 @@ export class CredentialPool implements CredentialsApi {
 				identityKey: resolveCredentialIdentityKey(provider, persisted),
 			};
 		});
-	}
-
-	/**
-	 * Awaitable variant of {@link CredentialPool.upsert}: persists through the
-	 * authoritative writer (broker-aware), refreshes the in-memory snapshot, and
-	 * returns the provider's stored rows instead of the redacted snapshot wire
-	 * shape. Used by the auth-gateway management API, which hands the caller
-	 * durable rows to address in follow-up calls.
-	 */
-	async upsertStored(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
-		const stored = await this.#store.upsertAuthCredential(provider, credential);
-		this.replace(
-			provider,
-			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-		);
-		this.reset(provider);
-		return stored;
 	}
 
 	/**

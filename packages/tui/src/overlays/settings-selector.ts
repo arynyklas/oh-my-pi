@@ -154,8 +154,6 @@ interface SettingsNativeMemo {
 	root?: { children: readonly NativeChild[]; node: NativeNode };
 }
 
-type TabId = SettingTab | "gateway" | "plugins";
-
 /**
  * Free-text string setting field backed by the shared text form field.
  * Current values prefill, including secrets retained behind Input masking;
@@ -545,31 +543,15 @@ function settingsSidebarWidth(entries: readonly SettingsDisplayEntry[]): number 
 	return Math.min(22, nameWidth) + 4;
 }
 
-function getSettingsTabs(hasGateway: boolean): Tab[] {
-	const tabs: Tab[] = [];
-	for (const id of SETTING_TABS) {
-		const meta = TAB_METADATA[id];
-		const icon = theme.symbol(meta.icon);
-		tabs.push({ id, label: `${icon} ${meta.label}`, short: icon });
-		if (hasGateway && id === "providers") {
-			tabs.push({ id: "gateway", label: `${theme.icon.host} Gateway`, short: theme.icon.host });
-		}
-	}
-	tabs.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package });
-	return tabs;
-}
-
-/** A whole settings tab rendered by the host rather than by a settings list. */
-export interface SettingsTabPanel {
-	render(width: number): readonly string[];
-	handleInput(data: string): void;
-	/** True while the panel is in a mode (form, prompt) that must swallow every key. */
-	ownsInput(): boolean;
-	invalidate(): void;
-}
-
-export interface GatewaySettingsHost {
-	createPanel(options: { onCancel: () => void }): SettingsTabPanel;
+function getSettingsTabs(): Tab[] {
+	return [
+		...SETTING_TABS.map(id => {
+			const meta = TAB_METADATA[id];
+			const icon = theme.symbol(meta.icon);
+			return { id, label: `${icon} ${meta.label}`, short: icon };
+		}),
+		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
+	];
 }
 
 /**
@@ -593,12 +575,6 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
-	/**
-	 * Host-owned Gateway tab. The connection-profile editor reads
-	 * coding-agent's profile store, so the host injects it rather than pi-tui
-	 * importing it.
-	 */
-	gatewayProfiles?: GatewaySettingsHost;
 	/** Live status renderer for composer-shape previews (the session's status line). */
 	composerPreviewStatus?: ComposerPreviewStatusSource;
 }
@@ -646,9 +622,8 @@ export class SettingsSelectorComponent implements Component {
 	#currentList: SettingsList | null = null;
 	#searchList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
-	#gatewayComponent: SettingsTabPanel | null = null;
-	#currentTabId: TabId = "appearance";
-	#preSearchTabId: TabId = "appearance";
+	#currentTabId: SettingTab | "plugins" = "appearance";
+	#preSearchTabId: SettingTab | "plugins" = "appearance";
 	#searchQuery = "";
 	/** Single-line editor backing the search banner (cursor, word ops, paste). */
 	#searchInput = new Input();
@@ -679,12 +654,12 @@ export class SettingsSelectorComponent implements Component {
 		this.#sidebarWidth = settingsSidebarWidth(context.settings.entries);
 		// No label prefix (the frame title already says Settings) and no
 		// "(tab to cycle)" hint (folded into the footer hint line).
-		const tabs = getSettingsTabs(this.#context.gatewayProfiles !== undefined);
+		const tabs = getSettingsTabs();
 		this.#tabs = tabs;
 		this.#tabBar = new TabBar("", tabs, getTabBarTheme());
 		this.#tabBar.showHint = false;
 		this.#tabBar.onTabChange = () => {
-			const tabId = this.#tabBar.getActiveTab().id as TabId;
+			const tabId = this.#tabBar.getActiveTab().id as SettingTab | "plugins";
 			if (this.#searchList) {
 				// While searching, tabs act as jump targets into the result list.
 				const firstId = this.#searchFirstMatch.get(tabId);
@@ -703,7 +678,6 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList?.invalidate();
 		this.#searchList?.invalidate();
 		this.#pluginComponent?.invalidate();
-		this.#gatewayComponent?.invalidate();
 	}
 
 	/** Swap the active content (per-tab list, search list, or plugins). */
@@ -711,17 +685,14 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList = null;
 		this.#searchList = null;
 		this.#pluginComponent = null;
-		this.#gatewayComponent = null;
 		build();
 	}
 
-	#switchToTab(tabId: TabId): void {
+	#switchToTab(tabId: SettingTab | "plugins"): void {
 		this.#currentTabId = tabId;
 		this.#setContent(() => {
 			if (tabId === "plugins") {
 				this.#showPluginsTab();
-			} else if (tabId === "gateway") {
-				this.#showGatewayTab();
 			} else {
 				this.#showSettingsTab(tabId);
 			}
@@ -736,7 +707,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.#searchList) {
 			return `${confirm} to change · ${tab} to jump tabs · ${cancel} to exit search`;
 		}
-		if (this.#currentTabId === "plugins" || this.#currentTabId === "gateway") {
+		if (this.#currentTabId === "plugins") {
 			return `${tab} to switch tabs · ${cancel} to close`;
 		}
 		if (this.#currentList?.sectionFocused) {
@@ -785,8 +756,6 @@ export class SettingsSelectorComponent implements Component {
 			contentLines = list.render(innerWidth);
 		} else if (this.#pluginComponent) {
 			contentLines = this.#pluginComponent.render(innerWidth);
-		} else if (this.#gatewayComponent) {
-			contentLines = this.#gatewayComponent.render(innerWidth);
 		} else {
 			contentLines = [];
 		}
@@ -848,15 +817,11 @@ export class SettingsSelectorComponent implements Component {
 		const entries = this.#context.settings.entries;
 		const plugins = this.#currentTabId === "plugins" ? this.#pluginComponent : null;
 		const pluginPage = plugins?.prefsPage();
-		const tab = this.#currentTabId === "plugins" || this.#currentTabId === "gateway" ? undefined : this.#currentTabId;
-		const hasGateway = this.#context.gatewayProfiles !== undefined;
+		const tab = this.#currentTabId === "plugins" ? undefined : this.#currentTabId;
 
-		const pages = SETTING_TABS.flatMap<TspPrefsProps["pages"][number]>(id => {
+		const pages: TspPrefsProps["pages"][number][] = SETTING_TABS.map(id => {
 			const changed = this.#changedCount(id);
-			const page = { id, label: TAB_METADATA[id].label, icon: id, changed: changed > 0 ? changed : undefined };
-			// The host-owned Gateway tab follows Providers, as in the tab bar.
-			if (!hasGateway || id !== "providers") return [page];
-			return [page, { id: "gateway", label: "Gateway", icon: "gateway" }];
+			return { id, label: TAB_METADATA[id].label, icon: id, changed: changed > 0 ? changed : undefined };
 		});
 		pages.push({ id: PLUGINS_PAGE, label: "Installed", icon: "plugins", group: "Plugins" });
 
@@ -891,9 +856,6 @@ export class SettingsSelectorComponent implements Component {
 						: col([open.component], { role: PREFS_EDITOR_ROLE }),
 				);
 			}
-		} else if (this.#gatewayComponent) {
-			// The Gateway panel has no native controls; it sits in a card over the page.
-			children.push(col([this.#gatewayComponent], { role: PREFS_EDITOR_ROLE }));
 		}
 
 		if (tab === "appearance" && !searching) {
@@ -1161,7 +1123,7 @@ export class SettingsSelectorComponent implements Component {
 		if (this.#searchList) {
 			this.#searchCorpora = null;
 			this.#setSearchQuery(this.#searchQuery);
-		} else if (this.#currentTabId !== "plugins" && this.#currentTabId !== "gateway")
+		} else if (this.#currentTabId !== "plugins")
 			this.#refreshCurrentTabItems(getSettingsForTab(this.#context.settings.entries, this.#currentTabId));
 	}
 
@@ -1203,7 +1165,7 @@ export class SettingsSelectorComponent implements Component {
 			children.push(memo.search.node);
 		}
 
-		const content = this.#searchList ?? this.#currentList ?? this.#pluginComponent ?? this.#gatewayComponent;
+		const content = this.#searchList ?? this.#currentList ?? this.#pluginComponent;
 		if (content) children.push(content);
 
 		if (!searching && this.#currentTabId === "appearance") {
@@ -1228,7 +1190,7 @@ export class SettingsSelectorComponent implements Component {
 
 		const mode: SettingsHintMode = searching
 			? "search"
-			: this.#currentTabId === "plugins" || this.#currentTabId === "gateway"
+			: this.#currentTabId === "plugins"
 				? "plugins"
 				: this.#currentList?.sectionFocused
 					? "sections"
@@ -1429,13 +1391,13 @@ export class SettingsSelectorComponent implements Component {
 		if (!this.#searchList) return;
 		const selected = jumpToSelection ? this.#searchList.getSelectedItem() : undefined;
 		const selectedDef = selected ? getSettingDef(this.#context.settings.entries, selected.id) : undefined;
-		const targetTab: TabId = selectedDef?.tab ?? this.#preSearchTabId;
+		const targetTab: SettingTab | "plugins" = selectedDef?.tab ?? this.#preSearchTabId;
 
 		this.#searchQuery = "";
 		this.#searchCorpora = null;
 		this.#searchFirstMatch.clear();
 		this.#searchMatchCount = 0;
-		this.#tabs = getSettingsTabs(this.#context.gatewayProfiles !== undefined);
+		this.#tabs = getSettingsTabs();
 		this.#tabBar.setTabs(this.#tabs, targetTab);
 		this.#switchToTab(targetTab);
 		if (selectedDef) {
@@ -1462,11 +1424,7 @@ export class SettingsSelectorComponent implements Component {
 			const icon = theme.symbol(meta.icon);
 			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
-		// Gateway and Plugins host their own UI; they are not part of the
-		// schema-backed search.
-		if (this.#context.gatewayProfiles) {
-			empty.push({ id: "gateway", label: `${theme.icon.host} Gateway`, short: theme.icon.host, muted: true });
-		}
+		// Plugins hosts its own UI; it is not part of the schema-backed search.
 		empty.push({
 			id: "plugins",
 			label: `${theme.icon.package} Plugins`,
@@ -1915,7 +1873,7 @@ export class SettingsSelectorComponent implements Component {
 
 	/** Re-evaluate condition gates against the current settings and refresh the active list. */
 	#refreshCurrentTabItems(defs: SettingDef[]): void {
-		if (this.#currentTabId === "plugins" || this.#currentTabId === "gateway" || !this.#currentList) return;
+		if (this.#currentTabId === "plugins" || !this.#currentList) return;
 		this.#currentList.setItems(this.#buildItemsForDefs(defs));
 	}
 
@@ -1952,11 +1910,6 @@ export class SettingsSelectorComponent implements Component {
 		});
 	}
 
-	#showGatewayTab(): void {
-		this.#gatewayComponent =
-			this.#context.gatewayProfiles?.createPanel({ onCancel: () => this.#callbacks.onCancel() }) ?? null;
-	}
-
 	handleInput(data: string): void {
 		// SGR mouse reports (the fullscreen overlay enables tracking).
 		if (data.startsWith("\x1b[<")) {
@@ -1984,11 +1937,6 @@ export class SettingsSelectorComponent implements Component {
 			return;
 		}
 
-		if (this.#gatewayComponent?.ownsInput()) {
-			this.#gatewayComponent.handleInput(data);
-			return;
-		}
-
 		// Tab toggles keyboard focus between section headings and setting rows
 		// (fast section hopping); tabs without sections keep Tab switching tabs.
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
@@ -2006,7 +1954,7 @@ export class SettingsSelectorComponent implements Component {
 
 		// Printable characters start a search across every settings tab. The
 		// plugins tab keeps its own local filtering instead.
-		if (this.#currentTabId !== "plugins" && this.#currentTabId !== "gateway") {
+		if (this.#currentTabId !== "plugins") {
 			const printable = extractPrintableText(data);
 			if (printable !== undefined && printable.trim().length > 0) {
 				this.#startSearch(printable);
@@ -2018,8 +1966,6 @@ export class SettingsSelectorComponent implements Component {
 			this.#currentList.handleInput(data);
 		} else if (this.#pluginComponent) {
 			this.#pluginComponent.handleInput(data);
-		} else if (this.#gatewayComponent) {
-			this.#gatewayComponent.handleInput(data);
 		}
 	}
 

@@ -9,7 +9,6 @@ import type {
 	ServiceTier,
 	TokenTaskBudget,
 } from "../types";
-import type { AuthGatewayAccessStore } from "./access-store";
 
 /**
  * Wire types for the omp auth-gateway.
@@ -152,8 +151,6 @@ export interface AuthGatewayServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty allows unauthenticated calls unless `clients` is set. */
 	bearerTokens: string[];
-	/** Optional access-control, management, and audit store for managed gateway users. */
-	accessStore?: AuthGatewayAccessStore;
 	/**
 	 * Scoped clients, each admitted by its own bearer and limited to its models
 	 * and accounts (see `clients.ts`). Any table, even an empty one, requires a

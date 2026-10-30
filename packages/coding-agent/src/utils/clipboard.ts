@@ -4,6 +4,7 @@ import {
 	readImageFromClipboard as nativeReadImageFromClipboard,
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
+import { isSshSession } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/terminal";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -15,8 +16,8 @@ type SpawnCaptureOptions = { input?: string; timeoutMs?: number; env?: Record<st
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
  *
- * `readTextFromClipboard` and `readMacFileUrlsFromClipboard` shell out to CLI
- * clipboard tools. The synchronous `execSync` API
+ * `readTextFromClipboard`, `readMacFileUrlsFromClipboard`, and the Termux copy
+ * path all shell out to CLI clipboard tools. The synchronous `execSync` API
  * parks the render loop until the child exits or the timeout fires, so a hung
  * clipboard daemon freezes the TUI for the full 2000ms budget (#4235). This
  * helper mirrors the previous semantics — capture stdout, throw on non-zero
@@ -64,6 +65,17 @@ async function spawnCapture(
 
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * True when the clipboard this process reads is the one the user's terminal copies into.
+ * Over SSH every backend reads a clipboard of the remote host (macOS `pbpaste`, the Windows host
+ * behind WSL, Termux, a host-side X11/Wayland desktop). Even an X11-forwarded `DISPLAY` cannot be
+ * trusted: a tmux session on the host keeps a stale `localhost:10.0` whose port a later SSH
+ * session (possibly another user's) can own, so SSH never reads the system clipboard.
+ */
+export function isClipboardTerminalLocal(env: NodeJS.ProcessEnv = process.env): boolean {
+	return !isSshSession(env);
 }
 
 /**
@@ -173,6 +185,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 		releaseWrite?.();
 	}
 }
+
 // PowerShell one-liner that emits the Windows clipboard image as base64-encoded
 // PNG on stdout, or nothing when the clipboard does not hold image data. Used
 // for native Windows fallback and WSL interop because arboard can miss host

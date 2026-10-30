@@ -1,9 +1,11 @@
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
+import { getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
 import type { KeyOverrides } from "./cascade";
-import { acquireAuthCredential } from "./login";
 import { buildOAuthAccountIdentity } from "./pins";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
@@ -59,27 +61,55 @@ export class OAuthAccounts implements OAuthApi {
 	 * login registered.
 	 */
 	async login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined> {
-		const acquired = await acquireAuthCredential(provider, ctrl);
-		// The helper reports a cancelled flow as `null` so callers that resume a
-		// login wizard can stay silent. `login()` persists, so it must not report
-		// a cancellation as "no credential entered": an aborted flow rejects,
-		// leaving storage untouched, while an empty prompt still resolves.
-		if (!acquired) {
-			if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
-			return undefined;
+		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
+		// Agent's vscode:// URI) get a default manual-code prompt. For loopback OAuth
+		// providers an eager paste prompt adds noise to a flow that normally completes
+		// through HTTP. Synthesizing the default only for paste-code providers is the
+		// authoritative gate (it covers every caller, not
+		// just the CLI); an explicit caller-supplied `onManualCodeInput` is still
+		// honored for any provider as an escape hatch.
+		const manualCodeInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider)
+			? (signal?: AbortSignal) =>
+					untilAborted(signal, () =>
+						ctrl.onPrompt({
+							message: "Paste the authorization code (or full redirect URL):",
+						}),
+					)
+			: undefined;
+		// Built-in registry first, then runtime-registered extension providers.
+		const def = getProviderDefinition(provider) ?? getOAuthProvider(provider);
+		if (!def?.login) {
+			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
-		if (acquired.credential.type === "api_key") {
-			await this.#deps.pool.upsertStored(acquired.provider, { ...acquired.credential, source: "login" });
+		const result = await def.login({
+			onAuth: ctrl.onAuth,
+			onProgress: ctrl.onProgress,
+			onPrompt: ctrl.onPrompt,
+			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+			onBrowserSession: ctrl.onBrowserSession,
+			signal: ctrl.signal,
+			fetch: ctrl.fetch,
+		});
+		if (typeof result === "string") {
+			// Some flows (e.g. ollama) return "" to signal that no key was entered.
+			if (!result) {
+				return undefined;
+			}
+			await this.#deps.pool.storeLoginApiKey(provider, result);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
 		// lifetime (Anthropic) need it to surface re-login deadlines, and token
 		// refreshes only ever merge over this credential without clearing it.
-		const newCredential: OAuthCredential = { ...acquired.credential, authorizedAt: Date.now() };
+		const newCredential: OAuthCredential = {
+			type: "oauth",
+			...result,
+			authorizedAt: Date.now(),
+		};
 		// Use pool.upsertOAuth to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#deps.pool.upsertOAuth(acquired.provider, newCredential);
+		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
 		return {
 			type: "oauth",
 			email: newCredential.email,
@@ -170,6 +200,7 @@ export class OAuthAccounts implements OAuthApi {
 				await this.refresh(selection.credentialId, options.signal, {
 					reuseRecentMint: options.refreshReason === "auth-recovery",
 					reason: options.refreshReason,
+					rejectedAccess: options.rejectedAccessToken,
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);
@@ -304,27 +335,6 @@ export class OAuthAccounts implements OAuthApi {
 		const selection = this.#getStoredOAuthSelections(provider, options?.selection).find(
 			candidate => candidate.credentialId === credentialId,
 		);
-		if (!selection) return undefined;
-		const providerKey = providerTypeKey(provider, "oauth");
-		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
-	}
-
-	/**
-	 * Resolve the stored OAuth account at `position` (0-based, in
-	 * {@link OAuthAccounts.accounts} order) without refreshing any other row.
-	 * Fork feature used by multi-account selection UIs; an
-	 * {@link AuthCredentialSelectionPolicy} restricts both the list the position
-	 * indexes into and the resolution itself.
-	 */
-	async accessAt(
-		provider: string,
-		position: number,
-		options?: AuthApiKeyOptions,
-	): Promise<OAuthAccessResolution | undefined> {
-		if (!options?.selection && this.#deps.overrides.has(provider)) {
-			return undefined;
-		}
-		const selection = this.#getStoredOAuthSelections(provider, options?.selection)[position];
 		if (!selection) return undefined;
 		const providerKey = providerTypeKey(provider, "oauth");
 		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);

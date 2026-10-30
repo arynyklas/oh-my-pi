@@ -208,7 +208,7 @@ describe("auth-gateway POST /v1/embeddings", () => {
 
 	it("confines the gateway bearer after authorization and before provider dispatch", async () => {
 		harness = await boot();
-		const credentialLookup = vi.spyOn(harness.storage.keys, "resolveApiKeySelection");
+		const credentialLookup = vi.spyOn(harness.storage.keys, "get");
 		const request = (url: string, headers: Record<string, string>) =>
 			fetch(url, {
 				method: "POST",

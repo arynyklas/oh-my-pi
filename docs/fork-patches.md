@@ -88,8 +88,9 @@ topics are dropped, so patch numbering shifts only when the table changes.
 
 Grouping is **path-first, not hunk-level semantic**. A file belongs entirely to
 one topic, so a file touched by several features is labelled by whichever topic
-claims it first — `packages/ai/src/auth-storage.ts` carries both auth-gateway
-and account-selection work but lands in `account-selection`. Consequences to
+claims it first — `packages/ai/src/auth-storage.ts` carries both the
+credential-pool selection policy and account-selection work but lands in
+`account-selection`. Consequences to
 accept before relying on this:
 
 - Patches are an **ordered series**, applied `0001`→`NNNN`. They are not

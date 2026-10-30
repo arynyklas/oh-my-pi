@@ -114,6 +114,13 @@ const nativeAndIntegrationPackages = [
 	"packages/typescript-edit-benchmark",
 ];
 
+const projectToolTestCommand: TestCommand = {
+	label: ".omp/tests (project-local TUI debug tool)",
+	cwd: ".",
+	command: ["bun", "test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"],
+	parallel: 1,
+};
+
 // Packages the CI buckets deliberately skip but a local full run should still
 // cover. robomp-web lives under python/robomp and is outside every CI TS bucket.
 const localOnlyWorkspacePackages = ["python/robomp/web"];
@@ -362,7 +369,10 @@ async function commandsForMode(mode: Mode): Promise<TestPlan> {
 		case "workspace":
 			return testPlan(fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)));
 		case "native":
-			return testPlan(nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)));
+			return testPlan([
+				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)),
+				projectToolTestCommand,
+			]);
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":
@@ -396,6 +406,7 @@ async function commandsForMode(mode: Mode): Promise<TestPlan> {
 					...nativeAndIntegrationPackages.map(pkg =>
 						workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs }),
 					),
+					projectToolTestCommand,
 					...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				]),
 				await commandsForMode("coding-agent-heavy"),
@@ -408,8 +419,8 @@ async function commandsForMode(mode: Mode): Promise<TestPlan> {
 	}
 }
 
-// The omp-kata runner pods may inject cloud credentials (`AWS_*`) pod-wide via
-// `envFrom`, GitHub Actions injects `GITHUB_TOKEN`,
+// Self-hosted runners may carry cloud credentials (`AWS_*`) in their
+// environment, GitHub Actions injects `GITHUB_TOKEN`,
 // and a host may carry provider API keys. Any of these make env-sensitive code
 // non-deterministic in tests — e.g. leaked AWS creds make `amazon-bedrock` look
 // authenticated and win the provider startup fallback over `anthropic`. Run the

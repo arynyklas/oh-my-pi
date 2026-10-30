@@ -270,9 +270,8 @@ export class CredentialHealth implements HealthApi {
 	 */
 	async check(options?: CheckCredentialsOptions): Promise<CredentialHealthResult[]> {
 		options?.signal?.throwIfAborted();
-		const stored = options?.credentialIds
-			? this.#deps.pool.listByIds(options.credentialIds)
-			: this.#deps.store.listAuthCredentials();
+		const stored = this.#deps.store.listAuthCredentials();
+
 		const timeoutMs = options?.timeoutMs ?? this.#deps.usage.requestTimeoutMs;
 		const completionProbe = options?.completionProbe;
 		const completionTimeoutMs = options?.completionTimeoutMs ?? timeoutMs;

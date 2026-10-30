@@ -4,7 +4,6 @@ import {
 	type AuthCredential,
 	type AuthCredentialSelectionPolicy,
 	AuthStorage,
-	type CompletionProbe,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
@@ -409,12 +408,6 @@ describe("AuthStorage credential selection policy", () => {
 
 		const accesses = await storage.oauth.accessAll(CUSTOM_PROVIDER, { selection: selected });
 		expect(accesses.map(access => access.credentialId)).toEqual([secondRow.id]);
-		await expect(storage.oauth.accessAt(CUSTOM_PROVIDER, 0, { selection: selected })).resolves.toMatchObject({
-			ok: true,
-			credentialId: secondRow.id,
-			accessToken: "access-oauth-b",
-		});
-		await expect(storage.oauth.accessAt(CUSTOM_PROVIDER, 1, { selection: selected })).resolves.toBeUndefined();
 	});
 
 	test("omitting policy preserves legacy precedence and session stickiness", async () => {
@@ -613,25 +606,5 @@ describe("AuthStorage credential selection policy", () => {
 				selection: policy("failover", [invalidRow.id, validRow.id], "invalid-pool"),
 			}),
 		).resolves.toMatchObject({ ok: true, credential: { credentialId: validRow.id, apiKey: "access-valid" } });
-	});
-
-	test("checkCredentials only probes credential ids requested by the caller", async () => {
-		await storage.credentials.set(CUSTOM_PROVIDER, [
-			oauthCredential("check-a"),
-			apiKeyCredential("check-b"),
-			oauthCredential("check-c"),
-		]);
-		const rows = store.listAuthCredentials(CUSTOM_PROVIDER);
-		const target = rows[1]!;
-		const probed: number[] = [];
-		const completionProbe: CompletionProbe = async input => {
-			probed.push(input.credentialId);
-			return { ok: true };
-		};
-
-		const results = await storage.health.check({ credentialIds: [target.id], completionProbe });
-		expect(results.map(result => result.id)).toEqual([target.id]);
-		expect(probed).toEqual([target.id]);
-		expect(results[0]?.completion).toEqual({ ok: true });
 	});
 });

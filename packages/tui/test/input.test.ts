@@ -354,60 +354,6 @@ describe("Input component", () => {
 		expect(visibleWidth(wideLine.slice(0, wideLine.indexOf(CURSOR_MARKER)))).toBe(promptWidth + 16);
 	});
 
-	it("masks rendered graphemes while preserving the real edited and submitted value", () => {
-		const submitted: string[] = [];
-		const input = setupAtEnd("");
-		input.setMask("•");
-		input.onSubmit = value => submitted.push(value);
-
-		input.handleInput("a");
-		input.handleInput("👩‍💻");
-		input.handleInput("b");
-		input.handleInput("\x02"); // Ctrl+B (left)
-		input.handleInput("Z");
-		input.handleInput("\n");
-
-		const rendered = Bun.stripANSI(input.render(40).join("\n").replaceAll(CURSOR_MARKER, ""));
-		expect(input.getValue()).toBe("a👩‍💻Zb");
-		expect(submitted).toEqual(["a👩‍💻Zb"]);
-		expect(rendered).toContain("••••");
-		expect(rendered).not.toContain("a");
-		expect(rendered).not.toContain("Z");
-		expect(rendered).not.toContain("b");
-		expect(rendered).not.toContain("👩‍💻");
-	});
-
-	it("leaves existing render bytes unchanged when no mask is configured", () => {
-		const plain = setupAtEnd("secret");
-		const explicitlyUnmasked = setupAtEnd("secret");
-		explicitlyUnmasked.setMask(undefined);
-
-		expect(explicitlyUnmasked.render(24)).toEqual(plain.render(24));
-	});
-
-	it("clear removes value, undo history, kill ring, and paste state", () => {
-		const input = setupAtEnd("");
-		input.setMask("•");
-
-		input.handleInput("secret");
-		input.handleInput("\x01"); // Ctrl+A (start)
-		input.handleInput("\x0b"); // Ctrl+K (kill to line end, stores in kill ring)
-		expect(input.getValue()).toBe("");
-		input.handleInput("\x19"); // Ctrl+Y (yank)
-		expect(input.getValue()).toBe("secret");
-
-		input.handleInput("\x1b[200~paste-buffer");
-		input.clear();
-
-		input.handleInput("\x1f"); // Ctrl+_ (undo)
-		input.handleInput("\x19"); // Ctrl+Y (yank)
-		input.handleInput("\x1b[201~");
-
-		expect(input.getValue()).toBe("");
-		expect(input.render(40).join("\n")).not.toContain("secret");
-		expect(input.render(40).join("\n")).not.toContain("paste-buffer");
-	});
-
 	it("pasteText absorbs a payload from a non-bracketed transport (kitty OSC 5522)", () => {
 		// Regression for #2127: when kitty's enhanced clipboard read delivers the
 		// API key directly via `pasteText`, the modal Input must capture it just

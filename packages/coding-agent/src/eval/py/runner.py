@@ -1310,24 +1310,134 @@ class _BoundedLineScanner:
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
-    cmd = [sys.executable, "-m", "pip", *argv]
     # Installs are host work, not cell compute: suspend the eval watchdog (same
     # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
     _emit_status("timeout-pause")
     try:
-        _run_pip(cmd, args)
+        _run_pip(argv, args)
     finally:
         _emit_status("timeout-resume")
 
 
-def _run_pip(cmd: list[str], args: str) -> None:
+def _has_pip() -> bool:
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _child_pids() -> dict[int, list[int]]:
+    """Map each live pid to the pids of its children."""
+    children: dict[int, list[int]] = {}
+    if sys.platform.startswith("linux"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat:
+                    ppid = int(stat.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        return children
+    try:
+        listing = subprocess.run(
+            # /bin/ps first: the kernel's PATH is the user's and may not hold it.
+            ["/bin/ps" if os.path.exists("/bin/ps") else "ps", "-A", "-o", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return children
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    # Installers spawn their own children (ensurepip runs pip in one, source
+    # builds run backends and compilers), so killing `proc` alone is not enough.
+    # The tree stays in the kernel's process group so kernel shutdown still
+    # reaches it.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.kill()
+        proc.wait()
+        return
+    # Stop each process before listing its children, so nothing can spawn
+    # behind the walk; then kill every stopped process.
+    stopped: list[int] = []
+    level = [proc.pid]
+    while level:
+        for pid in level:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                continue
+            stopped.append(pid)
+        children = _child_pids()
+        level = [child for pid in level for child in children.get(pid, ())]
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
+def _run_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=env,
     )
+    try:
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    except BaseException:
+        # Cancelling the cell interrupts only the kernel: stop the installer too.
+        _kill_process_tree(proc)
+        raise
+
+
+def _bootstrap_pip() -> int:
+    # Environments made by `uv venv` ship without pip. Install it from the
+    # stdlib wheel; where ensurepip is missing or disabled (Debian's system
+    # Python), have uv install it into the kernel's interpreter instead.
+    code = _run_installer([sys.executable, "-m", "ensurepip"])
+    uv = shutil.which("uv")
+    if code == 0 or uv is None:
+        return code
+    return _run_installer(
+        [uv, "pip", "install", "pip"],
+        env={**os.environ, "UV_PYTHON": sys.executable},
+    )
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    if not _has_pip():
+        code = _bootstrap_pip()
+        if code != 0:
+            _emit_status("pip", args=args, installed=[], exit_code=code)
+            return
     installed_packages: list[str] = []
 
     def scan_pip_line(raw_line: str) -> None:
@@ -1339,9 +1449,8 @@ def _run_pip(cmd: list[str], args: str) -> None:
                 installed_packages.append(pkg.replace("_", "-"))
 
     scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
-    _stream_process_output(proc, scanner.add)
+    returncode = _run_installer([sys.executable, "-m", "pip", *argv], scanner.add)
     scanner.finish()
-    proc.wait()
     if installed_packages:
         import importlib
 
@@ -1352,7 +1461,7 @@ def _run_pip(cmd: list[str], args: str) -> None:
             if head in prefixes:
                 sys.modules.pop(mod_name, None)
     _emit_status(
-        "pip", args=args, installed=installed_packages, exit_code=proc.returncode
+        "pip", args=args, installed=installed_packages, exit_code=returncode
     )
 
 
@@ -1635,18 +1744,19 @@ def __omp_shell(cmd: str) -> _ShellResult:
 #
 # `print` and the trailing-expression echo write plain text to stdout, which is
 # all the model sees. Images additionally go out as `image` frames (model and
-# user); data frames, Markdown objects and large structures go out as `view`
-# frames carrying the exact text they printed, which the host shows in place
-# of that text.
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
 
 
 _REAL_PRINT = builtins.print
 _PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
-# Structured values get a JSON view only when their text is long or multi-line.
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
 _JSON_VIEW_MIN_CHARS = 80
 # The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
 _JSON_VIEW_MAX_CHARS = 32 * 1024
 _MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
 _ELLIPSIS = "\u2026"
 # Polars' table defaults when its POLARS_FMT_* variables are unset.
 _POLARS_DEFAULT_MAX_ROWS = 10
@@ -1809,11 +1919,20 @@ def _json_view(value: Any, text: str) -> dict | None:
     value_type = type(value)
     if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
         return None
-    if len(text) <= _JSON_VIEW_MIN_CHARS and "\n" not in text:
-        return None
-    if len(text) > _JSON_VIEW_MAX_CHARS:
+    if not _json_view_sized(text):
         return None
     return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
 
 
 def _module_instance(value: Any, module: Any, name: str) -> bool:
@@ -2086,6 +2205,10 @@ def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
 
 def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
     """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
     image = _omp_image(value)

@@ -1,16 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { AuthGatewayProfileStore } from "@oh-my-pi/pi-coding-agent/auth-gateway/profiles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
-import { createGatewaySettingsHost } from "@oh-my-pi/pi-coding-agent/modes/components/auth-gateway/profile-settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgHindsightApiToken } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
@@ -20,27 +14,17 @@ beforeAll(async () => {
 });
 
 let geometryStub: { restore(): void } | undefined;
-let tempDir = "";
-let documentPath = "";
-let tokenDir = "";
 
 beforeEach(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-settings-memory-refresh-"));
-	documentPath = path.join(tempDir, "auth-gateways.json");
-	tokenDir = path.join(tempDir, "tokens");
 	geometryStub = stubStdoutGeometry(120);
 });
 
-afterEach(async () => {
+afterEach(() => {
 	resetSettingsForTest();
 	geometryStub?.restore();
 	geometryStub = undefined;
-	await removeWithRetries(tempDir);
-	tempDir = "";
-	documentPath = "";
-	tokenDir = "";
 });
 
 function stubStdoutGeometry(cols: number): { restore(): void } {
@@ -70,13 +54,6 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			providers: [],
 			settings: createSettingsHost(),
 			plugins: createPluginSettingsHost(process.cwd()),
-			gatewayProfiles: createGatewaySettingsHost({
-				profileStore: AuthGatewayProfileStore.open({ documentPath, tokenDir }),
-				createClient: () => {
-					throw new Error("gateway client not used in this test");
-				},
-				requestRender: () => {},
-			}),
 		},
 		{
 			onChange: () => {},

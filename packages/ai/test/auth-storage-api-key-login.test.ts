@@ -4,12 +4,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { AuthStorage, acquireAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
-import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry/oauth";
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
@@ -58,148 +56,14 @@ describe("AuthStorage api-key login upsert", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		unregisterOAuthProviders("auth-storage-api-key-acquire-test");
 		store?.close();
 		store = null;
 		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
-			Bun.gc(true);
 			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
-	});
-
-	it("acquires custom api-key credentials without persisting login-only metadata", async () => {
-		if (!store) throw new Error("test setup failed");
-		store.saveApiKey("unit-api-key-storage", "existing-key");
-
-		registerOAuthProvider({
-			id: "unit-api-key-acquire",
-			name: "Unit API Key Acquire",
-			sourceId: "auth-storage-api-key-acquire-test",
-			storeCredentialsAs: "unit-api-key-storage",
-			login: async callbacks => {
-				callbacks.onProgress?.("prompting");
-				return "upload-safe-key";
-			},
-		});
-
-		const result = await acquireAuthCredential("unit-api-key-acquire", {
-			onAuth: () => {},
-			onPrompt: async () => "",
-		});
-
-		expect(result).toEqual({
-			provider: "unit-api-key-storage",
-			credential: { type: "api_key", key: "upload-safe-key" },
-		});
-		expect(store.listAuthCredentials("unit-api-key-storage").map(row => row.credential)).toEqual([
-			{ type: "api_key", key: "existing-key" },
-		]);
-	});
-
-	it("returns null when api-key acquisition is cancelled before a key is entered", async () => {
-		const abortController = new AbortController();
-		abortController.abort();
-
-		registerOAuthProvider({
-			id: "unit-api-key-cancel",
-			name: "Unit API Key Cancel",
-			sourceId: "auth-storage-api-key-acquire-test",
-			login: async callbacks => {
-				expect(callbacks.signal?.aborted).toBe(true);
-				return "";
-			},
-		});
-
-		const result = await acquireAuthCredential("unit-api-key-cancel", {
-			onAuth: () => {},
-			onPrompt: async () => "unused",
-			signal: abortController.signal,
-		});
-
-		expect(result).toBeNull();
-	});
-
-	it("returns null when api-key acquisition throws login cancelled", async () => {
-		if (!store) throw new Error("test setup failed");
-		store.saveApiKey("unit-api-key-storage", "existing-key");
-
-		registerOAuthProvider({
-			id: "unit-api-key-throw-cancel",
-			name: "Unit API Key Throw Cancel",
-			sourceId: "auth-storage-api-key-acquire-test",
-			storeCredentialsAs: "unit-api-key-storage",
-			login: async () => {
-				throw new AIError.LoginCancelledError();
-			},
-		});
-
-		const result = await acquireAuthCredential("unit-api-key-throw-cancel", {
-			onAuth: () => {},
-			onPrompt: async () => "unused",
-		});
-
-		expect(result).toBeNull();
-		expect(store.listAuthCredentials("unit-api-key-storage").map(row => row.credential)).toEqual([
-			{ type: "api_key", key: "existing-key" },
-		]);
-	});
-
-	it("does not persist when api-key login throws login cancelled", async () => {
-		if (!store || !authStorage) throw new Error("test setup failed");
-		store.saveApiKey("unit-api-key-storage", "existing-key");
-
-		registerOAuthProvider({
-			id: "unit-api-key-login-throw-cancel",
-			name: "Unit API Key Login Throw Cancel",
-			sourceId: "auth-storage-api-key-acquire-test",
-			storeCredentialsAs: "unit-api-key-storage",
-			login: async () => {
-				throw new AIError.LoginCancelledError();
-			},
-		});
-
-		await authStorage.oauth.login("unit-api-key-login-throw-cancel", {
-			onAuth: () => {},
-			onPrompt: async () => "unused",
-		});
-
-		expect(store.listAuthCredentials("unit-api-key-storage").map(row => row.credential)).toEqual([
-			{ type: "api_key", key: "existing-key" },
-		]);
-	});
-
-	it("propagates non-cancel api-key acquisition failures", async () => {
-		if (!store) throw new Error("test setup failed");
-		const providerError = new Error("provider exploded");
-		store.saveApiKey("unit-api-key-storage", "existing-key");
-
-		registerOAuthProvider({
-			id: "unit-api-key-throw-error",
-			name: "Unit API Key Throw Error",
-			sourceId: "auth-storage-api-key-acquire-test",
-			storeCredentialsAs: "unit-api-key-storage",
-			login: async () => {
-				throw providerError;
-			},
-		});
-
-		let thrown: unknown;
-		try {
-			await acquireAuthCredential("unit-api-key-throw-error", {
-				onAuth: () => {},
-				onPrompt: async () => "unused",
-			});
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBe(providerError);
-		expect(store.listAuthCredentials("unit-api-key-storage").map(row => row.credential)).toEqual([
-			{ type: "api_key", key: "existing-key" },
-		]);
 	});
 
 	it("reuses the stored api-key row when re-login returns the same key", async () => {

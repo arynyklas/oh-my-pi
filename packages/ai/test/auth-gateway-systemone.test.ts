@@ -602,11 +602,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 			invalidated.push(apiKey);
 			return true;
 		});
-		// The fork's gateway rotates through the selection-aware lookup, not `getWithCredential`.
-		vi.spyOn(storage.keys, "resolveApiKeySelection").mockImplementation(async () => ({
-			ok: true,
-			credential: { apiKey: "key-b", source: "api_key" },
-		}));
+		vi.spyOn(storage.keys, "getWithCredential").mockImplementation(async () => ({ apiKey: "key-b" }));
 		const model = getBundledModel("typesafe", "jev-latest");
 		if (!model) throw new Error("expected bundled typesafe/jev-latest");
 		const resolve = buildGatewayApiKeyResolver(

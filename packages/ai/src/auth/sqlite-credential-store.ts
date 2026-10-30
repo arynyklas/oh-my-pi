@@ -18,7 +18,7 @@ import {
 	logger,
 	openSqliteDatabase,
 } from "@oh-my-pi/pi-utils";
-import type { AuthCredentialStore, CredentialRefreshLeaseFence } from "./store";
+import type { AuthCredentialStore, CredentialRefreshLeaseFence, CredentialRefreshLeaseHolder } from "./store";
 import type {
 	AuthCredential,
 	DisabledCredentialSummary,
@@ -107,14 +107,6 @@ function storesSerializedCredential(row: CredentialStateRow, serialized: Seriali
 
 const AUTH_SCHEMA_VERSION = 8;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
-/**
- * Windows holds the SQLite file handle briefly after `Database.close()`, so a
- * test or CLI that immediately removes its temp directory hits EBUSY. Block the
- * closing thread for this long (Atomics.wait on a shared buffer — no event-loop
- * turn, safe in synchronous `close()`) to let the handle settle.
- */
-const SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS = 500;
-const SQLITE_CLOSE_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
@@ -409,8 +401,6 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
-	#getActiveByIdStmt: Statement;
-	#reactivateStmt: Statement;
 	#listActiveByProviderStmt: Statement;
 	#listDisabledStmt: Statement;
 	#listDisabledByProviderStmt: Statement;
@@ -439,6 +429,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#lastCredentialBlockSweepMs = Number.NEGATIVE_INFINITY;
 	#acquireCredentialRefreshLeaseStmt: Statement;
 	#getCredentialRefreshLeaseStmt: Statement;
+	#getCredentialRefreshLeaseHolderStmt: Statement;
+	#handBackCredentialRefreshLeaseStmt: Statement;
 	#renewCredentialRefreshLeaseStmt: Statement;
 	#releaseCredentialRefreshLeaseStmt: Statement;
 	#getCredentialStateStmt: Statement;
@@ -462,9 +454,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
-		);
-		this.#getActiveByIdStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ? AND disabled_cause IS NULL",
 		);
 		this.#listActiveByProviderStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
@@ -492,11 +481,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					SELECT 1 FROM auth_credential_refresh_leases
 					WHERE credential_id = ? AND owner = ? AND expires_at_ms > ?
 				)`,
-		);
-		this.#reactivateStmt = this.#db.prepare(
-			`UPDATE auth_credentials
-			 SET credential_type = ?, data = ?, identity_key = ?, disabled_cause = NULL, updated_at = ${SQLITE_NOW_EPOCH}
-			 WHERE id = ? AND disabled_cause IS NOT NULL`,
 		);
 		this.#deleteStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND disabled_cause IS NULL`,
@@ -567,6 +551,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#getCredentialRefreshLeaseStmt = this.#db.prepare(
 			"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+		);
+		this.#getCredentialRefreshLeaseHolderStmt = this.#db.prepare(
+			"SELECT owner, expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
+		);
+		this.#handBackCredentialRefreshLeaseStmt = this.#db.prepare(
+			`UPDATE auth_credential_refresh_leases SET owner = ?, expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
 		);
 		this.#renewCredentialRefreshLeaseStmt = this.#db.prepare(
 			`UPDATE auth_credential_refresh_leases SET expires_at_ms = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE credential_id = ? AND owner = ?`,
@@ -1313,21 +1303,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return results;
 	}
 
-	listAuthCredentialsByIds(ids: readonly number[]): StoredAuthCredential[] {
-		const results: StoredAuthCredential[] = [];
-		const seen = new Set<number>();
-		for (const id of ids) {
-			if (!Number.isSafeInteger(id) || id <= 0 || seen.has(id)) continue;
-			seen.add(id);
-			const row = this.#getActiveByIdStmt.get(id) as AuthRow | undefined;
-			if (!row) continue;
-			const credential = deserializeCredential(row);
-			if (!credential) continue;
-			results.push(toStoredAuthCredential(row, credential));
-		}
-		return results;
-	}
-
 	async listDisabledCredentials(provider?: string): Promise<DisabledCredentialSummary[]> {
 		const rows =
 			(provider
@@ -1438,19 +1413,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 
 			if (targetId === null) {
-				const disabledRows = this.#listDisabledByProviderStmt.all(providerName) as AuthRow[];
-				for (const row of disabledRows) {
-					const disabledCredential = deserializeCredential(row);
-					const identityKey = resolveRowCredentialIdentityKey(providerName, row);
-					if (!matchesReplacementCredential(providerName, disabledCredential, identityKey, item)) continue;
-					targetId = row.id;
-					this.#reactivateStmt.run(serialized.credentialType, serialized.data, serialized.identityKey, row.id);
-					this.#deleteCredentialBlocksStmt.run(row.id);
-					break;
-				}
-			}
-
-			if (targetId === null) {
 				const row = this.#insertStmt.get(
 					providerName,
 					serialized.credentialType,
@@ -1499,13 +1461,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			const disabledRows = this.#listDisabledByProviderStmt.all(provider) as AuthRow[];
 			for (const row of disabledRows) {
 				if (hasActiveApiKey && row.credential_type === "api_key") {
-					this.#deleteCredentialBlocksStmt.run(row.id);
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
 				const identityKey = resolveRowCredentialIdentityKey(provider, row);
 				if (identityKey && activeIdentityKeys.has(identityKey)) {
-					this.#deleteCredentialBlocksStmt.run(row.id);
 					this.#hardDeleteStmt.run(row.id);
 					continue;
 				}
@@ -1833,6 +1793,24 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result.changes === 1;
 	}
 
+	getCredentialRefreshLeaseHolder(credentialId: number): CredentialRefreshLeaseHolder | undefined {
+		const row = this.#getCredentialRefreshLeaseHolderStmt.get(credentialId) as
+			| { owner?: string; expires_at_ms?: number }
+			| undefined;
+		if (typeof row?.owner !== "string" || typeof row.expires_at_ms !== "number") return undefined;
+		return { owner: row.owner, expiresAtMs: row.expires_at_ms };
+	}
+
+	handBackCredentialRefreshLease(credentialId: number, owner: string, holder: CredentialRefreshLeaseHolder): boolean {
+		const result = this.#handBackCredentialRefreshLeaseStmt.run(
+			holder.owner,
+			holder.expiresAtMs,
+			credentialId,
+			owner,
+		) as { changes: number };
+		return result.changes === 1;
+	}
+
 	releaseCredentialRefreshLease(credentialId: number, owner: string): void {
 		try {
 			this.#releaseCredentialRefreshLeaseStmt.run(credentialId, owner);
@@ -2153,8 +2131,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#listActiveStmt.finalize();
-		this.#getActiveByIdStmt.finalize();
-		this.#reactivateStmt.finalize();
 		this.#listActiveByProviderStmt.finalize();
 		this.#listDisabledStmt.finalize();
 		this.#listDisabledByProviderStmt.finalize();
@@ -2185,15 +2161,12 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#deleteCachePrefixStmt.finalize();
 		this.#acquireCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialRefreshLeaseStmt.finalize();
+		this.#getCredentialRefreshLeaseHolderStmt.finalize();
+		this.#handBackCredentialRefreshLeaseStmt.finalize();
 		this.#renewCredentialRefreshLeaseStmt.finalize();
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialStateStmt.finalize();
 		this.#holdsCredentialRefreshLeaseStmt.finalize();
-		const shouldWaitForFileClose =
-			process.platform === "win32" && this.#db.filename !== ":memory:" && SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS > 0;
 		this.#db.close();
-		if (shouldWaitForFileClose) {
-			Atomics.wait(SQLITE_CLOSE_SLEEP_BUFFER, 0, 0, SQLITE_WINDOWS_FILE_CLOSE_SETTLE_MS);
-		}
 	}
 }

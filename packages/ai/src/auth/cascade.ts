@@ -1,6 +1,6 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
+import { type ApiKeyResolver, createOAuthProvenance, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -335,8 +335,13 @@ export class KeyCascade implements KeysApi {
 	): Promise<ResolvedApiKey | undefined> {
 		const result = await this.resolveApiKeySelection(provider, sessionId, options);
 		if (!result.ok) return undefined;
-		const { apiKey, credentialId, oauthIdentity } = result.credential;
-		return { apiKey, credentialId, ...(oauthIdentity ? { oauthIdentity } : {}) };
+		const { apiKey, credentialId, oauthAccess, oauthIdentity } = result.credential;
+		return {
+			apiKey,
+			credentialId,
+			...(oauthAccess ? { oauthAccess } : {}),
+			...(oauthIdentity ? { oauthIdentity } : {}),
+		};
 	}
 
 	/**
@@ -361,12 +366,19 @@ export class KeyCascade implements KeysApi {
 		}
 	}
 
+	/** Warm selection metadata during session startup without choosing or pinning an account. */
+	async prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void> {
+		options?.signal?.throwIfAborted();
+		if (this.source(provider)?.kind !== "oauth") return;
+		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
+	}
+
 	/**
 	 * Resolve the bearer that authenticates a request, with the durable stored
-	 * row and cascade leg that supplied it. Fork feature: the auth-gateway's
-	 * credential-pool grants resolve through here so a principal sees which row
-	 * answered, and an explicit {@link AuthCredentialSelectionPolicy} keeps the
-	 * walk inside the pool the grant names.
+	 * row and cascade leg that supplied it. An explicit
+	 * {@link AuthCredentialSelectionPolicy} keeps the walk inside the pool the
+	 * caller names, so a server that grants credential pools sees which row
+	 * answered.
 	 *
 	 * Priority (first match wins): runtime override, config override, OAuth,
 	 * login-persisted API key, config fallback, environment variable, then another stored API key.
@@ -437,6 +449,7 @@ export class KeyCascade implements KeysApi {
 					credentialId: oauthResolved.credentialId,
 					credentialType: "oauth",
 					source: "oauth",
+					oauthAccess: oauthResolved.credential.access,
 					oauthIdentity: { orgId, region, inferenceRegion },
 				},
 			};
@@ -543,14 +556,18 @@ export class KeyCascade implements KeysApi {
 		},
 	): ApiKeyResolver {
 		const { sessionId, baseUrl, modelId, selection } = options ?? {};
+		// One resolver serves many requests, and they fail out of order, so the
+		// token a 401 rejected is looked up from the bearer that request sent.
+		const provenance = createOAuthProvenance();
+		const resolve = async (extra: AuthApiKeyOptions): Promise<ResolvedApiKey | undefined> => {
+			const resolved = await this.getWithCredential(provider, sessionId, { baseUrl, modelId, selection, ...extra });
+			provenance.record(resolved);
+			return resolved;
+		};
 		return async ({ lastChance, error, signal, previousKey }) => {
+			const rejectedAccessToken = provenance.accessFor(previousKey);
 			if (error === undefined) {
-				return this.getWithCredential(provider, sessionId, {
-					baseUrl,
-					modelId,
-					signal,
-					selection,
-				});
+				return resolve({ signal });
 			}
 			if (lastChance) {
 				const rotation = await this.#deps.rotate(provider, sessionId, {
@@ -568,21 +585,14 @@ export class KeyCascade implements KeysApi {
 					// because a peer may have refreshed the failed bearer.
 					if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 				}
-				const resolved = await this.getWithCredential(provider, sessionId, {
-					baseUrl,
-					modelId,
-					signal,
-					selection,
-				});
+				const resolved = await resolve({ signal });
 				return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 			}
-			return this.getWithCredential(provider, sessionId, {
-				baseUrl,
-				modelId,
+			return resolve({
 				forceRefresh: true,
 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+				rejectedAccessToken,
 				signal,
-				selection,
 			});
 		};
 	}

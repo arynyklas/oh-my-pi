@@ -45,6 +45,7 @@ import { col, node, span } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
+import { formatJobWidgetGlance, type JobWidgetEntry, latestJobWidget } from "../tools/job-widget";
 import type {
 	CollabStatus,
 	ComposerFacts,
@@ -58,6 +59,9 @@ import type {
 	StatusLineSettings,
 	StatusResetExpiry,
 } from "./types";
+
+/** Sparkline cells the ANSI jobs segment draws after the freshest widget's headline. */
+const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
 export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
@@ -446,6 +450,8 @@ class StatusLineExternalInputs {
 	isFastModeActive = false;
 	anthropicSlowModeLabel: string | undefined = undefined;
 	compactionSpeculation: unknown = undefined;
+	/** The freshest running job widget's view (stable identity while its data is unchanged). */
+	jobWidgetRef: unknown = undefined;
 }
 
 interface CachedStatusLine {
@@ -814,8 +820,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	#onResetExpiryNotice: ((notice: string) => void) | undefined;
-	/** Conversations already warned about expiring saved resets: later refreshes stay quiet. */
-	#resetExpiryNoticedSessions = new Set<string>();
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -984,24 +988,26 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
-	setRunningSubagents(agentIds: readonly string[]): void {
+	setRunningSubagents(agentIds: readonly string[]): boolean {
 		if (
 			agentIds.length === this.#runningSubagentIds.size &&
 			agentIds.every(agentId => this.#runningSubagentIds.has(agentId))
 		) {
-			return;
+			return false;
 		}
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
 		this.#invalidateStatusLineRenderCache();
+		return true;
 	}
 
 	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
-	setSubagentTreeCost(cost: number): void {
+	setSubagentTreeCost(cost: number): boolean {
 		const next = Number.isFinite(cost) && cost > 0 ? cost : 0;
-		if (next === this.#subagentTreeCost) return;
+		if (next === this.#subagentTreeCost) return false;
 		this.#subagentTreeCost = next;
 		this.#invalidateStatusLineRenderCache();
+		return true;
 	}
 
 	/**
@@ -1229,7 +1235,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onCodexResetFireworks = handler;
 	}
 
-	/** Set the callback that presents the first pool-wide saved-reset expiry warning, or clear it with `undefined`. */
+	/** Set the callback that presents pool-wide saved-reset expiry warnings, or clear it with `undefined`. */
 	setResetExpiryNoticeHandler(handler: ((notice: string) => void) | undefined): void {
 		this.#onResetExpiryNotice = handler;
 	}
@@ -2112,7 +2118,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#noticeResetExpiry(session: TSession, reports: unknown): void {
-		// A focused subagent's view is not a conversation the user started; warn in their own.
+		// A focused subagent's view is not a conversation the user started; leave the warning for their own.
 		if (
 			this.#focusedAgentId !== undefined ||
 			!this.#onResetExpiryNotice ||
@@ -2121,8 +2127,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		) {
 			return;
 		}
-		const sessionId = session.sessionManager.getSessionId();
-		if (this.#resetExpiryNoticedSessions.has(sessionId)) return;
 		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
 		const usageReports = reports.filter(
 			(report): report is UsageReport =>
@@ -2132,10 +2136,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				"limits" in report &&
 				Array.isArray(report.limits),
 		);
-		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
-		if (!notice) return;
-		this.#resetExpiryNoticedSessions.add(sessionId);
-		this.#onResetExpiryNotice(notice);
+		const notice = this.host.resetExpiryNotice(session, usageReports, Date.now());
+		if (notice) this.#onResetExpiryNotice(notice);
 	}
 
 	#observeLateUsageRefresh(session: TSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -2804,6 +2806,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? this.session.getAnthropicSlowModeLabel()
 				: undefined;
 		target.compactionSpeculation = this.session.compactionSpeculation;
+		target.jobWidgetRef = this.#latestJobWidget()?.view;
+	}
+
+	/** The running job widget that saw data last; the ANSI jobs segment appends its glance. */
+	#latestJobWidget(): JobWidgetEntry | undefined {
+		const entries = this.session.getRunningJobWidgets?.();
+		return entries ? latestJobWidget(entries) : undefined;
 	}
 
 	#sameStatusLineExternalInputs(left: StatusLineExternalInputs, right: StatusLineExternalInputs): boolean {
@@ -2857,7 +2866,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
 			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
-			left.compactionSpeculation === right.compactionSpeculation
+			left.compactionSpeculation === right.compactionSpeculation &&
+			left.jobWidgetRef === right.jobWidgetRef
 		);
 	}
 
@@ -3066,7 +3076,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (layout !== "plain-left") {
 			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				const widget = this.#latestJobWidget();
+				const glance = widget ? formatJobWidgetGlance(widget.view, theme, JOBS_SEGMENT_SPARK_CELLS) : "";
+				const count = theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`);
+				rightParts.unshift(glance ? `${count} ${glance}` : count);
 			}
 			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}
