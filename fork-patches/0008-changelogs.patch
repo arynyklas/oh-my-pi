@@ -1,0 +1,188 @@
+diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
+index 0424764..b29c807 100644
+--- a/packages/ai/CHANGELOG.md
++++ b/packages/ai/CHANGELOG.md
+@@ -2,6 +2,66 @@
+ 
+ ## [Unreleased]
+ 
++## [18.14.0-fork.1] - 2026-10-30
++
++### Removed
++
++- Removed the fork's auth-gateway access control (managed users and tokens, ACLs, credential pools, the management and audit APIs, `/v1/models` `reasoning`/`thinking_efforts` fields), `acquireAuthCredential`, `AuthStorage.listStoredCredentialsByIds` and `upsertCredentialAsync`, `oauth.accessAt`, `health.check({ credentialIds })`, and the SQLite store's re-login row reactivation. The auth gateway and broker store are upstream's.
++
++### Changed
++
++- Re-based onto upstream v18.14.0. `AuthStorage.resolveApiKeySelection` and credential selection policies stay, and an OAuth row they resolve now carries its access token, so upstream's 401 recovery adopts a peer's refreshed token instead of spending the refresh token again.
++
++## [18.12.2-fork.1] - 2026-10-19
++
++### Changed
++
++- Auth-gateway scoped client tokens authenticate after the gateway and managed tokens as a `client` principal that is never an admin; the fork's chat routes resolve, refresh and rotate a client's credentials only inside the accounts it is bound to. `createAuthGatewayRouter().route()` takes the admitted principal before the scoped client.
++
++## [18.9.2-fork.1] - 2026-10-12
++
++### Added
++
++- `AuthGatewayRouteOptions.resolveVariantBase` names the catalog model a resolved routing variant was cloned from; model ACL deny rules on that model also deny the variant.
++
++### Changed
++
++- The fork's default account, account priority and selection policies now run inside upstream's account-pool session restrictions: a restricted session never selects, rotates to, or announces a default-account fallover to an account outside its pool.
++
++## [18.6.1-fork.2] - 2026-10-09
++
++### Added
++
++- Этап aigw2 3A: прокси на запрос (`webSocketProxy`, `fetchImpl` для refresh, `ctrl.fetch` для device login), восстановление PKCE-входа через `pkceVerifier`/`resume()`.
++- `postmortem.releaseSigtermHandler()` передаёт SIGTERM встраивающему серверу, сохраняя все сторонние обработчики; cleanup при exit остаётся.
++
++### Fixed
++
++- Явные типы `UsageCache`/`UsageService` снимают циклический вывод типов при сборке деклараций TypeScript.
++
++## [18.5.1-fork.1] - 2026-10-03
++
++### Changed
++
++- The fork's auth-gateway management API, ACLs, account pools, and audit log now run inside upstream's `createAuthGatewayRouter`, behind upstream's HTTP transport: gateway bearer tokens sent anywhere but `Authorization` are rejected with `400`, and `trustProxyHeaders` controls whether forwarded client addresses are honored.
++
++## [18.3.0-fork.1] - 2026-09-24
++
++### Added
++
++- Auth gateway `GET /v1/models` rows now advertise `reasoning` and `thinking_efforts` (the served model's effort ladder) so clients can offer the levels the gateway actually honors.
++
++### Fixed
++
++- Fixed Claude Opus 5.5 failing the first tool-forcing request with `400 tool_choice: type "tool" and "any" are not supported for this model`; forced tool choice is now downgraded to `auto` for Opus 5.5 on every host, which also keeps thinking at the requested effort.
++
++## [18.2.9-fork.1] - 2026-09-23
++
++### Added
++
++- Gateway routes for every non-chat modality now resolve credentials through the caller's account pool: `resolveGatewayApiKey` and `buildGatewayApiKeyResolver` take the request's boot options and honour the `credentialScope` the router installs, so an ACL denial, an empty pool, and pool-scoped rotation behave the same on `/v1/embeddings` as on `/v1/chat/completions`.
++- ACL rules accept the new `systemone`, `images`, `speech`, `transcriptions`, `embeddings`, `rerank`, and `video` route families.
++
+ ## [18.14.0] - 2026-10-29
+ 
+ ### Breaking Changes
+@@ -2324,3 +2384,5 @@
+ - Removed Pi dialect support and related serialization/parsing logic.
+ 
+ Older entries are archived in [packages/ai/CHANGELOG.md@ef4bc35e85d8](https://github.com/can1357/oh-my-pi/blob/ef4bc35e85d88932d92b01ae7121c9f47208cf40/packages/ai/CHANGELOG.md).
++
++Older fork entries are archived in [packages/ai/CHANGELOG.md@98ee86c3c7bd](https://github.com/arynyklas/oh-my-pi/blob/98ee86c3c7bd4dddc726cb32463c87c6ca14818c/packages/ai/CHANGELOG.md).
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+index 5eda61f..40cbe27 100644
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,100 @@
+ 
+ ## [Unreleased]
+ 
++## [18.14.0-fork.1] - 2026-10-30
++
++### Removed
++
++- Removed the fork's auth-gateway user management: managed users and their tokens, ACL rules, credential pools, the admin and audit APIs, `omp auth-gateway user|pool|audit|tui`, the `/gateway` console, the `/settings` Gateway tab with its connection profiles, and the gateway user and usage block in `/usage`. `omp auth-gateway` is upstream's again (`serve`, `stdio`, `token`, `status`, `check`, scoped `--clients`); a gateway built from an earlier fork release keeps its `auth-gateway.db`, but this build no longer reads it.
++
++### Changed
++
++- Re-based the fork onto upstream v18.14.0.
++- A `/v1/models` row that states its reasoning ladder in OpenRouter's shape (`reasoning: { supported_efforts, default_effort, mandatory }`, as aigw2 serves it) now goes through upstream's advertised-reasoning discovery: `discovery.advertisedReasoning: false` turns it off, `minimal` is no longer offered, and `mandatory` keeps thinking from being switched off. The omp auth-gateway's `thinking_efforts` field is no longer read.
++
++## [18.12.2-fork.2] - 2026-10-21
++
++### Fixed
++
++- `git worktree add` in bash, `omp worktree add`, `/wt` and `github pr_checkout` no longer clone the checkout into a worktree path inside it, such as `.worktrees/<name>`. The clone copied the destination into itself until the path was too long (can1357/oh-my-pi#16076): on a Windows Dev Drive it ran past the bash timeout and left a directory thousands of levels deep, and a later `du` on that directory crashed omp with `panic(tokio-rt-worker): Stack overflow`. Such a worktree now gets a plain checkout; worktrees outside the checkout are still cloned.
++
++## [18.12.2-fork.1] - 2026-10-19
++
++### Changed
++
++- Re-based the fork onto upstream v18.12.2. Upstream's scoped client tokens (`omp auth-gateway serve --clients=<file>`) work alongside the fork's managed users and pools: a client token is never an admin (management routes answer `403`), cannot read `/v1/usage` or `/v1/credentials/check`, and its requests are audited under the client's name.
++
++## [18.9.2-fork.1] - 2026-10-12
++
++### Changed
++
++- Re-based the fork onto upstream v18.9.2. `omp update` on a fork build still installs from the fork's GitHub releases, now through upstream's verified binary installer, and the startup update check skips source checkouts and manager-installed copies as upstream's does. The auth gateway leaves `disabledProviders` out of `/v1/usage`, `/v1/credentials/check` and its model catalog while keeping the fork's ACLs, account pools and keyless `models.yml` models.
++- The auth gateway serves upstream's OpenRouter routing variants (`openrouter/<id>:nitro`, `:floor`, dated ids) under the requested id; a model ACL deny rule on `<id>` also denies its variants.
++
++## [18.6.1-fork.3] - 2026-10-11
++
++### Fixed
++
++- Models discovered through a custom `models.yml` provider (`discovery: openai-models-list` or `proxy`) now take the reasoning levels the endpoint advertises on `/v1/models`: OpenRouter's `reasoning.supported_efforts` (with `default_effort` and `mandatory`) or the omp auth-gateway's `thinking_efforts`. OpenAI-shaped rows send the chosen level as `reasoning_effort`. A gateway serving Claude Opus 5.5 under its own provider name now offers `max`. Before, `openai-models-list` stopped at `high` (at `xhigh` when the matched reference already sent `reasoning_effort`), and `proxy` offered `max` on OpenAI-shaped rows without sending any `reasoning_effort`.
++
++## [18.6.1-fork.2] - 2026-10-09
++
++### Changed
++
++- Пакетный выпуск для aigw2: прокси аккаунта на запрос/refresh/device login, восстановление PKCE и передача SIGTERM встраивающему серверу. Бинарные артефакты этого выпуска не публикуются.
++
++## [18.6.1-fork.1] - 2026-10-05
++
++### Changed
++
++- Re-based the fork onto upstream v18.6.1.
++
++## [18.5.1-fork.1] - 2026-10-03
++
++### Changed
++
++- Re-based the fork onto upstream v18.5.1. The default-account and account-priority settings moved into upstream's settings registry, `omp auth-gateway` gained upstream's `stdio` action and `--trust-proxy-headers` flag alongside the fork's user/pool/audit/tui commands, and the `/usage` dashboard keeps the gateway user and usage summary on upstream's account-visibility layout.
++
++### Fixed
++
++- Claude models discovered from an omp auth gateway on a provider declared with `api: anthropic-messages` now offer the gateway's own reasoning levels, so Claude Opus 4.7+ shows `max` instead of stopping at `xhigh`.
++
++## [18.3.0-fork.3] - 2026-09-24
++
++### Added
++
++- Speech (`tts`) and dictation (`stt`) models from OpenAI-compatible gateways now land in the `speech` and `dictation` roles: `models.yml` accepts `api: openai-speech` and `api: openai-transcriptions`, `openai-models-list` discovery routes Envoy AI Gateway rows by their advertised `/audio/speech` and `/audio/transcriptions` endpoints, and `discovery: proxy` maps omp auth-gateway `kind: tts`/`stt` rows to the gateway's `/v1/audio/*` routes.
++
++### Changed
++
++- Image, speech, and transcription models declared in `models.yml` no longer advertise chat token defaults (128K context / 16K output).
++
++## [18.3.0-fork.2] - 2026-09-24
++
++### Fixed
++
++- Image models from OpenAI-compatible gateways now appear in the `image` role instead of the chat picker: `openai-models-list` discovery reads Envoy AI Gateway (`aigw`) `metadata` modalities, `models.yml` accepts `api: openai-images`, and `discovery: proxy` maps omp auth-gateway `kind: image` rows to image models served through the gateway's `/v1/images/generations`.
++
++## [18.3.0-fork.1] - 2026-09-24
++
++### Changed
++
++- Re-based the fork onto upstream v18.3.0. The fork's default-account, account-priority, account-selection journal, and gateway pool-selection features now run on upstream's namespaced `AuthStorage` alongside upstream's per-account OAuth policies; `omp usage` shows both the configured default account and the policy line.
++
++### Fixed
++
++- Models discovered from an omp auth gateway (`discovery: proxy`) now offer the served model's own reasoning levels, so Claude Opus 4.7+ exposes `xhigh`/`max` instead of the generic `minimal`–`high` ladder.
++
++## [18.2.9-fork.1] - 2026-09-23
++
++### Added
++
++- The auth gateway now serves upstream's non-chat modalities (`/v1/systemone`, `/v1/images`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/rerank`, `/v1/videos`) through the fork's access control: each has its own ACL route family, draws on the caller's account pool, and records an audit row.
++
++### Changed
++
++- Re-based the fork onto upstream v18.2.9, whose TUI components moved into `@oh-my-pi/pi-tui`. The gateway connection-profile editor is now injected into the settings selector and the status line resolves the active-account chip through its host, so both keep working from the relocated components.
++
+ ## [18.14.0] - 2026-10-29
+ 
+ ### Breaking Changes
+@@ -1239,3 +1333,5 @@
+ - Fixed live config reload ignoring edits made during startup or right after a config symlink was retargeted, until the next unrelated edit.
+ 
+ Older entries are archived in [packages/coding-agent/CHANGELOG.md@6693ddbfd58c](https://github.com/can1357/oh-my-pi/blob/6693ddbfd58ce9edcdc0dc3fe98a8882c9bae834/packages/coding-agent/CHANGELOG.md).
++
++Older fork entries are archived in [packages/coding-agent/CHANGELOG.md@98ee86c3c7bd](https://github.com/arynyklas/oh-my-pi/blob/98ee86c3c7bd4dddc726cb32463c87c6ca14818c/packages/coding-agent/CHANGELOG.md).

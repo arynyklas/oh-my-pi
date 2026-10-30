@@ -1,0 +1,2876 @@
+diff --git a/packages/ai/src/auth-broker/discover.ts b/packages/ai/src/auth-broker/discover.ts
+index 20969f4..9f735ff 100644
+--- a/packages/ai/src/auth-broker/discover.ts
++++ b/packages/ai/src/auth-broker/discover.ts
+@@ -50,6 +50,10 @@ export interface DiscoverAuthStorageOptions {
+ 	accountPool?: AuthBrokerAccountPool;
+ 	accountPolicies?: AuthAccountPolicies;
+ 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
++	/** Per-provider default account, overriding `providers.defaultAccount` from config.yml. */
++	defaultAccounts?: Readonly<Record<string, string>>;
++	/** Per-provider ordered account preference, overriding `providers.accountPriority` from config.yml. */
++	accountPriorities?: Readonly<Record<string, readonly string[]>>;
+ }
+ 
+ /** Path to the local bearer token file. Created by `omp auth-broker token`. */
+@@ -85,6 +89,8 @@ interface ConfigSnapshot {
+ 	token?: string;
+ 	accountPolicies?: unknown;
+ 	usageReservePct?: unknown;
++	defaultAccounts?: Record<string, string>;
++	accountPriorities?: Record<string, string[]>;
+ }
+ 
+ /**
+@@ -206,6 +212,66 @@ function parseUsageReservePct(value: unknown): number {
+ 	return reservePct;
+ }
+ 
++/**
++ * Resolve a dotted config key to a string-valued record, accepting both nested
++ * (`providers: { defaultAccount: { … } }`) and the legacy flat literal-dot key
++ * (`"providers.defaultAccount": { … }`). Nested wins. Keeps only entries whose
++ * value is a non-empty string.
++ */
++function readDottedRecord(record: Record<string, unknown>, dottedKey: string): Record<string, string> | undefined {
++	let current: unknown = record;
++	for (const segment of dottedKey.split(".")) {
++		if (current === null || typeof current !== "object" || Array.isArray(current)) {
++			current = undefined;
++			break;
++		}
++		current = (current as Record<string, unknown>)[segment];
++	}
++	let source = current;
++	if (source === null || typeof source !== "object" || Array.isArray(source)) {
++		source = record[dottedKey];
++	}
++	if (source === null || typeof source !== "object" || Array.isArray(source)) return undefined;
++	const result: Record<string, string> = {};
++	for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
++		if (typeof value === "string" && value.trim().length > 0) result[key] = value;
++	}
++	return Object.keys(result).length > 0 ? result : undefined;
++}
++
++/**
++ * Resolve a dotted config key to a record of string ARRAYS, accepting the same
++ * nested/flat shapes as {@link readDottedRecord}. A bare string value is read
++ * as a one-entry list so `providers.accountPriority: { anthropic: me@x }` still
++ * means "pin this account".
++ */
++function readDottedListRecord(
++	record: Record<string, unknown>,
++	dottedKey: string,
++): Record<string, string[]> | undefined {
++	let current: unknown = record;
++	for (const segment of dottedKey.split(".")) {
++		if (current === null || typeof current !== "object" || Array.isArray(current)) {
++			current = undefined;
++			break;
++		}
++		current = (current as Record<string, unknown>)[segment];
++	}
++	let source = current;
++	if (source === null || typeof source !== "object" || Array.isArray(source)) {
++		source = record[dottedKey];
++	}
++	if (source === null || typeof source !== "object" || Array.isArray(source)) return undefined;
++	const result: Record<string, string[]> = {};
++	for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
++		const entries = (Array.isArray(value) ? value : [value]).filter(
++			(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
++		);
++		if (entries.length > 0) result[key] = entries;
++	}
++	return Object.keys(result).length > 0 ? result : undefined;
++}
++
+ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+ 	for (const filename of MAIN_CONFIG_FILENAMES) {
+ 		const configPath = path.join(agentDir, filename);
+@@ -234,6 +300,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+ 			token: readDottedString(record, "auth.broker.token"),
+ 			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
+ 			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
++			defaultAccounts: readDottedRecord(record, "providers.defaultAccount"),
++			accountPriorities: readDottedListRecord(record, "providers.accountPriority"),
+ 		};
+ 	}
+ 	return {};
+@@ -523,6 +591,12 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+ 		accountPolicies: options.accountPolicies,
+ 		usageReservePct: options.authStorageOptions?.defaultReservePct,
+ 	});
++	// The pin config rides the same main-config read; skip it only when the
++	// caller supplied both shapes programmatically.
++	const configSnapshot =
++		options.defaultAccounts && options.accountPriorities ? undefined : await readConfigYaml(agentDir);
++	const defaultAccounts = options.defaultAccounts ?? configSnapshot?.defaultAccounts;
++	const accountPriorities = options.accountPriorities ?? configSnapshot?.accountPriorities;
+ 	const { store, sourceLabel } = await openAuthCredentialStore({
+ 		brokerConfig,
+ 		agentDir,
+@@ -536,6 +610,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+ 		sourceLabel,
+ 		accountPolicies,
+ 		defaultReservePct,
++		defaultAccounts,
++		accountPriorities,
+ 	});
+ 	await storage.credentials.reload();
+ 	return storage;
+diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
+index cd5c16d..9d15e11 100644
+--- a/packages/ai/src/auth-storage.ts
++++ b/packages/ai/src/auth-storage.ts
+@@ -13,6 +13,11 @@
+  * - `resets` — saved rate-limit resets
+  * - `blocks` — persisted rate-limit blocks (auth-broker server seam)
+  *
++ * Fork additions stay flat on this class (they have no upstream namespace):
++ * per-provider default-account/priority pinning with its account-selection
++ * journal and fallover notices (`pins`), and the credential-pool selection
++ * policy (`keys.resolveApiKeySelection`) for servers that grant account pools.
++ *
+  * @example
+  * const auth = await AuthStorage.create(getAgentDbPath());
+  * await auth.credentials.reload();
+@@ -24,6 +29,7 @@ import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
+ import { KeyCascade, KeyOverrides } from "./auth/cascade";
+ import { CredentialHealth } from "./auth/health";
+ import { OAuthAccounts } from "./auth/oauth";
++import { AccountPins } from "./auth/pins";
+ import { AccountPolicies } from "./auth/policy";
+ import { CredentialPool } from "./auth/pool";
+ import { OAuthRefresher } from "./auth/refresh";
+@@ -33,15 +39,19 @@ import { CredentialSelector } from "./auth/select";
+ import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+ import type { AuthCredentialStore } from "./auth/store";
+ import type {
++	AccountSelectionEvent,
+ 	AuthAccountPolicies,
+ 	AuthApiKeyOptions,
++	AuthApiKeySelectionResult,
+ 	AuthCredential,
+ 	AuthStorageOptions,
+ 	BlocksApi,
+ 	CredentialsApi,
++	DefaultAccountFallover,
+ 	HealthApi,
+ 	KeysApi,
+ 	LimitsApi,
++	OAuthAccountIdentity,
+ 	OAuthApi,
+ 	ResetsApi,
+ 	SessionsApi,
+@@ -62,6 +72,7 @@ export {
+ } from "./auth/sqlite-credential-store";
+ export * from "./auth/store";
+ export * from "./auth/types";
++export * from "./auth/selection";
+ 
+ /** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
+ interface AuthStorageModules {
+@@ -74,6 +85,8 @@ interface AuthStorageModules {
+ 	limits: RateLimits;
+ 	resets: ResetCredits;
+ 	blocks: CredentialBlocks;
++	/** Fork: default-account/priority pins, resolved against this store's rows. */
++	pins: AccountPins;
+ }
+ 
+ /**
+@@ -154,9 +167,9 @@ export class AuthStorage {
+ 	 * Swap the backing credential store in place (live `auth.broker.url` change).
+ 	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
+ 	 * keyed by the old store's row ids — then closes the previous store. Runtime key
+-	 * overrides, account policies, session account restrictions, usage-provider
+-	 * overrides, and credential event subscribers carry over. On a load failure
+-	 * `store` is closed and the current store stays active.
++	 * overrides, account policies, session account restrictions, default-account/priority
++	 * selectors, usage-provider overrides, and credential event subscribers carry over. On
++	 * a load failure `store` is closed and the current store stays active.
+ 	 */
+ 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+ 		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+@@ -169,6 +182,7 @@ export class AuthStorage {
+ 		const previous = this.#modules;
+ 		next.pool.adoptSubscribers(previous.pool);
+ 		next.usage.adoptRuntimeProviders(previous.usage);
++		next.pins.adoptSelectors(previous.pins);
+ 		this.#modules = next;
+ 		previous.pool.close();
+ 		next.pool.bump("store-replaced");
+@@ -186,6 +200,7 @@ export class AuthStorage {
+ 			onReset: provider => {
+ 				selector.resetRoundRobin(provider);
+ 				affinity.clearProvider(provider);
++				pins.forgetProvider(provider);
+ 			},
+ 		});
+ 		const refresher = new OAuthRefresher({
+@@ -197,10 +212,11 @@ export class AuthStorage {
+ 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
+ 		// Key reports by the effective provider (runtime extension override first), so an
+ 		// override's `cacheVersion` separates its rows from other processes sharing the store.
+-		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
++		const usageCache: UsageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
+ 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
+-		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
+-		const usage = new UsageService({
++		const pins = new AccountPins(pool, blocks, options.defaultAccounts, options.accountPriorities);
++		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions, pins);
++		const usage: UsageService = new UsageService({
+ 			store,
+ 			pool,
+ 			overrides,
+@@ -223,10 +239,12 @@ export class AuthStorage {
+ 			store,
+ 			pool,
+ 			policies,
++			pins,
+ 			blocks,
+ 			affinity,
+ 			usage,
+ 			refresher,
++			overrides,
+ 			strategies,
+ 		});
+ 		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
+@@ -235,6 +253,7 @@ export class AuthStorage {
+ 			overrides,
+ 			selector,
+ 			affinity,
++			pins,
+ 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
+ 			sourceLabel,
+ 		});
+@@ -261,6 +280,7 @@ export class AuthStorage {
+ 			limits,
+ 			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+ 			blocks,
++			pins,
+ 		};
+ 	}
+ 
+@@ -290,4 +310,100 @@ export class AuthStorage {
+ 	reload(): Promise<void> {
+ 		return this.credentials.reload();
+ 	}
++
++	// ── Fork feature: credential-pool selection policy ──────────────────────
++
++	/**
++	 * Resolve a bearer together with the durable row and cascade leg that
++	 * supplied it. With {@link AuthApiKeyOptions.selection} the walk stays
++	 * inside the granted pool and reports exhaustion instead of falling
++	 * through the cascade.
++	 */
++	resolveApiKeySelection(
++		provider: string,
++		sessionId?: string,
++		options?: AuthApiKeyOptions,
++	): Promise<AuthApiKeySelectionResult> {
++		return this.keys.resolveApiKeySelection(provider, sessionId, options);
++	}
++
++	// ── Fork feature: per-provider account pins ─────────────────────────────
++
++	/** Configured default-account selector for `provider`, verbatim, or undefined. */
++	getDefaultAccountSelector(provider: string): string | undefined {
++		return this.#modules.pins.getDefaultAccountSelector(provider);
++	}
++
++	/** Durable credential id the configured default resolves to, or undefined. */
++	getDefaultAccountCredentialId(provider: string): number | undefined {
++		return this.#modules.pins.getDefaultAccountCredentialId(provider);
++	}
++
++	/** Identity of the configured default OAuth account, for display. Undefined for api_key rows. */
++	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
++		return this.#modules.pins.getDefaultAccountIdentity(provider);
++	}
++
++	/**
++	 * Replace the in-memory default selector so a `/account default` change
++	 * takes effect without restarting. Passing `undefined` clears it. Sessions
++	 * already bound to another account — the primary and every advisor
++	 * provider-session — release their sticky so the new pin serves the next
++	 * request instead of taking effect only on restart.
++	 */
++	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
++		const { pins, sessions } = this.#modules;
++		if (pins.setDefaultAccountSelector(provider, selector)) {
++			sessions.clearProvider(provider);
++		}
++	}
++
++	/** Configured `providers.accountPriority` selectors for `provider`, in order. */
++	getAccountPrioritySelectors(provider: string): readonly string[] {
++		return this.#modules.pins.getAccountPrioritySelectors(provider);
++	}
++
++	/** Durable credential ids the configured priority list resolves to, in order. */
++	getAccountPriorityCredentialIds(provider: string): readonly number[] {
++		return this.#modules.pins.getAccountPriorityCredentialIds(provider);
++	}
++
++	/**
++	 * Selector string that resolves to exactly `credentialId` for `provider`:
++	 * the most portable unique identity, else the durable `#<credentialId>` form.
++	 */
++	describeAccountSelector(provider: string, credentialId: number): string | undefined {
++		return this.#modules.pins.describeAccountSelector(provider, credentialId);
++	}
++
++	/**
++	 * Replace the in-memory account priority order so an `/account priority`
++	 * change takes effect without restarting. Passing `undefined` (or an empty
++	 * list) clears it, which also unpins the head-derived default. Like
++	 * {@link AuthStorage.setDefaultAccountSelector}, bound sessions release
++	 * their sticky so the new order applies to the next request.
++	 */
++	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): void {
++		const { pins, sessions } = this.#modules;
++		if (pins.setAccountPrioritySelectors(provider, selectors)) {
++			sessions.clearProvider(provider);
++		}
++	}
++
++	/** Take the pending fallover notice for `(provider, sessionId)`, if any. Consumes it. */
++	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
++		return this.#modules.pins.consumeDefaultAccountFallover(provider, sessionId);
++	}
++
++	/**
++	 * Account-selection journal for this process, oldest first: which account
++	 * started serving a session, and why. Powers `/account`'s session log.
++	 */
++	listAccountSelectionEvents(options?: {
++		provider?: string;
++		sessionId?: string;
++		limit?: number;
++	}): readonly AccountSelectionEvent[] {
++		return this.#modules.pins.listAccountSelectionEvents(options);
++	}
+ }
+diff --git a/packages/ai/test/auth-storage-account-priority.test.ts b/packages/ai/test/auth-storage-account-priority.test.ts
+new file mode 100644
+index 0000000..98bce8e
+--- /dev/null
++++ b/packages/ai/test/auth-storage-account-priority.test.ts
+@@ -0,0 +1,239 @@
++import { Database } from "bun:sqlite";
++import { afterEach, describe, expect, test } from "bun:test";
++import { type AuthCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
++import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
++import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
++import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
++
++const SOURCE = "auth-storage-account-priority-test";
++/** Real provider id: plan-gated model routing and the Codex ranking strategy are provider-keyed. */
++const PROVIDER = "openai-codex";
++/** `plan-requirement provider="openai-codex" tier="paid"` in the catalog rules. */
++const PLAN_GATED_MODEL = "gpt-5.6-sol";
++const PLAN_FREE_MODEL = "gpt-5.3-codex";
++const HOUR_MS = 60 * 60 * 1000;
++
++function oauthCredential(label: string, overrides?: Partial<OAuthCredentials>): AuthCredential {
++	return {
++		type: "oauth",
++		access: `access-${label}`,
++		refresh: `refresh-${label}`,
++		expires: Date.now() + HOUR_MS,
++		accountId: `account-${label}`,
++		email: `${label}@example.com`,
++		...overrides,
++	};
++}
++
++/** Codex-shaped usage: a 5h window plus the paid plan type the plan filter reads. */
++function usageReport(accountId: string, usedFraction: number): UsageReport {
++	const limit: UsageLimit = {
++		id: `${PROVIDER}:primary`,
++		label: "5h",
++		scope: { provider: PROVIDER, windowId: "5h", shared: true },
++		window: { id: "5h", label: "5 Hour", durationMs: 5 * HOUR_MS, resetsAt: Date.now() + 4 * HOUR_MS },
++		amount: {
++			unit: "percent",
++			used: usedFraction * 100,
++			limit: 100,
++			remaining: Math.max(0, 100 - usedFraction * 100),
++			usedFraction,
++			remainingFraction: Math.max(0, 1 - usedFraction),
++		},
++		status: "ok",
++	};
++	return {
++		provider: PROVIDER,
++		fetchedAt: Date.now(),
++		limits: [limit],
++		metadata: { accountId, email: `${accountId}@example.com`, planType: "chatgpt_pro" },
++	};
++}
++
++const cleanups: Array<() => void> = [];
++
++function createStorage(
++	opts: {
++		defaultAccounts?: Record<string, string>;
++		accountPriorities?: Record<string, string[]>;
++		/** accountId -> usage; omitted accounts report no usage. */
++		usageByAccount?: Map<string, UsageReport>;
++	} = {},
++): { store: SqliteAuthCredentialStore; storage: AuthStorage } {
++	registerOAuthProvider({
++		id: PROVIDER,
++		name: "Account Priority Unit Provider",
++		sourceId: SOURCE,
++		async login() {
++			return { access: "login", refresh: "login", expires: Date.now() + HOUR_MS };
++		},
++		async refreshToken(credentials) {
++			return credentials;
++		},
++		getApiKey(credentials) {
++			return credentials.access;
++		},
++	});
++	const store = new SqliteAuthCredentialStore(new Database(":memory:"));
++	const usageByAccount = opts.usageByAccount;
++	const usageProvider: UsageProvider = {
++		id: PROVIDER,
++		async fetchUsage(params) {
++			const accountId = params.credential.accountId;
++			return accountId ? (usageByAccount?.get(accountId) ?? null) : null;
++		},
++	};
++	const storage = new AuthStorage(store, {
++		usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
++		defaultAccounts: opts.defaultAccounts,
++		accountPriorities: opts.accountPriorities,
++	});
++	cleanups.push(() => {
++		storage.close();
++		store.close();
++	});
++	return { store, storage };
++}
++
++async function resolvedCredentialId(
++	storage: AuthStorage,
++	sessionId: string,
++	modelId: string,
++): Promise<number | undefined> {
++	const result = await storage.resolveApiKeySelection(PROVIDER, sessionId, { modelId });
++	return result.ok ? result.credential.credentialId : undefined;
++}
++
++describe("AuthStorage account priority", () => {
++	afterEach(() => {
++		for (const dispose of cleanups.splice(0)) dispose();
++		unregisterOAuthProviders(SOURCE);
++	});
++
++	// Regression: plan-gated Codex models force usage ranking even when a
++	// default is pinned, which silently routed advisor traffic (advisor models
++	// are typically plan-gated) to whichever account had cooler quota.
++	test("plan-gated model keeps the pinned default instead of the cooler sibling", async () => {
++		const usageByAccount = new Map([
++			["account-a", usageReport("account-a", 0.05)],
++			["account-b", usageReport("account-b", 0.8)],
++		]);
++		const { store, storage } = createStorage({
++			defaultAccounts: { [PROVIDER]: "b@example.com" },
++			usageByAccount,
++		});
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
++
++		expect(await resolvedCredentialId(storage, "plan-free", PLAN_FREE_MODEL)).toBe(bId);
++		expect(await resolvedCredentialId(storage, "plan-gated", PLAN_GATED_MODEL)).toBe(bId);
++	});
++
++	test("priority list serves its head and walks down the order when an account is blocked", async () => {
++		const { store, storage } = createStorage({
++			accountPriorities: { [PROVIDER]: ["b@example.com", "a@example.com"] },
++		});
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		// The head of the priority list is the pinned default.
++		expect(storage.getDefaultAccountCredentialId(PROVIDER)).toBe(bId);
++		expect(storage.getAccountPriorityCredentialIds(PROVIDER)).toEqual([bId, aId]);
++
++		const session = "priority";
++		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(bId);
++		await storage.limits.markReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
++		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(aId);
++	});
++
++	test("journals why each account started serving a session", async () => {
++		const { store, storage } = createStorage({
++			accountPriorities: { [PROVIDER]: ["b@example.com", "a@example.com"] },
++		});
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		const session = "journal";
++
++		await resolvedCredentialId(storage, session, PLAN_GATED_MODEL);
++		await storage.limits.markReached(PROVIDER, session, { credentialId: bId, retryAfterMs: HOUR_MS });
++		await resolvedCredentialId(storage, session, PLAN_GATED_MODEL);
++
++		const events = storage.listAccountSelectionEvents({ sessionId: session });
++		expect(events.map(event => ({ id: event.credentialId, reason: event.reason }))).toEqual([
++			{ id: bId, reason: "pinned-default" },
++			{ id: aId, reason: "fallover-blocked" },
++		]);
++		expect(events[1]?.previousCredentialId).toBe(bId);
++		expect(events[1]?.email).toBe("a@example.com");
++		// Another session's history is not mixed in.
++		expect(storage.listAccountSelectionEvents({ sessionId: "other" })).toHaveLength(0);
++	});
++
++	test("changing the order mid-session moves an already-bound session to the new head", async () => {
++		const { store, storage } = createStorage({
++			accountPriorities: { [PROVIDER]: ["a@example.com", "b@example.com"] },
++		});
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		const session = "live-edit";
++
++		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(aId);
++		storage.setAccountPrioritySelectors(PROVIDER, ["b@example.com", "a@example.com"]);
++		expect(await resolvedCredentialId(storage, session, PLAN_GATED_MODEL)).toBe(bId);
++		// The edit released the sticky, but the log must still name what the
++		// session moved away from rather than reading as a first binding.
++		const move = storage.listAccountSelectionEvents({ sessionId: session }).at(-1);
++		expect(move).toMatchObject({ credentialId: bId, previousCredentialId: aId, reason: "pinned-default" });
++		// Clearing the list unpins entirely: nothing is reported as the default.
++		storage.setAccountPrioritySelectors(PROVIDER, undefined);
++		expect(storage.getDefaultAccountCredentialId(PROVIDER)).toBeUndefined();
++		expect(storage.getAccountPriorityCredentialIds(PROVIDER)).toEqual([]);
++	});
++
++	// `/account default <x>` goes through setDefaultAccountSelector, a separate
++	// setter from the priority one, and the reported failure was an advisor
++	// session that had already bound a credential.
++	test("changing the default mid-session rebinds an already-bound advisor session", async () => {
++		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		// Advisors resolve under their own provider-session id.
++		const advisorSession = "session-advisor-architect";
++
++		expect(await resolvedCredentialId(storage, advisorSession, PLAN_GATED_MODEL)).toBe(aId);
++		storage.setDefaultAccountSelector(PROVIDER, "b@example.com");
++		expect(await resolvedCredentialId(storage, advisorSession, PLAN_GATED_MODEL)).toBe(bId);
++		expect(storage.listAccountSelectionEvents({ sessionId: advisorSession }).at(-1)).toMatchObject({
++			credentialId: bId,
++			previousCredentialId: aId,
++		});
++	});
++
++	test("describeAccountSelector falls back to #<id> when an identity is shared", async () => {
++		const { store, storage } = createStorage();
++		await storage.credentials.set(PROVIDER, [
++			oauthCredential("team", { email: "team@example.com", accountId: "acct-1", orgId: "org-1" }),
++			oauthCredential("team2", { email: "team@example.com", accountId: "acct-2", orgId: "org-2" }),
++			oauthCredential("solo"),
++		]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const sharedEmailId = rows[0]!.id;
++		const soloId = rows[2]!.id;
++
++		// Shared email, distinct account ids: the unique identity wins over `#<id>`.
++		expect(storage.describeAccountSelector(PROVIDER, sharedEmailId)).toBe("acct-1");
++		expect(storage.describeAccountSelector(PROVIDER, soloId)).toBe("solo@example.com");
++		expect(storage.describeAccountSelector(PROVIDER, 9999)).toBeUndefined();
++
++		// A selector describeAccountSelector produced must resolve back to its row.
++		storage.setAccountPrioritySelectors(PROVIDER, [storage.describeAccountSelector(PROVIDER, sharedEmailId)!]);
++		expect(storage.getDefaultAccountCredentialId(PROVIDER)).toBe(sharedEmailId);
++	});
++});
+diff --git a/packages/ai/test/auth-storage-claude-block-healing.test.ts b/packages/ai/test/auth-storage-claude-block-healing.test.ts
+new file mode 100644
+index 0000000..1bd43b6
+--- /dev/null
++++ b/packages/ai/test/auth-storage-claude-block-healing.test.ts
+@@ -0,0 +1,320 @@
++import { Database } from "bun:sqlite";
++import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
++import { scheduler } from "node:timers/promises";
++import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
++import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
++import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
++
++const PROVIDER = "anthropic";
++const PROVIDER_KEY = "anthropic:oauth";
++const EMAIL = "recovered@example.com";
++const HOUR_MS = 60 * 60_000;
++
++function limit(windowId: "5h" | "7d", usedFraction: number, tier?: string): UsageLimit {
++	return {
++		id: `anthropic:${windowId}${tier ? `:${tier}` : ""}`,
++		label: tier ?? windowId,
++		scope: { provider: PROVIDER, windowId, ...(tier ? { tier } : { shared: true }) },
++		window: { id: windowId, label: windowId, resetsAt: Date.now() + 40 * HOUR_MS },
++		amount: { unit: "percent", usedFraction },
++		status: usedFraction >= 1 ? "exhausted" : "ok",
++	};
++}
++
++function healthyReport(): UsageReport {
++	return {
++		provider: PROVIDER,
++		fetchedAt: Date.now(),
++		metadata: { email: EMAIL, accountId: EMAIL },
++		limits: [limit("5h", 0), limit("7d", 0.02), limit("7d", 0, "fable")],
++	};
++}
++
++describe("Claude stale quota block recovery", () => {
++	let db: Database;
++	let store: SqliteAuthCredentialStore;
++	let storage: AuthStorage;
++	let credentialId: number;
++	let report: UsageReport | null;
++	let deadline: number;
++	const usageProvider: UsageProvider = {
++		id: PROVIDER,
++		async fetchUsage(params) {
++			return params.credential.email === EMAIL
++				? report
++				: { ...healthyReport(), metadata: { email: "sibling@example.com" } };
++		},
++	};
++
++	beforeEach(async () => {
++		db = new Database(":memory:");
++		store = new SqliteAuthCredentialStore(db);
++		storage = new AuthStorage(store, {
++			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
++			defaultAccounts: { [PROVIDER]: EMAIL },
++		});
++		await storage.credentials.set(
++			PROVIDER,
++			[EMAIL, "sibling@example.com"].map(email => ({
++				type: "oauth" as const,
++				access: `access-${email}`,
++				refresh: `refresh-${email}`,
++				expires: Date.now() + HOUR_MS,
++				accountId: email,
++				email,
++			})),
++		);
++		credentialId = store.listAuthCredentials(PROVIDER)[0]!.id;
++		report = healthyReport();
++		deadline = Date.now() + 39 * HOUR_MS;
++	});
++
++	afterEach(() => {
++		vi.restoreAllMocks();
++		storage.close();
++		store.close();
++	});
++
++	function block(scope = "", ageMs = 10 * 60_000): void {
++		db.query(
++			"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
++		).run(credentialId, PROVIDER_KEY, scope, deadline, Math.floor((Date.now() - ageMs) / 1000));
++	}
++
++	test("a resumed sibling pin does not report exhaustion of an unblocked default", async () => {
++		const sessionId = "resumed-sibling";
++		const siblingId = store.listAuthCredentials(PROVIDER)[1]!.id;
++		storage.sessions.pin(PROVIDER, sessionId, siblingId);
++		const persisted = db.serialize();
++		storage.close();
++		db = Database.deserialize(persisted);
++		store = new SqliteAuthCredentialStore(db);
++		storage = new AuthStorage(store, {
++			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
++			defaultAccounts: { [PROVIDER]: EMAIL },
++		});
++		await storage.credentials.reload();
++
++		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
++			"access-sibling@example.com",
++		);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
++		// The explicit session command can select the recovered default without
++		// changing other sessions or pretending the previous pin was exhausted.
++		storage.sessions.pin(PROVIDER, sessionId, credentialId);
++		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
++	});
++
++	test("returning to the recovered default clears an undelivered fallover notice", async () => {
++		const sessionId = "recovered-before-notice";
++		block("", 0);
++		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
++			"access-sibling@example.com",
++		);
++		store.deleteCredentialBlock(credentialId, PROVIDER_KEY, "");
++		storage.sessions.pin(PROVIDER, sessionId, credentialId);
++
++		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(`access-${EMAIL}`);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
++	});
++
++	test("a real tier-scoped fallover reports that model quota's retry deadline", async () => {
++		const sessionId = "tier-fallover-notice";
++		block("tier:fable", 0);
++		expect(await storage.getApiKey(PROVIDER, sessionId, { modelId: "claude-fable-5" })).toBe(
++			"access-sibling@example.com",
++		);
++		const notice = storage.consumeDefaultAccountFallover(PROVIDER, sessionId);
++		expect(notice?.retryAtMs).toBe(deadline);
++		expect(notice?.defaultCredentialId).toBe(credentialId);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, sessionId)).toBeUndefined();
++	});
++
++	test("usage refresh clears a stale persisted block and restores the default account", async () => {
++		block();
++		await storage.usage.reports();
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBeUndefined();
++		expect(await storage.getApiKey(PROVIDER, "after-usage", { modelId: "claude-opus-4-8" })).toBe(`access-${EMAIL}`);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, "after-usage")).toBeUndefined();
++	});
++
++	test("selection rechecks a stale default without requiring the user to open usage", async () => {
++		block();
++		expect(await storage.getApiKey(PROVIDER, "fresh-session", { modelId: "claude-opus-4-8" })).toBe(
++			`access-${EMAIL}`,
++		);
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBeUndefined();
++	});
++
++	test("model usage health rechecks a recovered account instead of reporting depleted", async () => {
++		block();
++		const health = await storage.health.model(PROVIDER, {
++			modelId: "claude-fable-5",
++			reserveFraction: 0.1,
++		});
++		expect(health.accounts.find(account => account.credentialId === credentialId)?.state).toBe("healthy");
++	});
++
++	test("cancelling a blocked default does not wait for its shared usage probe", async () => {
++		block();
++		const entered = Promise.withResolvers<void>();
++		const response = Promise.withResolvers<UsageReport | null>();
++		vi.spyOn(usageProvider, "fetchUsage").mockImplementation(async () => {
++			entered.resolve();
++			return response.promise;
++		});
++		const controller = new AbortController();
++		const pending = storage.getApiKey(PROVIDER, "cancelled-probe", { signal: controller.signal }).then(
++			() => "selected",
++			() => "aborted",
++		);
++		try {
++			await entered.promise;
++			controller.abort();
++			expect(await Promise.race([pending, scheduler.yield().then(() => "still waiting")])).toBe("aborted");
++		} finally {
++			response.resolve(report);
++			await pending;
++			await storage.usage.reports();
++		}
++	});
++
++	test("a sibling removed during a healing probe cannot replace the default by index", async () => {
++		const rows = store.listAuthCredentials(PROVIDER);
++		await storage.credentials.remove(PROVIDER);
++		await storage.credentials.set(PROVIDER, [
++			rows[1]!.credential,
++			rows[0]!.credential,
++			{
++				...rows[1]!.credential,
++				type: "oauth",
++				access: "access-third",
++				refresh: "refresh-third",
++				expires: Date.now() + HOUR_MS,
++				email: "third@example.com",
++				accountId: "third@example.com",
++			},
++		]);
++		const reordered = store.listAuthCredentials(PROVIDER);
++		credentialId = reordered.find(row => row.credential.type === "oauth" && row.credential.email === EMAIL)!.id;
++		block();
++		const entered = Promise.withResolvers<void>();
++		const response = Promise.withResolvers<UsageReport | null>();
++		vi.spyOn(usageProvider, "fetchUsage").mockImplementation(async () => {
++			entered.resolve();
++			return response.promise;
++		});
++		const pending = storage.getApiKey(PROVIDER, "reindexed-probe", { modelId: "claude-fable-5" });
++		await entered.promise;
++		await storage.credentials.removeById(PROVIDER, reordered[0]!.id);
++		response.resolve(report);
++		expect(await pending).toBe(`access-${EMAIL}`);
++	});
++
++	test("a recovered tier does not clear a different exhausted tier", async () => {
++		block("tier:fable");
++		block("tier:mythos");
++		report!.limits.push(limit("7d", 1, "mythos"));
++		await storage.usage.reports();
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBeUndefined();
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:mythos")).toBe(deadline);
++		expect(await storage.getApiKey(PROVIDER, "fable-recovered", { modelId: "claude-fable-5" })).toBe(
++			`access-${EMAIL}`,
++		);
++		expect(await storage.getApiKey(PROVIDER, "mythos-blocked", { modelId: "claude-mythos-5" })).toBe(
++			"access-sibling@example.com",
++		);
++	});
++
++	test("a healthy tier cannot clear a block while the shared weekly limit is exhausted", async () => {
++		block("tier:fable");
++		report!.limits[1] = limit("7d", 1);
++		await storage.usage.reports();
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBe(deadline);
++	});
++
++	test("a recent rate-limit block survives a lagging healthy report", async () => {
++		block("", 0);
++		await storage.usage.reports();
++		expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBe(deadline);
++	});
++
++	test.each(["exhausted", "uncapped"])(
++		"display-only extra usage does not prevent model quota recovery: %s",
++		async extraUsage => {
++			block();
++			report = await claudeUsageProvider.fetchUsage(
++				{
++					provider: PROVIDER,
++					credential: { type: "oauth", accessToken: "test-access", email: EMAIL, accountId: EMAIL },
++				},
++				{
++					fetch: async () =>
++						Response.json({
++							five_hour: { utilization: 0 },
++							seven_day: { utilization: 2 },
++							extra_usage: {
++								is_enabled: true,
++								used_credits: 10000,
++								monthly_limit: extraUsage === "exhausted" ? 10000 : null,
++								decimal_places: 2,
++								currency: "USD",
++							},
++						}),
++				},
++			);
++			await storage.usage.reports();
++			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBeUndefined();
++			expect(await storage.getApiKey(PROVIDER, `extra-${extraUsage}`, { modelId: "claude-fable-5" })).toBe(
++				`access-${EMAIL}`,
++			);
++		},
++	);
++
++	test.each(["unknown scoped counter", "negative shared utilization"])(
++		"malformed endpoint counters cannot authorize global recovery: %s",
++		async reason => {
++			block();
++			report = await claudeUsageProvider.fetchUsage(
++				{
++					provider: PROVIDER,
++					credential: { type: "oauth", accessToken: "test-access", email: EMAIL, accountId: EMAIL },
++				},
++				{
++					fetch: async () =>
++						Response.json({
++							five_hour: { utilization: reason === "negative shared utilization" ? -1 : 0 },
++							seven_day: { utilization: 2 },
++							limits: [
++								{
++									kind: "weekly_scoped",
++									percent: reason === "unknown scoped counter" ? null : 0,
++									scope: { model: { display_name: "Fable" } },
++								},
++							],
++						}),
++				},
++			);
++			await storage.usage.reports();
++			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "")).toBe(deadline);
++		},
++	);
++
++	test.each(["missing weekly", "unknown weekly", "missing tier", "headers only", "failed fetch"])(
++		"incomplete quota evidence preserves the block: %s",
++		async reason => {
++			block("tier:fable");
++			if (reason === "missing weekly") report!.limits.splice(1, 1);
++			if (reason === "unknown weekly") {
++				report!.limits[1]!.amount = { unit: "percent" };
++				report!.limits[1]!.status = "unknown";
++			}
++			if (reason === "missing tier") report!.limits.pop();
++			if (reason === "headers only") report!.metadata!.source = "ratelimit-headers";
++			if (reason === "failed fetch") report = null;
++			await storage.usage.reports();
++			expect(store.getCredentialBlock(credentialId, PROVIDER_KEY, "tier:fable")).toBe(deadline);
++		},
++	);
++});
+diff --git a/packages/ai/test/auth-storage-codex-selection.test.ts b/packages/ai/test/auth-storage-codex-selection.test.ts
+index 586d507..b7cdb94 100644
+--- a/packages/ai/test/auth-storage-codex-selection.test.ts
++++ b/packages/ai/test/auth-storage-codex-selection.test.ts
+@@ -11,7 +11,12 @@ import {
+ 	type SnapshotResponse,
+ 	startAuthBroker,
+ } from "@oh-my-pi/pi-ai/auth-broker";
+-import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
++import {
++	type AuthCredentialSelectionPolicy,
++	type AuthCredentialStore,
++	AuthStorage,
++	SqliteAuthCredentialStore,
++} from "@oh-my-pi/pi-ai/auth-storage";
+ import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
+ import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+@@ -2890,6 +2895,56 @@ describe("AuthStorage codex oauth ranking", () => {
+ 		expect(apiKey).toBe("api-acct-paid");
+ 	});
+ 
++	test("explicit failover skips a plan-ineligible OAuth member using full-pool eligibility", async () => {
++		if (!authStorage || !store) throw new Error("test setup failed");
++
++		await authStorage.credentials.set("openai-codex", [
++			{ type: "oauth", ...createCredential("acct-free", "free@example.com") },
++			{ type: "oauth", ...createCredential("acct-paid", "paid@example.com") },
++		]);
++		const [freeRow, paidRow] = store.listAuthCredentials("openai-codex");
++		if (!freeRow || !paidRow) throw new Error("expected oauth rows");
++		usageByAccount.set(
++			"acct-free",
++			createCodexUsageReport({
++				accountId: "acct-free",
++				primary: { usedFraction: 0.01, resetInMs: 30 * 60 * 1000 },
++				secondary: { usedFraction: 0.01, resetInMs: 6 * 24 * 60 * 60 * 1000 },
++				metadata: { planType: "free", email: "free@example.com" },
++			}),
++		);
++		usageByAccount.set(
++			"acct-paid",
++			createCodexUsageReport({
++				accountId: "acct-paid",
++				primary: { usedFraction: 0.8, resetInMs: 30 * 60 * 1000 },
++				secondary: { usedFraction: 0.8, resetInMs: 6 * 24 * 60 * 60 * 1000 },
++				metadata: { planType: "plus", email: "paid@example.com" },
++			}),
++		);
++		const selected: AuthCredentialSelectionPolicy = {
++			policyKey: "codex-full-pool-plan",
++			eligibleCredentialIds: [freeRow.id, paidRow.id],
++			strategy: "failover",
++		};
++
++		await expect(
++			authStorage.resolveApiKeySelection("openai-codex", "codex-full-pool-plan", {
++				modelId: "gpt-5.6-sol",
++				selection: selected,
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: {
++				apiKey: "api-acct-paid",
++				credentialId: paidRow.id,
++				credentialType: "oauth",
++				source: "oauth",
++				oauthIdentity: { orgId: undefined, region: undefined, inferenceRegion: undefined },
++			},
++		});
++	});
++
+ 	test.each([
+ 		["gpt-5.6-terra", "free", "enterprise"],
+ 		["gpt-5.6-terra-pro", "go", "pro"],
+diff --git a/packages/ai/test/auth-storage-default-account.test.ts b/packages/ai/test/auth-storage-default-account.test.ts
+new file mode 100644
+index 0000000..654e3b6
+--- /dev/null
++++ b/packages/ai/test/auth-storage-default-account.test.ts
+@@ -0,0 +1,258 @@
++import { Database } from "bun:sqlite";
++import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
++import { type AuthCredential, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
++import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
++import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
++import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
++
++const SOURCE = "auth-storage-default-account-test";
++const PROVIDER = "unit-default-account";
++const HOUR_MS = 60 * 60 * 1000;
++const WEEK_MS = 7 * 24 * HOUR_MS;
++
++function oauthCredential(label: string, overrides?: Partial<OAuthCredentials>): AuthCredential {
++	return {
++		type: "oauth",
++		access: `access-${label}`,
++		refresh: `refresh-${label}`,
++		expires: Date.now() + HOUR_MS,
++		accountId: `account-${label}`,
++		email: `${label}@example.com`,
++		...overrides,
++	};
++}
++
++function apiKeyCredential(key: string): AuthCredential {
++	return { type: "api_key", key };
++}
++
++function usageReport(accountId: string, usedFraction: number): UsageReport {
++	const limit: UsageLimit = {
++		id: `${PROVIDER}:primary`,
++		label: "Primary Window",
++		scope: { provider: PROVIDER, windowId: "1h", shared: true },
++		window: { id: "1h", label: "1 Hour", durationMs: HOUR_MS, resetsAt: Date.now() + WEEK_MS },
++		amount: {
++			unit: "percent",
++			used: usedFraction * 100,
++			limit: 100,
++			remaining: Math.max(0, 100 - usedFraction * 100),
++			usedFraction,
++			remainingFraction: Math.max(0, 1 - usedFraction),
++		},
++		status: usedFraction >= 1 ? "exhausted" : "ok",
++	};
++	return {
++		provider: PROVIDER,
++		fetchedAt: Date.now(),
++		limits: [limit],
++		metadata: { accountId, email: `${accountId}@example.com`, planType: "pro" },
++	};
++}
++
++const cleanups: Array<() => void> = [];
++
++function createStorage(
++	opts: {
++		withStrategy?: boolean;
++		defaultAccounts?: Record<string, string>;
++		usageByAccount?: Map<string, UsageReport>;
++	} = {},
++): { store: SqliteAuthCredentialStore; storage: AuthStorage } {
++	const store = new SqliteAuthCredentialStore(new Database(":memory:"));
++	const usageByAccount = opts.usageByAccount ?? new Map<string, UsageReport>();
++	const usageProvider: UsageProvider = {
++		id: PROVIDER,
++		async fetchUsage(params) {
++			const accountId = params.credential.accountId;
++			return accountId ? (usageByAccount.get(accountId) ?? null) : null;
++		},
++	};
++	const rankingStrategy: CredentialRankingStrategy = {
++		findWindowLimits(report) {
++			return { primary: report.limits[0] };
++		},
++		windowDefaults: { primaryMs: HOUR_MS, secondaryMs: WEEK_MS },
++	};
++	const storage = new AuthStorage(store, {
++		usageProviderResolver: provider => (opts.withStrategy && provider === PROVIDER ? usageProvider : undefined),
++		rankingStrategyResolver: provider => (opts.withStrategy && provider === PROVIDER ? rankingStrategy : undefined),
++		defaultAccounts: opts.defaultAccounts,
++	});
++	cleanups.push(() => {
++		storage.close();
++		store.close();
++	});
++	return { store, storage };
++}
++
++async function resolvedCredentialId(storage: AuthStorage, sessionId: string): Promise<number | undefined> {
++	const result = await storage.resolveApiKeySelection(PROVIDER, sessionId);
++	return result.ok ? result.credential.credentialId : undefined;
++}
++
++describe("AuthStorage providers.defaultAccount", () => {
++	afterEach(() => {
++		for (const dispose of cleanups.splice(0)) dispose();
++		unregisterOAuthProviders(SOURCE);
++		setSystemTime();
++	});
++
++	function registerProvider(): void {
++		registerOAuthProvider({
++			id: PROVIDER,
++			name: "Default Account Unit Provider",
++			sourceId: SOURCE,
++			async login() {
++				return { access: "login", refresh: "login", expires: Date.now() + HOUR_MS };
++			},
++			async refreshToken(credentials) {
++				return credentials;
++			},
++			getApiKey(credentials) {
++				return credentials.access;
++			},
++		});
++	}
++
++	test("configured default pins every session; unset spreads load across accounts", async () => {
++		registerProvider();
++		// Baseline: no default configured — distinct sessions spread across both accounts.
++		{
++			const { storage } = createStorage();
++			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++			const seen = new Set<number>();
++			for (let i = 0; i < 20; i++) {
++				const id = await resolvedCredentialId(storage, `spread-${i}`);
++				if (id !== undefined) seen.add(id);
++			}
++			expect(seen.size).toBe(2);
++		}
++		// With default = b@example.com — every distinct session resolves to B.
++		{
++			const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "b@example.com" } });
++			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++			const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
++			for (let i = 0; i < 20; i++) {
++				expect(await resolvedCredentialId(storage, `pin-${i}`)).toBe(bId);
++			}
++		}
++	});
++
++	test("default suppresses live-usage ranking that would otherwise prefer the lighter sibling", async () => {
++		registerProvider();
++		const usageByAccount = new Map<string, UsageReport>([
++			["account-a", usageReport("account-a", 0.1)],
++			["account-b", usageReport("account-b", 0.9)],
++		]);
++		// Without a default, ranking drains toward the lighter account A.
++		{
++			const { store, storage } = createStorage({ withStrategy: true, usageByAccount });
++			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++			const aId = store.listAuthCredentials(PROVIDER)[0]!.id;
++			expect(await resolvedCredentialId(storage, "rank")).toBe(aId);
++		}
++		// With default = the heavier account B, ranking is suppressed and B still wins.
++		{
++			const { store, storage } = createStorage({
++				withStrategy: true,
++				usageByAccount,
++				defaultAccounts: { [PROVIDER]: "b@example.com" },
++			});
++			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++			const bId = store.listAuthCredentials(PROVIDER)[1]!.id;
++			expect(await resolvedCredentialId(storage, "rank-default")).toBe(bId);
++		}
++	});
++
++	test("blocked default falls over to a sibling and reports the fallover exactly once", async () => {
++		registerProvider();
++		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		const session = "fallover";
++
++		expect(await resolvedCredentialId(storage, session)).toBe(aId);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, session)).toBeUndefined();
++
++		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
++		expect(await resolvedCredentialId(storage, session)).toBe(bId);
++
++		const fallover = storage.consumeDefaultAccountFallover(PROVIDER, session);
++		expect(fallover?.defaultCredentialId).toBe(aId);
++		expect(fallover?.usedCredentialId).toBe(bId);
++		// Drained once.
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, session)).toBeUndefined();
++	});
++
++	test("session stays on the sibling after fallover; a fresh session returns to the default", async () => {
++		registerProvider();
++		setSystemTime(new Date("2025-01-01T00:00:00Z"));
++		const { store, storage } = createStorage({ defaultAccounts: { [PROVIDER]: "a@example.com" } });
++		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		const session = "sticky";
++
++		expect(await resolvedCredentialId(storage, session)).toBe(aId);
++		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: 60_000 });
++		expect(await resolvedCredentialId(storage, session)).toBe(bId);
++
++		// Advance past the default's block: the same session still stays on the sibling.
++		setSystemTime(new Date("2025-01-01T00:05:00Z"));
++		expect(await resolvedCredentialId(storage, session)).toBe(bId);
++		// A brand-new session routes back to the (now-unblocked) default.
++		expect(await resolvedCredentialId(storage, "fresh")).toBe(aId);
++	});
++
++	test("ambiguous or unmatched selector behaves exactly like no default", async () => {
++		registerProvider();
++		// Two accounts share the matched email → ambiguous → no pin.
++		{
++			const { storage } = createStorage({ defaultAccounts: { [PROVIDER]: "dup@example.com" } });
++			await storage.credentials.set(PROVIDER, [
++				oauthCredential("a", { email: "dup@example.com" }),
++				oauthCredential("b", { email: "dup@example.com" }),
++			]);
++			const seen = new Set<number>();
++			for (let i = 0; i < 20; i++) {
++				const id = await resolvedCredentialId(storage, `amb-${i}`);
++				if (id !== undefined) seen.add(id);
++			}
++			expect(seen.size).toBe(2);
++			expect(storage.getDefaultAccountCredentialId(PROVIDER)).toBeUndefined();
++		}
++		// Selector matches nothing → no pin, but the raw selector is still reported.
++		{
++			const { storage } = createStorage({ defaultAccounts: { [PROVIDER]: "nobody@example.com" } });
++			await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
++			const seen = new Set<number>();
++			for (let i = 0; i < 20; i++) {
++				const id = await resolvedCredentialId(storage, `miss-${i}`);
++				if (id !== undefined) seen.add(id);
++			}
++			expect(seen.size).toBe(2);
++			expect(storage.getDefaultAccountSelector(PROVIDER)).toBe("nobody@example.com");
++			expect(storage.getDefaultAccountCredentialId(PROVIDER)).toBeUndefined();
++		}
++	});
++
++	test("api_key rows pin by #<id> and fall over when the default is blocked", async () => {
++		registerProvider();
++		const { store, storage } = createStorage();
++		await storage.credentials.set(PROVIDER, [apiKeyCredential("key-a"), apiKeyCredential("key-b")]);
++		const rows = store.listAuthCredentials(PROVIDER);
++		const aId = rows[0]!.id;
++		const bId = rows[1]!.id;
++		storage.setDefaultAccountSelector(PROVIDER, `#${aId}`);
++		const session = "api-key";
++
++		expect(await resolvedCredentialId(storage, session)).toBe(aId);
++		await storage.limits.markReached(PROVIDER, session, { credentialId: aId, retryAfterMs: HOUR_MS });
++		expect(await resolvedCredentialId(storage, session)).toBe(bId);
++		expect(storage.consumeDefaultAccountFallover(PROVIDER, session)?.usedCredentialId).toBe(bId);
++	});
++});
+diff --git a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
+index 8fbc220..caa7049 100644
+--- a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
++++ b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
+@@ -68,7 +68,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+ 		}
+ 	});
+ 
+-	function registerProvider(onRefresh?: () => void, nextAccess?: () => string): void {
++	function registerProvider(onRefresh?: (credentials: OAuthCredentials) => void, nextAccess?: () => string): void {
+ 		registerOAuthProvider({
+ 			id: PROVIDER,
+ 			name: "Rotate Unit",
+@@ -77,7 +77,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+ 				return { access: "login", refresh: "login", expires: farExpiry() };
+ 			},
+ 			async refreshToken(credentials) {
+-				onRefresh?.();
++				onRefresh?.(credentials);
+ 				return {
+ 					...credentials,
+ 					access: nextAccess?.() ?? "minted-access",
+@@ -114,6 +114,45 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
+ 		expect(after).toBe("minted-access");
+ 	});
+ 
++	test("explicit selection force-refreshes the sticky OAuth member without advancing order", async () => {
++		if (!authStorage) throw new Error("test setup failed");
++		const refreshedAccesses: string[] = [];
++		registerProvider(credentials => {
++			refreshedAccesses.push(credentials.access);
++		});
++		await authStorage.credentials.set(PROVIDER, [
++			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry() },
++			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry() },
++		]);
++		const [firstRow, secondRow] = store?.listAuthCredentials(PROVIDER) ?? [];
++		if (!firstRow || !secondRow) throw new Error("expected oauth rows");
++		const selection = {
++			policyKey: "selected-refresh-pool",
++			eligibleCredentialIds: [firstRow.id, secondRow.id],
++			strategy: "round-robin" as const,
++		};
++
++		await expect(
++			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh", { selection }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { apiKey: "acc-A", credentialId: firstRow.id, credentialType: "oauth" },
++		});
++		await expect(
++			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh", { forceRefresh: true, selection }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { apiKey: "minted-access", credentialId: firstRow.id, credentialType: "oauth" },
++		});
++		expect(refreshedAccesses).toEqual(["acc-A"]);
++		await expect(
++			authStorage.resolveApiKeySelection(PROVIDER, "selected-refresh-next", { selection }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { apiKey: "acc-B", credentialId: secondRow.id, credentialType: "oauth" },
++		});
++	});
++
+ 	test("cached refresh rebinds a pinned account by id after preceding row removal", async () => {
+ 		if (!authStorage || !store) throw new Error("test setup failed");
+ 		registerProvider();
+diff --git a/packages/ai/test/auth-storage-selection-policy.test.ts b/packages/ai/test/auth-storage-selection-policy.test.ts
+new file mode 100644
+index 0000000..673dce9
+--- /dev/null
++++ b/packages/ai/test/auth-storage-selection-policy.test.ts
+@@ -0,0 +1,610 @@
++import { Database } from "bun:sqlite";
++import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
++import {
++	type AuthCredential,
++	type AuthCredentialSelectionPolicy,
++	AuthStorage,
++	SqliteAuthCredentialStore,
++} from "@oh-my-pi/pi-ai/auth-storage";
++import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
++import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
++import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
++import { withEnv } from "./helpers";
++
++const SOURCE = "auth-storage-selection-policy-test";
++const CUSTOM_PROVIDER = "unit-selection-policy";
++const HOUR_MS = 60 * 60 * 1000;
++const WEEK_MS = 7 * 24 * HOUR_MS;
++
++function farExpiry(): number {
++	return Date.now() + HOUR_MS;
++}
++
++function oauthCredential(label: string, overrides?: Partial<OAuthCredentials>): AuthCredential {
++	return {
++		type: "oauth",
++		access: `access-${label}`,
++		refresh: `refresh-${label}`,
++		expires: farExpiry(),
++		accountId: `account-${label}`,
++		email: `${label}@example.com`,
++		...overrides,
++	};
++}
++
++function apiKeyCredential(key: string, source?: "login"): AuthCredential {
++	return source ? { type: "api_key", key, source } : { type: "api_key", key };
++}
++
++function policy(
++	strategy: AuthCredentialSelectionPolicy["strategy"],
++	eligibleCredentialIds: readonly number[],
++	policyKey = `policy-${strategy}`,
++): AuthCredentialSelectionPolicy {
++	return { policyKey, eligibleCredentialIds, strategy };
++}
++
++function usageLimit(usedFraction: number, resetInMs: number): UsageLimit {
++	return {
++		id: "unit-selection-policy:primary",
++		label: "Primary Window",
++		scope: { provider: CUSTOM_PROVIDER, windowId: "1h", shared: true },
++		window: { id: "1h", label: "1 Hour", durationMs: HOUR_MS, resetsAt: Date.now() + resetInMs },
++		amount: {
++			unit: "percent",
++			used: usedFraction * 100,
++			limit: 100,
++			remaining: Math.max(0, 100 - usedFraction * 100),
++			usedFraction,
++			remainingFraction: Math.max(0, 1 - usedFraction),
++		},
++		status: usedFraction >= 1 ? "exhausted" : "ok",
++	};
++}
++
++function usageReport(accountId: string, usedFraction: number): UsageReport {
++	return {
++		provider: CUSTOM_PROVIDER,
++		fetchedAt: Date.now(),
++		limits: [usageLimit(usedFraction, WEEK_MS)],
++		metadata: { accountId, email: `${accountId}@example.com`, planType: "pro" },
++	};
++}
++
++describe("AuthStorage credential selection policy", () => {
++	let store: SqliteAuthCredentialStore;
++	let storage: AuthStorage;
++	const usageByAccount = new Map<string, UsageReport>();
++	let fetchUsageOverride: UsageProvider["fetchUsage"] | undefined;
++	const usageProvider: UsageProvider = {
++		id: CUSTOM_PROVIDER,
++		async fetchUsage(params, options) {
++			if (fetchUsageOverride) return fetchUsageOverride(params, options);
++			const accountId = params.credential.accountId;
++			return accountId ? (usageByAccount.get(accountId) ?? null) : null;
++		},
++	};
++
++	beforeEach(async () => {
++		store = new SqliteAuthCredentialStore(new Database(":memory:"));
++		const rankingStrategy: CredentialRankingStrategy = {
++			findWindowLimits(report) {
++				return { primary: report.limits[0] };
++			},
++			windowDefaults: { primaryMs: HOUR_MS, secondaryMs: WEEK_MS },
++		};
++		storage = new AuthStorage(store, {
++			usageProviderResolver: provider => (provider === CUSTOM_PROVIDER ? usageProvider : undefined),
++			rankingStrategyResolver: provider => (provider === CUSTOM_PROVIDER ? rankingStrategy : undefined),
++		});
++		usageByAccount.clear();
++		fetchUsageOverride = undefined;
++		registerOAuthProvider({
++			id: CUSTOM_PROVIDER,
++			name: "Selection Policy Unit Provider",
++			sourceId: SOURCE,
++			async login() {
++				return { access: "login", refresh: "login", expires: farExpiry() };
++			},
++			async refreshToken(credentials) {
++				if (credentials.refresh === "refresh-invalid") {
++					throw new Error("invalid_grant: refresh token revoked");
++				}
++				return credentials;
++			},
++			getApiKey(credentials) {
++				return credentials.access;
++			},
++		});
++	});
++
++	afterEach(async () => {
++		unregisterOAuthProviders(SOURCE);
++		storage.close();
++		store.close();
++		usageByAccount.clear();
++		fetchUsageOverride = undefined;
++		vi.restoreAllMocks();
++	});
++
++	test("ordered allow-list limits OAuth and stored API-key selection and empty pools do not fall through", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("oauth-a"),
++			oauthCredential("oauth-b"),
++			apiKeyCredential("login-key", "login"),
++			apiKeyCredential("static-key"),
++		]);
++		const rows = store.listAuthCredentials(CUSTOM_PROVIDER);
++		const oauthA = rows[0]!.id;
++		const oauthB = rows[1]!.id;
++		const loginKey = rows[2]!.id;
++		const staticKey = rows[3]!.id;
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "oauth-session", {
++				selection: policy("failover", [oauthB, oauthA]),
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: {
++				apiKey: "access-oauth-b",
++				credentialId: oauthB,
++				credentialType: "oauth",
++				source: "oauth",
++				oauthIdentity: { orgId: undefined, region: undefined, inferenceRegion: undefined },
++			},
++		});
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "login-session", {
++				selection: policy("failover", [loginKey]),
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: { apiKey: "login-key", credentialId: loginKey, credentialType: "api_key", source: "api_key" },
++		});
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "static-session", {
++				selection: policy("failover", [staticKey]),
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: { apiKey: "static-key", credentialId: staticKey, credentialType: "api_key", source: "api_key" },
++		});
++
++		await withEnv({ OPENAI_API_KEY: "env-key" }, async () => {
++			const emptyStore = new SqliteAuthCredentialStore(new Database(":memory:"));
++			const emptyStorage = new AuthStorage(emptyStore);
++			try {
++				emptyStorage.keys.setRuntime("openai", "runtime-key");
++				emptyStorage.keys.setConfig("openai", "config-key");
++				await expect(
++					emptyStorage.resolveApiKeySelection("openai", "empty", {
++						selection: policy("failover", []),
++					}),
++				).resolves.toEqual({ ok: false, reason: "no_eligible_credential" });
++			} finally {
++				emptyStorage.close();
++				emptyStore.close();
++			}
++		});
++	});
++
++	test("mixed eligible pools try API keys before reporting the pool exhausted", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("oauth-first"),
++			apiKeyCredential("api-second", "login"),
++		]);
++		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
++		const mixed = policy("failover", [oauthRow.id, apiRow.id], "mixed-pool");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed", { selection: mixed }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
++		});
++		await storage.limits.markReached(CUSTOM_PROVIDER, "mixed", { retryAfterMs: 30_000, selection: mixed });
++		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed", { selection: mixed })).resolves.toEqual({
++			ok: true,
++			credential: { apiKey: "api-second", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
++		});
++	});
++
++	test("explicit mixed failover honors API-key-before-OAuth pool order", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("fallback"),
++			apiKeyCredential("api-primary", "login"),
++		]);
++		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-first", {
++				selection: policy("failover", [apiRow.id, oauthRow.id], "api-before-oauth"),
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: { apiKey: "api-primary", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
++		});
++	});
++
++	test("explicit mixed round-robin advances across credential types and keeps session stickiness", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("oauth-rr"),
++			apiKeyCredential("api-rr", "login"),
++		]);
++		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
++		const mixed = policy("round-robin", [apiRow.id, oauthRow.id], "mixed-rr");
++
++		const rrA = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: mixed });
++		const rrB = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-b", { selection: mixed });
++		const rrAAgain = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: mixed });
++
++		expect(rrA.ok && rrA.credential.credentialId).toBe(apiRow.id);
++		expect(rrB.ok && rrB.credential.credentialId).toBe(oauthRow.id);
++		expect(rrAAgain.ok && rrAAgain.credential.credentialId).toBe(apiRow.id);
++	});
++
++	test("explicit mixed usage-limit marks cross-type availability", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("oauth-limited"),
++			apiKeyCredential("api-after-oauth", "login"),
++		]);
++		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
++		const mixed = policy("failover", [oauthRow.id, apiRow.id], "mixed-usage-limit");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed-limit", { selection: mixed }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: oauthRow.id, credentialType: "oauth" },
++		});
++		await expect(
++			storage.limits.markReached(CUSTOM_PROVIDER, "mixed-limit", {
++				apiKey: "access-oauth-limited",
++				selection: mixed,
++			}),
++		).resolves.toMatchObject({ switched: true });
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "mixed-limit", { selection: mixed }),
++		).resolves.toEqual({
++			ok: true,
++			credential: {
++				apiKey: "api-after-oauth",
++				credentialId: apiRow.id,
++				credentialType: "api_key",
++				source: "api_key",
++			},
++		});
++	});
++
++	test("least-used keeps an eligible session and reranks only a new or replacement session", async () => {
++		const now = Date.now();
++		vi.useFakeTimers();
++		setSystemTime(new Date(now));
++		try {
++			await storage.credentials.set(CUSTOM_PROVIDER, [
++				oauthCredential("high", { accountId: "high" }),
++				oauthCredential("low", { accountId: "low" }),
++			]);
++			const [highRow, lowRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++			if (!highRow || !lowRow) throw new Error("expected oauth rows");
++			usageByAccount.set("high", usageReport("high", 0.9));
++			usageByAccount.set("low", usageReport("low", 0.1));
++			const leastUsed = policy("least-used", [highRow.id, lowRow.id], "least-sticky");
++
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: lowRow.id } });
++
++			usageByAccount.set("high", usageReport("high", 0.05));
++			usageByAccount.set("low", usageReport("low", 0.95));
++			setSystemTime(new Date(now + 7 * 60_000));
++
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: lowRow.id } });
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-b", { selection: leastUsed }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: highRow.id } });
++
++			await storage.limits.markReached(CUSTOM_PROVIDER, "least-a", {
++				retryAfterMs: 30_000,
++				selection: leastUsed,
++			});
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-a", { selection: leastUsed }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: highRow.id } });
++		} finally {
++			setSystemTime();
++			vi.useRealTimers();
++		}
++	});
++
++	test("least-used falls back to unified pool order when OAuth has no usage signal", async () => {
++		fetchUsageOverride = async () => null;
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("no-usage"),
++			apiKeyCredential("api-no-usage", "login"),
++		]);
++		const [oauthRow, apiRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!oauthRow || !apiRow) throw new Error("expected mixed rows");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-api-first", {
++				selection: policy("least-used", [apiRow.id, oauthRow.id], "least-no-usage-api"),
++			}),
++		).resolves.toEqual({
++			ok: true,
++			credential: { apiKey: "api-no-usage", credentialId: apiRow.id, credentialType: "api_key", source: "api_key" },
++		});
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-oauth-first", {
++				selection: policy("least-used", [oauthRow.id, apiRow.id], "least-no-usage-oauth"),
++			}),
++		).resolves.toMatchObject({ ok: true, credential: { credentialId: oauthRow.id, credentialType: "oauth" } });
++	});
++
++	test("usage-limit blocking follows credential ids across an awaited reload", async () => {
++		const now = Date.now();
++		vi.useFakeTimers();
++		setSystemTime(new Date(now));
++		try {
++			await storage.credentials.set(CUSTOM_PROVIDER, [
++				oauthCredential("stale-a", { accountId: "stale-a" }),
++				oauthCredential("stale-b", { accountId: "stale-b" }),
++			]);
++			const [rowA, rowB] = store.listAuthCredentials(CUSTOM_PROVIDER);
++			if (!rowA || !rowB) throw new Error("expected oauth rows");
++			const selected = policy("failover", [rowA.id, rowB.id], "stable-id-usage-block");
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "stable-id", { selection: selected }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: rowA.id } });
++			setSystemTime(new Date(now + 7 * 60_000));
++
++			const usageStarted = Promise.withResolvers<void>();
++			const releaseUsage = Promise.withResolvers<void>();
++			fetchUsageOverride = async params => {
++				if (params.credential.accountId === "stale-a") {
++					usageStarted.resolve();
++					await releaseUsage.promise;
++					return usageReport("stale-a", 1);
++				}
++				return usageReport(params.credential.accountId ?? "unknown", 0);
++			};
++
++			const markPromise = storage.limits.markReached(CUSTOM_PROVIDER, "stable-id", {
++				apiKey: "access-stale-a",
++				selection: selected,
++			});
++			await usageStarted.promise;
++			store.deleteAuthCredential(rowA.id, "simulated external deletion");
++			await storage.credentials.reload();
++			releaseUsage.resolve();
++			await markPromise;
++
++			expect(storage.blocks.list([rowB.id])).toEqual([]);
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "stable-id-replacement", {
++					selection: policy("failover", [rowB.id], "stable-id-replacement"),
++				}),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: rowB.id } });
++		} finally {
++			setSystemTime();
++			vi.useRealTimers();
++		}
++	});
++
++	test("OAuth access helpers honor selection policy credential ids", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [oauthCredential("oauth-a"), oauthCredential("oauth-b")]);
++		const [firstRow, secondRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!firstRow || !secondRow) throw new Error("expected oauth rows");
++		const selected = policy("failover", [secondRow.id], "oauth-helper-pool");
++
++		const accesses = await storage.oauth.accessAll(CUSTOM_PROVIDER, { selection: selected });
++		expect(accesses.map(access => access.credentialId)).toEqual([secondRow.id]);
++	});
++
++	test("omitting policy preserves legacy precedence and session stickiness", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [oauthCredential("one"), oauthCredential("two")]);
++		storage.keys.setRuntime(CUSTOM_PROVIDER, "runtime-key");
++		expect(await storage.getApiKey(CUSTOM_PROVIDER, "legacy-runtime")).toBe("runtime-key");
++		storage.keys.removeRuntime(CUSTOM_PROVIDER);
++
++		const first = await storage.getApiKey(CUSTOM_PROVIDER, "legacy-sticky");
++		const second = await storage.getApiKey(CUSTOM_PROVIDER, "legacy-sticky");
++		expect(first).toMatch(/^access-(one|two)$/);
++		expect(second).toBe(first);
++	});
++
++	test("omitting policy stops at unresolved stored login API keys before env", async () => {
++		await withEnv({ OPENAI_API_KEY: "env-key" }, async () => {
++			const unresolvedStore = new SqliteAuthCredentialStore(new Database(":memory:"));
++			const unresolvedStorage = new AuthStorage(unresolvedStore, { configValueResolver: async () => undefined });
++			try {
++				await unresolvedStorage.credentials.set("openai", [apiKeyCredential("missing-secret", "login")]);
++				await expect(unresolvedStorage.resolveApiKeySelection("openai", "legacy")).resolves.toEqual({
++					ok: false,
++					reason: "no_credential",
++				});
++				await expect(unresolvedStorage.getApiKey("openai", "legacy")).resolves.toBeUndefined();
++			} finally {
++				unresolvedStorage.close();
++				unresolvedStore.close();
++			}
++		});
++	});
++
++	test("sticky-session, round-robin, least-used, and failover apply strategy semantics within eligible rows", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("low", { accountId: "low" }),
++			oauthCredential("high", { accountId: "high" }),
++			oauthCredential("outside", { accountId: "outside" }),
++		]);
++		const [lowRow, highRow, outsideRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!lowRow || !highRow || !outsideRow) throw new Error("expected seeded rows");
++		usageByAccount.set("low", usageReport("low", 0.1));
++		usageByAccount.set("high", usageReport("high", 0.9));
++		usageByAccount.set("outside", usageReport("outside", 0));
++
++		const sticky = policy("sticky-session", [highRow.id, lowRow.id], "sticky-pool");
++		const stickyFirst = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "sticky", { selection: sticky });
++		expect(stickyFirst.ok && stickyFirst.credential.credentialId).toBeOneOf([highRow.id, lowRow.id]);
++		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "sticky", { selection: sticky })).resolves.toEqual(
++			stickyFirst,
++		);
++
++		const rr = policy("round-robin", [highRow.id, lowRow.id], "rr-pool");
++		const rrA = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: rr });
++		const rrB = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-b", { selection: rr });
++		expect(rrA.ok && rrA.credential.credentialId).toBe(highRow.id);
++		expect(rrB.ok && rrB.credential.credentialId).toBe(lowRow.id);
++		await expect(storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-a", { selection: rr })).resolves.toEqual(rrA);
++
++		const leastUsed = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "least-used", {
++			selection: policy("least-used", [highRow.id, lowRow.id], "least-pool"),
++		});
++		expect(leastUsed.ok && leastUsed.credential.credentialId).toBe(lowRow.id);
++
++		const failover = policy("failover", [highRow.id, lowRow.id], "failover-pool");
++		const failoverFirst = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "failover", { selection: failover });
++		expect(failoverFirst.ok && failoverFirst.credential.credentialId).toBe(highRow.id);
++		const mark = await storage.limits.markReached(CUSTOM_PROVIDER, "failover", {
++			retryAfterMs: 30_000,
++			selection: failover,
++		});
++		expect(mark.switched).toBe(true);
++		const failoverSecond = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "failover", { selection: failover });
++		expect(failoverSecond.ok && failoverSecond.credential.credentialId).toBe(lowRow.id);
++	});
++
++	test("failover returns to the first configured stored API key after an earlier member unblocks", async () => {
++		const now = Date.now();
++		vi.useFakeTimers();
++		setSystemTime(new Date(now));
++		try {
++			await storage.credentials.set(CUSTOM_PROVIDER, [
++				apiKeyCredential("api-a", "login"),
++				apiKeyCredential("api-b", "login"),
++			]);
++			const [firstRow, secondRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++			if (!firstRow || !secondRow) throw new Error("expected seeded API-key rows");
++			const failover = policy("failover", [firstRow.id, secondRow.id], "api-key-failover-pool");
++
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: firstRow.id, apiKey: "api-a" } });
++			await expect(
++				storage.limits.markReached(CUSTOM_PROVIDER, "api-failover", {
++					retryAfterMs: 1_000,
++					selection: failover,
++				}),
++			).resolves.toMatchObject({ switched: true });
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: secondRow.id, apiKey: "api-b" } });
++
++			setSystemTime(new Date(now + 1_001));
++
++			await expect(
++				storage.resolveApiKeySelection(CUSTOM_PROVIDER, "api-failover", { selection: failover }),
++			).resolves.toMatchObject({ ok: true, credential: { credentialId: firstRow.id, apiKey: "api-a" } });
++		} finally {
++			setSystemTime();
++			vi.useRealTimers();
++		}
++	});
++
++	test("in-memory stickies keep the recorded credential id after reload reindexes rows", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			apiKeyCredential("api-a", "login"),
++			apiKeyCredential("api-b", "login"),
++			apiKeyCredential("api-c", "login"),
++		]);
++		const [firstRow, secondRow, thirdRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!firstRow || !secondRow || !thirdRow) throw new Error("expected seeded API-key rows");
++		const rr = policy("round-robin", [firstRow.id, secondRow.id, thirdRow.id], "rr-reindex-pool");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: firstRow.id, apiKey: "api-a" },
++		});
++		await storage.limits.markReached(CUSTOM_PROVIDER, "rr-reindex", { retryAfterMs: 30_000, selection: rr });
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: secondRow.id, apiKey: "api-b" },
++		});
++
++		store.deleteAuthCredential(firstRow.id, "simulated external deletion");
++		await storage.credentials.reload();
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "rr-reindex", { selection: rr }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: secondRow.id, apiKey: "api-b" },
++		});
++	});
++
++	test("blocked and invalid selected credentials fail over only within the eligible pool", async () => {
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("first"),
++			oauthCredential("second"),
++			oauthCredential("outside"),
++		]);
++		const [firstRow, secondRow, outsideRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!firstRow || !secondRow || !outsideRow) throw new Error("expected seeded rows");
++		const failover = policy("failover", [firstRow.id, secondRow.id], "blocked-pool");
++
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: firstRow.id },
++		});
++		await storage.limits.markReached(CUSTOM_PROVIDER, "blocked", { retryAfterMs: 30_000, selection: failover });
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover }),
++		).resolves.toMatchObject({
++			ok: true,
++			credential: { credentialId: secondRow.id },
++		});
++		const blockedBefore = Date.now();
++		const finalMark = await storage.limits.markReached(CUSTOM_PROVIDER, "blocked", {
++			retryAfterMs: 45_000,
++			selection: failover,
++		});
++		expect(finalMark.switched).toBe(false);
++		const allBlocked = await storage.resolveApiKeySelection(CUSTOM_PROVIDER, "blocked", { selection: failover });
++		expect(allBlocked.ok).toBe(false);
++		if (allBlocked.ok) throw new Error("expected all eligible blocked");
++		expect(allBlocked.reason).toBe("all_eligible_blocked");
++		expect(allBlocked.retryAtMs).toBeGreaterThanOrEqual(blockedBefore + 30_000 - 5);
++		expect(allBlocked.retryAtMs).toBeLessThan(Date.now() + 46_000);
++		expect(
++			await storage.getApiKey(CUSTOM_PROVIDER, "outside-ok", { selection: policy("failover", [outsideRow.id]) }),
++		).toBe("access-outside");
++
++		await storage.credentials.set(CUSTOM_PROVIDER, [
++			oauthCredential("invalid", { refresh: "refresh-invalid", expires: Date.now() - HOUR_MS }),
++			oauthCredential("valid"),
++			oauthCredential("invalid-outside"),
++		]);
++		const [invalidRow, validRow] = store.listAuthCredentials(CUSTOM_PROVIDER);
++		if (!invalidRow || !validRow) throw new Error("expected invalid rows");
++		await expect(
++			storage.resolveApiKeySelection(CUSTOM_PROVIDER, "invalid", {
++				selection: policy("failover", [invalidRow.id, validRow.id], "invalid-pool"),
++			}),
++		).resolves.toMatchObject({ ok: true, credential: { credentialId: validRow.id, apiKey: "access-valid" } });
++	});
++});
+diff --git a/packages/ai/test/discover-default-accounts.test.ts b/packages/ai/test/discover-default-accounts.test.ts
+new file mode 100644
+index 0000000..07c58b5
+--- /dev/null
++++ b/packages/ai/test/discover-default-accounts.test.ts
+@@ -0,0 +1,84 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import * as fs from "node:fs/promises";
++import * as os from "node:os";
++import * as path from "node:path";
++import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker/discover";
++import type { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
++
++const cleanups: Array<() => Promise<void> | void> = [];
++
++async function withConfig(yaml: string): Promise<AuthStorage> {
++	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-default-account-"));
++	await Bun.write(path.join(dir, "config.yml"), yaml);
++	const storage = await discoverAuthStorage({ agentDir: dir });
++	cleanups.push(async () => {
++		storage.close();
++		await fs.rm(dir, { recursive: true, force: true });
++	});
++	return storage;
++}
++
++describe("discoverAuthStorage providers.defaultAccount", () => {
++	afterEach(async () => {
++		for (const dispose of cleanups.splice(0)) await dispose();
++	});
++
++	test("reads the nested providers.defaultAccount form from config.yml", async () => {
++		const storage = await withConfig("providers:\n  defaultAccount:\n    anthropic: me@example.com\n");
++		expect(storage.getDefaultAccountSelector("anthropic")).toBe("me@example.com");
++	});
++
++	test("reads the flat providers.defaultAccount form from config.yml", async () => {
++		const storage = await withConfig('"providers.defaultAccount":\n  anthropic: me@example.com\n');
++		expect(storage.getDefaultAccountSelector("anthropic")).toBe("me@example.com");
++	});
++
++	test("injected defaultAccounts option overrides config discovery", async () => {
++		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-default-account-"));
++		await Bun.write(
++			path.join(dir, "config.yml"),
++			"providers:\n  defaultAccount:\n    anthropic: from-file@example.com\n",
++		);
++		const storage = await discoverAuthStorage({
++			agentDir: dir,
++			defaultAccounts: { anthropic: "injected@example.com" },
++		});
++		cleanups.push(async () => {
++			storage.close();
++			await fs.rm(dir, { recursive: true, force: true });
++		});
++		expect(storage.getDefaultAccountSelector("anthropic")).toBe("injected@example.com");
++	});
++
++	test("reads nested, flat, and scalar providers.accountPriority forms from config.yml", async () => {
++		const nested = await withConfig(
++			"providers:\n  accountPriority:\n    anthropic:\n      - first@example.com\n      - second@example.com\n",
++		);
++		expect(nested.getAccountPrioritySelectors("anthropic")).toEqual(["first@example.com", "second@example.com"]);
++
++		const flat = await withConfig('"providers.accountPriority":\n  anthropic:\n    - flat@example.com\n');
++		expect(flat.getAccountPrioritySelectors("anthropic")).toEqual(["flat@example.com"]);
++
++		// A bare string is the one-entry list, so hand-written configs that mirror
++		// `providers.defaultAccount` still pin instead of being dropped.
++		const scalar = await withConfig("providers:\n  accountPriority:\n    anthropic: only@example.com\n");
++		expect(scalar.getAccountPrioritySelectors("anthropic")).toEqual(["only@example.com"]);
++	});
++
++	test("injected accountPriorities override config discovery", async () => {
++		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-default-account-"));
++		await Bun.write(
++			path.join(dir, "config.yml"),
++			"providers:\n  accountPriority:\n    anthropic:\n      - from-file@example.com\n",
++		);
++		const storage = await discoverAuthStorage({
++			agentDir: dir,
++			accountPriorities: { anthropic: ["injected@example.com"] },
++		});
++		cleanups.push(async () => {
++			storage.close();
++			await fs.rm(dir, { recursive: true, force: true });
++		});
++		expect(storage.getAccountPrioritySelectors("anthropic")).toEqual(["injected@example.com"]);
++	});
++});
+diff --git a/packages/coding-agent/src/modes/components/account-manager-selector.ts b/packages/coding-agent/src/modes/components/account-manager-selector.ts
+new file mode 100644
+index 0000000..76c32f4
+--- /dev/null
++++ b/packages/coding-agent/src/modes/components/account-manager-selector.ts
+@@ -0,0 +1,276 @@
++import type { AccountSelectionEvent } from "@oh-my-pi/pi-ai";
++import { extractPrintableText, matchesKey, Spacer, TruncatedText } from "@oh-my-pi/pi-tui";
++import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
++import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
++import { theme } from "@oh-my-pi/pi-tui/theme";
++import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
++import { OverlayPanel, PanelDivider } from "@oh-my-pi/pi-tui/chrome/overlay-box";
++
++/** Accounts shown at once before the list windows around the cursor. */
++const ACCOUNT_WINDOW = 8;
++/** Newest selection events rendered when the change-log pane is expanded. */
++const EVENT_WINDOW = 8;
++
++const KEY_HINT = "↑/↓ select · ↵ default · d clear · Shift+↑/↓ or [ ] reorder · l log · Esc close";
++
++/**
++ * Outcome of a mutation triggered from the account manager. `message` is shown
++ * in the pane's status row; `tone` picks its color. Returning `undefined` means
++ * "nothing to report".
++ */
++export interface AccountManagerActionResult {
++	message: string;
++	tone: "info" | "warning" | "error";
++}
++
++/**
++ * One session account-change entry with the provider-session it belongs to.
++ * Advisors run on their own provider-session ids, so the log has to name the
++ * origin (`main` or the advisor slug) or two rows look identical.
++ */
++export interface AccountManagerEventRow {
++	origin: string;
++	event: AccountSelectionEvent;
++}
++
++/** Live state + mutations the account manager renders and drives. */
++export interface AccountManagerOptions {
++	providerName: string;
++	/** `authStorage.describeCredentialSource()` for the provider, when known. */
++	credentialSource: string | undefined;
++	/** Stored accounts, re-read on every repaint so an edit's effect shows at once. */
++	accounts: () => readonly SessionPinAccount[];
++	/** Session selection rows sorted oldest-first; read live on every repaint. */
++	events: () => readonly AccountManagerEventRow[];
++	/** Compact quota line for one account, or `undefined` when usage is unavailable. */
++	quotaFor: (account: SessionPinAccount) => string | undefined;
++	/** True when the account is the provider's pinned default right now. */
++	isDefault: (account: SessionPinAccount) => boolean;
++	/** 1-based position in the provider's priority order, or `undefined` when unranked. */
++	priorityRank: (account: SessionPinAccount) => number | undefined;
++	onSetDefault: (account: SessionPinAccount) => AccountManagerActionResult | undefined;
++	onClearDefault: () => AccountManagerActionResult | undefined;
++	onMove: (account: SessionPinAccount, delta: -1 | 1) => AccountManagerActionResult | undefined;
++	onCancel: () => void;
++	requestRender: () => void;
++}
++
++function formatEventTime(atMs: number): string {
++	const at = new Date(atMs);
++	const pad = (value: number): string => String(value).padStart(2, "0");
++	return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
++}
++
++/**
++ * Interactive `/account` pane: every stored OAuth account for the current
++ * provider with its active/default/priority markers and quota, plus a
++ * collapsed-by-default log of this session's account switches. Enter pins the
++ * default, `d` clears it and Shift+↑/↓ (or `[`/`]`) rewrites the priority order;
++ * the pane stays open across mutations so several edits need one invocation.
++ */
++export class AccountManagerSelectorComponent extends OverlayPanel {
++	#options: AccountManagerOptions;
++	#accounts: readonly SessionPinAccount[];
++	#accountsByCredentialId = new Map<number, SessionPinAccount>();
++	#selectedIndex = 0;
++	#showLog = false;
++	#status: AccountManagerActionResult | undefined;
++
++	constructor(options: AccountManagerOptions) {
++		super(`Accounts — ${sanitizeStatusText(options.providerName)}`);
++		this.#options = options;
++		this.#accounts = options.accounts();
++		const activeIndex = this.#accounts.findIndex(account => account.active);
++		if (activeIndex >= 0) this.#selectedIndex = activeIndex;
++		this.#update();
++	}
++
++	get selectedAccount(): SessionPinAccount | undefined {
++		return this.#accounts[this.#selectedIndex];
++	}
++
++	#line(text: string): void {
++		this.addChild(new TruncatedText(text, 0, 0));
++	}
++
++	#accountRow(account: SessionPinAccount, index: number): void {
++		const selected = index === this.#selectedIndex;
++		const rank = this.#options.priorityRank(account);
++		const label = sanitizeStatusText(account.label);
++		const markers: string[] = [];
++		if (account.active) markers.push(theme.fg("success", `${theme.status.success} active`));
++		if (this.#options.isDefault(account)) markers.push(theme.fg("accent", "★ default"));
++		if (rank !== undefined) markers.push(theme.fg("muted", `priority ${rank}`));
++		const number = `${account.position + 1}.`;
++		const head = selected
++			? `${theme.fg("accent", `${theme.nav.cursor} `)}${theme.fg("accent", `${number} ${label}`)}`
++			: `  ${number} ${label}`;
++		this.#line(markers.length > 0 ? `${head}  ${markers.join("  ")}` : head);
++
++		const quota = this.#options.quotaFor(account);
++		if (quota) this.#line(theme.fg("dim", `      ${sanitizeStatusText(quota)}`));
++		if (account.active) {
++			this.#line(theme.fg("dim", "      in use by this session"));
++		}
++	}
++
++	#eventLabel(credentialId: number | undefined, email?: string, accountId?: string): string {
++		if (credentialId === undefined) return "none";
++		const known = this.#accountsByCredentialId.get(credentialId);
++		if (known) return sanitizeStatusText(known.label);
++		const fallback = email || accountId;
++		return fallback ? sanitizeStatusText(fallback) : `#${credentialId}`;
++	}
++
++	#logPane(): void {
++		const events = this.#options.events();
++		this.addChild(new PanelDivider());
++		if (!this.#showLog) {
++			const count = events.length;
++			this.#line(
++				theme.fg(
++					"muted",
++					count === 0
++						? "Session account changes: none — l to expand"
++						: `Session account changes: ${count} — l to expand`,
++				),
++			);
++			return;
++		}
++		this.#line(theme.fg("muted", theme.bold("Session account changes")));
++		if (events.length === 0) {
++			this.#line(theme.fg("dim", "  No account changes this session."));
++			return;
++		}
++		// AuthStorage hands back oldest-first; the newest switch is the one the
++		// user is trying to explain, so it leads.
++		const newestFirst = [...events].reverse();
++		const shown = newestFirst.slice(0, EVENT_WINDOW);
++		for (const { origin, event } of shown) {
++			const from = this.#eventLabel(event.previousCredentialId);
++			const to = this.#eventLabel(event.credentialId, event.email, event.accountId);
++			const head = `  ${formatEventTime(event.atMs)} ${sanitizeStatusText(event.provider)} ${sanitizeStatusText(origin)}  ${from} → ${to}`;
++			this.#line(`${theme.fg("dim", head)}  ${theme.fg("muted", sanitizeStatusText(event.reason))}`);
++			if (event.detail) this.#line(theme.fg("dim", `           ${sanitizeStatusText(event.detail)}`));
++		}
++		const hidden = newestFirst.length - shown.length;
++		if (hidden > 0) this.#line(theme.fg("dim", `  +${hidden} older change${hidden === 1 ? "" : "s"}`));
++	}
++
++	#update(): void {
++		this.clear();
++
++		const source = this.#options.credentialSource;
++		this.#line(
++			theme.fg(
++				"muted",
++				source
++					? `credentials from ${sanitizeStatusText(source)}`
++					: "credentials from stored OAuth logins (/login adds more)",
++			),
++		);
++		this.addChild(new Spacer(1));
++
++		const accounts = this.#options.accounts();
++		this.#accounts = accounts;
++		this.#accountsByCredentialId = new Map(accounts.map(account => [account.credentialId, account]));
++		const total = accounts.length;
++		if (total > 0) this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex, total - 1));
++		if (total === 0) {
++			this.#line(theme.fg("dim", "No stored OAuth accounts for this provider."));
++		} else {
++			const start =
++				total <= ACCOUNT_WINDOW
++					? 0
++					: Math.max(0, Math.min(this.#selectedIndex - Math.floor(ACCOUNT_WINDOW / 2), total - ACCOUNT_WINDOW));
++			const end = Math.min(start + ACCOUNT_WINDOW, total);
++			for (let index = start; index < end; index++) {
++				const account = accounts[index];
++				if (account) this.#accountRow(account, index);
++			}
++			if (total > ACCOUNT_WINDOW) {
++				this.#line(theme.fg("dim", `showing ${start + 1}-${end} of ${total}`));
++			}
++		}
++
++		this.#logPane();
++
++		this.addChild(new PanelDivider());
++		this.#line(theme.fg("muted", KEY_HINT));
++		const status = this.#status;
++		if (status) {
++			const color = status.tone === "error" ? "error" : status.tone === "warning" ? "warning" : "success";
++			this.#line(theme.fg(color, sanitizeStatusText(status.message)));
++		}
++	}
++
++	/** Re-read the live callbacks and repaint (after an external mutation). */
++	refresh(): void {
++		this.#update();
++		this.#options.requestRender();
++	}
++
++	#apply(result: AccountManagerActionResult | undefined): void {
++		this.#status = result;
++		this.refresh();
++	}
++
++	#move(delta: -1 | 1): void {
++		const account = this.selectedAccount;
++		if (!account) return;
++		this.#apply(this.#options.onMove(account, delta));
++	}
++
++	handleInput(keyData: string): void {
++		if (matchesSelectCancel(keyData)) {
++			this.#options.onCancel();
++			return;
++		}
++		if (matchesKey(keyData, "shift+up")) {
++			this.#move(-1);
++			return;
++		}
++		if (matchesKey(keyData, "shift+down")) {
++			this.#move(1);
++			return;
++		}
++		if (matchesSelectUp(keyData)) {
++			const total = this.#accounts.length;
++			if (total > 0) this.#selectedIndex = this.#selectedIndex === 0 ? total - 1 : this.#selectedIndex - 1;
++			this.#status = undefined;
++			this.refresh();
++			return;
++		}
++		if (matchesSelectDown(keyData)) {
++			const total = this.#accounts.length;
++			if (total > 0) this.#selectedIndex = this.#selectedIndex === total - 1 ? 0 : this.#selectedIndex + 1;
++			this.#status = undefined;
++			this.refresh();
++			return;
++		}
++		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
++			const account = this.selectedAccount;
++			if (!account) return;
++			this.#apply(this.#options.onSetDefault(account));
++			return;
++		}
++		const printable = extractPrintableText(keyData);
++		if (printable === "[") {
++			this.#move(-1);
++			return;
++		}
++		if (printable === "]") {
++			this.#move(1);
++			return;
++		}
++		if (printable === "d") {
++			this.#apply(this.#options.onClearDefault());
++			return;
++		}
++		if (printable === "l") {
++			this.#showLog = !this.#showLog;
++			this.#status = undefined;
++			this.refresh();
++		}
++	}
++}
+diff --git a/packages/coding-agent/src/session/auth-storage.ts b/packages/coding-agent/src/session/auth-storage.ts
+index eb64b2e..131cd78 100644
+--- a/packages/coding-agent/src/session/auth-storage.ts
++++ b/packages/coding-agent/src/session/auth-storage.ts
+@@ -4,6 +4,8 @@
+  */
+ 
+ export type {
++	AccountSelectionEvent,
++	AccountSelectionReason,
+ 	ApiKeyCredential,
+ 	AuthCredential,
+ 	AuthCredentialEntry,
+@@ -12,6 +14,7 @@ export type {
+ 	AuthStorageOptions,
+ 	CredentialOrigin,
+ 	CredentialOriginKind,
++	DefaultAccountFallover,
+ 	OAuthAccountIdentity,
+ 	OAuthAccountSummary,
+ 	OAuthCredential,
+diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
+index 8c0814f..08a01f1 100644
+--- a/packages/coding-agent/src/session/session-advisors.ts
++++ b/packages/coding-agent/src/session/session-advisors.ts
+@@ -544,6 +544,18 @@ export interface AdvisorStatusOverviewEntry {
+ 	isPaused: boolean;
+ }
+ 
++/**
++ * One live advisor's provider-identity binding: the provider its model talks
++ * to, plus the provider session id its requests carry. The status line
++ * resolves which stored OAuth credential is serving that advisor from these
++ * two fields exactly as it does for the primary model.
++ */
++export interface AdvisorAccountBinding {
++	slug: string;
++	provider: string;
++	providerSessionId: string;
++}
++
+ /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
+ export class SessionAdvisors {
+ 	readonly #host: SessionAdvisorsHost;
+@@ -2899,6 +2911,27 @@ export class SessionAdvisors {
+ 		return { configured: this.#advisorEnabled, advisors };
+ 	}
+ 
++	/**
++	 * Provider-identity binding of every live advisor, for the status line's
++	 * account chips. Mirrors {@link getAdvisorStatusOverview} in weight: it
++	 * only reads fields already maintained by
++	 * {@link SessionAdvisors.refreshProviderIdentity}, so it is safe to call
++	 * per render frame. Advisors with no resolved model provider or no
++	 * provider session id yet are skipped — there is no credential to
++	 * attribute to them.
++	 */
++	getAdvisorAccountBindings(): readonly AdvisorAccountBinding[] {
++		if (!this.#advisorEnabled) return [];
++		const bindings: AdvisorAccountBinding[] = [];
++		for (const advisor of this.#advisors) {
++			const provider = advisor.model?.provider;
++			const providerSessionId = advisor.providerSessionId;
++			if (!provider || !providerSessionId) continue;
++			bindings.push({ slug: advisor.slug, provider, providerSessionId });
++		}
++		return bindings;
++	}
++
+ 	/** Return cumulative advisor cost recorded for the current session. */
+ 	getAdvisorCost(): number {
+ 		let cost = 0;
+diff --git a/packages/coding-agent/src/slash-commands/helpers/account-priority.ts b/packages/coding-agent/src/slash-commands/helpers/account-priority.ts
+new file mode 100644
+index 0000000..2cbd8b2
+--- /dev/null
++++ b/packages/coding-agent/src/slash-commands/helpers/account-priority.ts
+@@ -0,0 +1,132 @@
++import type { Settings } from "../../config/settings";
++import type { AuthStorage, OAuthAccountSummary } from "../../session/auth-storage";
++import { cfgProvidersAccountPriority, cfgProvidersDefaultAccount } from "../../session/settings";
++
++/**
++ * Everything the account-priority mutations need: the settings file they
++ * persist to and the live AuthStorage they apply to, scoped to one provider.
++ * Shared by the `/account` TUI and the non-interactive `/account` subcommands
++ * so both write the exact same pair of keys.
++ */
++export interface AccountPriorityContext {
++	settings: Settings;
++	authStorage: AuthStorage;
++	providerId: string;
++}
++
++/**
++ * Most portable selector string that resolves to exactly one stored row, as
++ * decided by AuthStorage — a bare email is ambiguous when two credentials share
++ * it under different orgs, so hand-deriving the selector would write a pin that
++ * AuthStorage then refuses to resolve. Falls back to the `#<credentialId>` form.
++ */
++export function resolveAccountSelector(ctx: AccountPriorityContext, credentialId: number): string {
++	return ctx.authStorage.describeAccountSelector(ctx.providerId, credentialId) ?? `#${credentialId}`;
++}
++
++/**
++ * True when a stored selector string identifies `account`. A priority list can
++ * hold an account under any of its identity fields (email, account id, project
++ * id, enterprise URL, `#<credentialId>`), so reordering must recognize all of
++ * them instead of only the canonical {@link resolveAccountSelector} form.
++ */
++export function selectorMatchesAccount(selector: string, account: OAuthAccountSummary): boolean {
++	const wanted = selector.trim().toLowerCase();
++	if (!wanted) return false;
++	if (wanted === `#${account.credentialId}`) return true;
++	return [account.email, account.accountId, account.projectId, account.enterpriseUrl].some(
++		value => value?.trim().toLowerCase() === wanted,
++	);
++}
++
++function writeDefaultAccountSelector(ctx: AccountPriorityContext, selector: string | undefined): void {
++	cfgProvidersDefaultAccount.setEntry(ctx.settings, ctx.providerId, selector);
++	ctx.authStorage.setDefaultAccountSelector(ctx.providerId, selector);
++}
++
++/**
++ * Persist an ordered priority list for the provider and apply it live. An empty
++ * list removes the provider key entirely (nothing is ranked); a non-empty list
++ * also republishes its head through `providers.defaultAccount`, because the
++ * head of the priority list *is* the pinned default and the two keys must never
++ * disagree.
++ */
++export function applyAccountPriority(ctx: AccountPriorityContext, selectors: readonly string[]): void {
++	if (selectors.length === 0) {
++		cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, undefined);
++		ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, undefined);
++		return;
++	}
++	cfgProvidersAccountPriority.setEntry(ctx.settings, ctx.providerId, [...selectors]);
++	ctx.authStorage.setAccountPrioritySelectors(ctx.providerId, selectors);
++	const head = selectors[0];
++	if (head !== undefined) writeDefaultAccountSelector(ctx, head);
++}
++
++/**
++ * Pin `account` as the provider's default. With no priority list this is the
++ * plain single-pin write; with a list the account is moved to position 1 (its
++ * head), since a divergent `providers.defaultAccount` would be shadowed by the
++ * list head and silently ignored.
++ */
++export function setDefaultAccount(ctx: AccountPriorityContext, account: OAuthAccountSummary): string {
++	const selector = resolveAccountSelector(ctx, account.credentialId);
++	const priority = ctx.authStorage.getAccountPrioritySelectors(ctx.providerId);
++	if (priority.length === 0) {
++		writeDefaultAccountSelector(ctx, selector);
++		return selector;
++	}
++	const rest = priority.filter(entry => !selectorMatchesAccount(entry, account));
++	applyAccountPriority(ctx, [selector, ...rest]);
++	return selector;
++}
++
++/**
++ * Unpin the provider's default. When a priority list exists its head is the
++ * default, so clearing drops the whole list — otherwise the next request would
++ * still be pinned by the list.
++ */
++export function clearDefaultAccount(ctx: AccountPriorityContext): boolean {
++	const priority = ctx.authStorage.getAccountPrioritySelectors(ctx.providerId);
++	const hadPriority = priority.length > 0;
++	if (hadPriority) applyAccountPriority(ctx, []);
++	writeDefaultAccountSelector(ctx, undefined);
++	return hadPriority;
++}
++
++/** Outcome of a priority move: whether anything changed and the resulting rank. */
++export interface AccountPriorityMove {
++	moved: boolean;
++	/** 1-based rank of the account after the move. */
++	rank: number;
++	/** Total number of ranked accounts after the move. */
++	total: number;
++}
++
++/**
++ * Move `account` one slot earlier (`delta === -1`) or later (`delta === 1`) in
++ * the provider's priority order. An account that is not ranked yet counts as
++ * sitting just past the end of the list, so a first move inserts it at the
++ * target position instead of doing nothing.
++ */
++export function moveAccountPriority(
++	ctx: AccountPriorityContext,
++	account: OAuthAccountSummary,
++	delta: -1 | 1,
++): AccountPriorityMove {
++	const list = [...ctx.authStorage.getAccountPrioritySelectors(ctx.providerId)];
++	const index = list.findIndex(entry => selectorMatchesAccount(entry, account));
++	if (index >= 0) {
++		const target = index + delta;
++		if (target < 0 || target >= list.length) return { moved: false, rank: index + 1, total: list.length };
++		const [entry] = list.splice(index, 1);
++		list.splice(target, 0, entry!);
++		applyAccountPriority(ctx, list);
++		return { moved: true, rank: target + 1, total: list.length };
++	}
++	// Unranked accounts rank behind every listed one; clamp the implicit slot.
++	const target = Math.max(0, Math.min(list.length + delta, list.length));
++	list.splice(target, 0, resolveAccountSelector(ctx, account.credentialId));
++	applyAccountPriority(ctx, list);
++	return { moved: true, rank: target + 1, total: list.length };
++}
+diff --git a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
+index 95722a5..f821344 100644
+--- a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
++++ b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
+@@ -1,6 +1,7 @@
+ import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+-import type { OAuthAccountIdentity } from "../../session/auth-storage";
+-import { sanitizeText } from "@oh-my-pi/pi-utils";
++import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
++import type { DefaultAccountFallover, OAuthAccountIdentity, OAuthAccountSummary } from "../../session/auth-storage";
++import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
+ 
+ /** Codex's orgName is the login-time plan, not a workspace name. */
+ export function codexUsagePlan(report: UsageReport): string | undefined {
+@@ -80,6 +81,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
+ 	return org && org !== base ? `${base} (${org})` : base;
+ }
+ 
++/**
++ * Compact label for one stored account among its siblings: the base identifier
++ * alone when no sibling shares it, else the org-suffixed
++ * {@link formatActiveAccountLabel} form. For width-constrained surfaces (the
++ * status-line account chip) where `me@x (me@x's Organization)` doubles the cell
++ * to say nothing — the org only carries information when two stored rows share
++ * an identifier. `enterpriseUrl` is the last-resort base, matching the account
++ * rows in `/account`.
++ */
++export function formatAccountLabelAmong(
++	account: OAuthAccountSummary,
++	siblings: readonly OAuthAccountSummary[],
++): string | undefined {
++	const base = accountLabelBase(account);
++	if (!base) return formatActiveAccountLabel(account);
++	const shared = siblings.some(
++		candidate =>
++			candidate.credentialId !== account.credentialId &&
++			normalizeIdentityValue(accountLabelBase(candidate)) === normalizeIdentityValue(base),
++	);
++	return shared ? (formatActiveAccountLabel(account) ?? base) : base;
++}
++
++function accountLabelBase(account: OAuthAccountSummary): string | undefined {
++	return account.email || account.accountId || account.projectId || account.enterpriseUrl?.trim() || undefined;
++}
++
+ /**
+  * True when a single usage-limit column belongs to the given OAuth identity.
+  *
+@@ -140,3 +168,29 @@ export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthA
+ 	if (!identity) return false;
+ 	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
+ }
++
++/**
++ * One-line warning shown when a session falls over from its configured default
++ * account to a sibling. Resolves both credential ids to display labels via the
++ * provider's stored OAuth accounts, falling back to `account #<id>` when an id
++ * no longer resolves (e.g. logged out mid-session).
++ */
++export function formatDefaultAccountFalloverNotice(
++	fallover: DefaultAccountFallover,
++	accounts: readonly OAuthAccountSummary[],
++): string {
++	const label = (credentialId: number): string => {
++		const account = accounts.find(candidate => candidate.credentialId === credentialId);
++		if (!account) return `account #${credentialId}`;
++		const enterpriseUrl = account.enterpriseUrl?.trim();
++		return (formatActiveAccountLabel(account) ?? enterpriseUrl) || `account #${credentialId}`;
++	};
++	const provider = getOAuthProviders().find(candidate => candidate.id === fallover.provider);
++	const providerName = provider?.name ?? fallover.provider;
++	const now = Date.now();
++	const retryClause =
++		fallover.retryAtMs !== undefined && fallover.retryAtMs > now
++			? ` (retry in ${formatDuration(fallover.retryAtMs - now)})`
++			: "";
++	return `${providerName}: default account ${label(fallover.defaultCredentialId)} is temporarily unavailable${retryClause} — using ${label(fallover.usedCredentialId)} for the rest of this session.`;
++}
+diff --git a/packages/coding-agent/test/modes/components/account-manager-selector.test.ts b/packages/coding-agent/test/modes/components/account-manager-selector.test.ts
+new file mode 100644
+index 0000000..3488133
+--- /dev/null
++++ b/packages/coding-agent/test/modes/components/account-manager-selector.test.ts
+@@ -0,0 +1,259 @@
++import { beforeAll, describe, expect, it } from "bun:test";
++import {
++	type AccountManagerActionResult,
++	type AccountManagerEventRow,
++	type AccountManagerOptions,
++	AccountManagerSelectorComponent,
++} from "@oh-my-pi/pi-coding-agent/modes/components/account-manager-selector";
++import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
++import { toSessionPinAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/session-pin";
++import type { SessionPinAccount } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
++
++beforeAll(async () => {
++	await initTheme();
++});
++
++const WIDTH = 120;
++const SHIFT_UP = "\x1b[1;2A";
++const SHIFT_DOWN = "\x1b[1;2B";
++const DOWN = "\x1b[B";
++const ENTER = "\r";
++const LOG = "l";
++
++/** Three stored accounts; the middle one is the session's active credential. */
++const STORED_ACCOUNTS = [
++	{ position: 0, credentialId: 11, email: "first@example.com", active: false },
++	{ position: 1, credentialId: 12, email: "second@example.com", active: true },
++	{ position: 2, credentialId: 13, email: "third@example.com", active: false },
++];
++
++interface HarnessConfig {
++	/** Oldest-first, exactly as `AuthStorage.listAccountSelectionEvents` hands them over. */
++	events?: readonly AccountManagerEventRow[];
++	/** Credential ids in priority order; `onMove` rewrites this live. */
++	priority?: readonly number[];
++	defaultCredentialId?: number;
++	quotaFor?: (account: SessionPinAccount) => string | undefined;
++	setDefaultResult?: AccountManagerActionResult;
++}
++
++interface Harness {
++	component: AccountManagerSelectorComponent;
++	accounts: readonly SessionPinAccount[];
++	/** Mutated by the component's move callback, so re-reads show the new order. */
++	priority: number[];
++	moves: { label: string; delta: -1 | 1 }[];
++	defaults: string[];
++	content: () => string[];
++}
++
++/**
++ * Mirrors how `SelectorController.showAccountManager` wires the pane: every
++ * getter is re-read on repaint and the mutation callbacks edit the fixture
++ * state the getters read from.
++ */
++function makeHarness(config: HarnessConfig = {}): Harness {
++	const accounts = toSessionPinAccounts(STORED_ACCOUNTS);
++	const priority = [...(config.priority ?? [])];
++	const events = config.events ?? [];
++	const moves: { label: string; delta: -1 | 1 }[] = [];
++	const defaults: string[] = [];
++	const quotaFor = config.quotaFor ?? ((): string | undefined => undefined);
++	const options: AccountManagerOptions = {
++		providerName: "Anthropic",
++		credentialSource: undefined,
++		accounts: () => accounts,
++		events: () => events,
++		quotaFor,
++		isDefault: account => account.credentialId === config.defaultCredentialId,
++		priorityRank: account => {
++			const index = priority.indexOf(account.credentialId);
++			return index >= 0 ? index + 1 : undefined;
++		},
++		onSetDefault: account => {
++			defaults.push(account.label);
++			return config.setDefaultResult;
++		},
++		onClearDefault: () => undefined,
++		onMove: (account, delta) => {
++			moves.push({ label: account.label, delta });
++			const index = priority.indexOf(account.credentialId);
++			const target = index + delta;
++			if (index >= 0 && target >= 0 && target < priority.length) {
++				const [moved] = priority.splice(index, 1);
++				if (moved !== undefined) priority.splice(target, 0, moved);
++			}
++			return undefined;
++		},
++		onCancel: () => {},
++		requestRender: () => {},
++	};
++	const component = new AccountManagerSelectorComponent(options);
++	return {
++		component,
++		accounts,
++		priority,
++		moves,
++		defaults,
++		content: () => component.renderContent(WIDTH).map(line => Bun.stripANSI(line).trimEnd()),
++	};
++}
++
++function accountAt(harness: Harness, index: number): SessionPinAccount {
++	const account = harness.accounts[index];
++	if (!account) throw new Error(`fixture is missing account ${index}`);
++	return account;
++}
++
++function rowFor(lines: readonly string[], label: string): string {
++	return lines.find(line => line.includes(label)) ?? "";
++}
++
++const OLDER_AT = Date.UTC(2026, 2, 4, 9, 30, 15);
++const NEWER_AT = OLDER_AT + 90_000;
++
++describe("AccountManagerSelectorComponent", () => {
++	it("marks the active, default and priority-ranked accounts and starts on the active row", () => {
++		const harness = makeHarness({
++			defaultCredentialId: 13,
++			priority: [12, 11],
++			quotaFor: account => (account.active ? "5h 12% left" : undefined),
++		});
++		const first = accountAt(harness, 0);
++		const second = accountAt(harness, 1);
++		const third = accountAt(harness, 2);
++		const lines = harness.content();
++
++		// Every stored account is listed with its 1-based storage position.
++		expect(rowFor(lines, first.label)).toContain("1. ");
++		expect(rowFor(lines, second.label)).toContain("2. ");
++		expect(rowFor(lines, third.label)).toContain("3. ");
++
++		// The session's credential is the highlighted row and the only "active" one.
++		expect(harness.component.selectedAccount?.credentialId).toBe(12);
++		expect(rowFor(lines, second.label)).toContain(theme.nav.cursor);
++		expect(rowFor(lines, second.label)).toContain("active");
++		expect(rowFor(lines, first.label)).not.toContain("active");
++		expect(rowFor(lines, third.label)).not.toContain("active");
++
++		// Default marker follows `isDefault`, not the active row.
++		expect(rowFor(lines, third.label)).toContain("★ default");
++		expect(rowFor(lines, second.label)).not.toContain("default");
++
++		// Priority positions come from priorityRank; the unranked row shows none.
++		expect(rowFor(lines, second.label)).toContain("priority 1");
++		expect(rowFor(lines, first.label)).toContain("priority 2");
++		expect(rowFor(lines, third.label)).not.toContain("priority");
++
++		// Quota and the in-use note hang under the row they describe.
++		const activeRow = lines.indexOf(rowFor(lines, second.label));
++		expect(lines[activeRow + 1]).toContain("5h 12% left");
++		expect(lines[activeRow + 2]).toContain("in use by this session");
++		expect(lines.filter(line => line.includes("in use by this session"))).toHaveLength(1);
++	});
++
++	it("moves the highlighted account through onMove and repaints the new priority order", () => {
++		const harness = makeHarness({ priority: [11, 12] });
++		const first = accountAt(harness, 0);
++		const second = accountAt(harness, 1);
++
++		expect(rowFor(harness.content(), second.label)).toContain("priority 2");
++
++		harness.component.handleInput(SHIFT_UP);
++		expect(harness.moves).toEqual([{ label: second.label, delta: -1 }]);
++		expect(harness.priority).toEqual([12, 11]);
++		const promoted = harness.content();
++		expect(rowFor(promoted, second.label)).toContain("priority 1");
++		expect(rowFor(promoted, first.label)).toContain("priority 2");
++
++		harness.component.handleInput(SHIFT_DOWN);
++		expect(harness.moves).toEqual([
++			{ label: second.label, delta: -1 },
++			{ label: second.label, delta: 1 },
++		]);
++		const demoted = harness.content();
++		expect(rowFor(demoted, second.label)).toContain("priority 2");
++		expect(rowFor(demoted, first.label)).toContain("priority 1");
++
++		// Reordering never moves the cursor off the account being reordered.
++		expect(harness.component.selectedAccount?.credentialId).toBe(12);
++	});
++
++	it("collapses the session log to a count and expands it newest-first on l", () => {
++		const events: AccountManagerEventRow[] = [
++			{
++				origin: "main",
++				event: { atMs: OLDER_AT, provider: "anthropic", credentialId: 11, reason: "pinned-default" },
++			},
++			{
++				origin: "reviewer",
++				event: {
++					atMs: NEWER_AT,
++					provider: "anthropic",
++					previousCredentialId: 11,
++					credentialId: 12,
++					reason: "fallover-blocked",
++					detail: "default blocked, retry in 42m",
++				},
++			},
++		];
++		const harness = makeHarness({ events });
++		const first = accountAt(harness, 0);
++		const second = accountAt(harness, 1);
++
++		const collapsed = harness.content();
++		expect(collapsed).toContain("Session account changes: 2 — l to expand");
++		expect(collapsed.some(line => line.includes("fallover-blocked"))).toBe(false);
++
++		harness.component.handleInput(LOG);
++		const expanded = harness.content();
++		expect(expanded.some(line => line.includes("l to expand"))).toBe(false);
++		expect(expanded).toContain("Session account changes");
++
++		const advisorRow = expanded.findIndex(line => line.includes("fallover-blocked"));
++		const mainRow = expanded.findIndex(line => line.includes("pinned-default"));
++		expect(advisorRow).toBeGreaterThanOrEqual(0);
++		// Newest change leads, even though the getter hands rows over oldest-first.
++		expect(advisorRow).toBeLessThan(mainRow);
++
++		// The advisor row names its origin session and resolves both credential ids.
++		const switchedAt = new Date(NEWER_AT);
++		const clock = [switchedAt.getHours(), switchedAt.getMinutes(), switchedAt.getSeconds()]
++			.map(part => String(part).padStart(2, "0"))
++			.join(":");
++		expect(expanded[advisorRow]).toContain(clock);
++		expect(expanded[advisorRow]).toContain("anthropic");
++		expect(expanded[advisorRow]).toContain("reviewer");
++		expect(expanded[advisorRow]).toContain(`${first.label} → ${second.label}`);
++		expect(expanded[advisorRow + 1]).toContain("default blocked, retry in 42m");
++
++		// A first-ever selection has no previous credential.
++		expect(expanded[mainRow]).toContain("main");
++		expect(expanded[mainRow]).toContain(`none → ${first.label}`);
++
++		harness.component.handleInput(LOG);
++		expect(harness.content()).toContain("Session account changes: 2 — l to expand");
++	});
++
++	it("sets the default from the highlighted row and surfaces the returned result until navigation", () => {
++		const harness = makeHarness({
++			// Multi-line failure text has to collapse into the single status row.
++			setDefaultResult: { message: "second@example.com is no longer\navailable (selector 2).", tone: "error" },
++		});
++		const second = accountAt(harness, 1);
++
++		harness.component.handleInput(ENTER);
++		expect(harness.defaults).toEqual([second.label]);
++
++		const afterEnter = harness.content();
++		const statusRows = afterEnter.filter(line => line.includes("is no longer"));
++		expect(statusRows).toHaveLength(1);
++		expect(statusRows[0]).toContain("second@example.com is no longer available (selector 2).");
++
++		// Moving the cursor drops the stale result and retargets the callback.
++		harness.component.handleInput(DOWN);
++		expect(harness.content().some(line => line.includes("is no longer"))).toBe(false);
++		harness.component.handleInput(ENTER);
++		expect(harness.defaults).toEqual([second.label, accountAt(harness, 2).label]);
++	});
++});

@@ -1,0 +1,3399 @@
+diff --git a/.gitignore b/.gitignore
+index 23952fc..d0db06b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,6 +11,7 @@ target/
+ .xwin-cache/
+ *.tsbuildinfo
+ *.node
++packages/natives/native/embedded-addons.*.tar.gz
+ *.b64.js
+ /result
+ /result-*
+diff --git a/docs/models.md b/docs/models.md
+index 7fcaf6b..92e2495 100644
+--- a/docs/models.md
++++ b/docs/models.md
+@@ -207,13 +207,23 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
+ 
+ Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
+ 
++The OpenAI-shaped runner APIs call these endpoints and fill these roles:
++
++| API | Endpoint | Kind | Role |
++| --- | --- | --- | --- |
++| `openai-images` | `{baseUrl}/images/generations` (`/images/edits` with input images) | `image` | `image` |
++| `openai-speech` | `{baseUrl}/audio/speech` | `tts` | `speech` |
++| `openai-transcriptions` | `{baseUrl}/audio/transcriptions` (multipart) | `stt` | `dictation` |
++
++Chat token defaults (`contextWindow`, `maxTokens`) are left unset for these models. Under `transport: pi-native` they target the gateway's `/v1` root.
++
+ ### Allowed auth/discovery values
+ 
+ - `auth`: `apiKey` (default), `none`, or `oauth`. `none` and `oauth` waive the custom-provider `apiKey` requirement, but `oauth` does not create credentials or register a login flow. It forces OAuth-style request shaping; a usable credential must come from stored auth, environment, or a configured key. Custom `anthropic-messages` models also use OAuth-style shaping when `auth` is omitted; set `auth: apiKey` for plain API-key shaping.
+ - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
+ - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
+ - `discovery.advertisedReasoning`: optional boolean, default `true`, for `openai-models-list`, `lm-studio`, and `proxy`. Discovery reads what a `/v1/models` row states about its own reasoning surface (`supported_reasoning_levels` / `default_reasoning_level` / `reasoning`, top-level or under `metadata`) and lets it outrank the bundled-reference guess, so a gateway that dispatches with its own catalog offers exactly the tiers its route accepts. A row that lists `none` gets `reasoningDisableMode: none-effort`, so a thinking-off request sends the off-switch instead of being clamped to the lowest tier. An advertised ladder also pins `defaultLevel` inside itself, so catalog policy cannot inject a tier the row omits. A row reporting `reasoning: false` overrides a reasoning-enabled reference for that id. Set the flag to `false` when an endpoint advertises levels its route rejects: discovery then builds each model's thinking surface from the bundled reference alone. A row that says nothing about reasoning is unaffected either way. Explicit `modelOverrides.<id>.thinking` and `compat.supportsReasoningEffort` still win over both. `litellm` does not accept the flag: its authoritative reasoning metadata comes from `/model_group/info`, so the setting would only apply to its `/v1/models` fallback.
+-- `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
++- `transport`: `pi-native` only. When set, every chat model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; image, speech, and transcription runners go to the same gateway's `/v1/<task>` routes instead. `apiKey` is the gateway bearer.
+ - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
+ - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
+ - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; unknown models retain the fast local estimate.
+@@ -562,6 +572,8 @@ derives each model's `api` from the entry's `supported_endpoint_types`:
+ - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
+ - otherwise -> falls back to provider-level `api`, or `openai-completions` when it is omitted
+ 
++Rows an omp auth-gateway marks with a non-chat `kind` skip that routing and use the gateway's task route instead: `image` → `openai-images` (`image` role), `tts` → `openai-speech` (`speech` role), `stt` → `openai-transcriptions` (`dictation` role). Other runner kinds are not offered as chat models.
++
+ Provider-level `api` is **optional** with `discovery.type: proxy` because the
+ per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
+ from `baseUrl` before appending `/v1/messages`, so a single discovery `baseUrl`
+diff --git a/docs/tools/bash.md b/docs/tools/bash.md
+index bb35e1e..d80ccca 100644
+--- a/docs/tools/bash.md
++++ b/docs/tools/bash.md
+@@ -148,7 +148,7 @@ Choose the setting by the desired outcome:
+ 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
+ 3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
+ 4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before execution.
+-5. When `worktree.clone` is enabled, recognized literal `git worktree add` commands are rewritten to the clone-backed worktree helper. GitHub cache invalidation then runs. A per-run `InternalUrlFilesystem` is injected into the native shell so `scheme://` paths resolve at operation time.
++5. When `worktree.clone` is enabled, recognized literal `git worktree add` commands are rewritten to the clone-backed worktree helper; a worktree path inside the source checkout (e.g. `.worktrees/<name>`) gets a plain checkout instead, because the clone would copy the destination into itself. GitHub cache invalidation then runs. A per-run `InternalUrlFilesystem` is injected into the native shell so `scheme://` paths resolve at operation time.
+ 6. A host `cwd` resolves against `session.cwd` and `fs.stat()` verifies it is a directory; a URL `cwd` is checked through the URL filesystem and handed to the shell as-is (service and PTY modes refuse it).
+ 7. Named services dispatch before finite-command timeout handling, default PTY to `true`, and use `ready.timeout` only for readiness. For finite commands, `timeout: 0` disables the deadline; otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling, then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). Clamping adds a notice line.
+ 8. Execution path splits:
+diff --git a/docs/tools/github.md b/docs/tools/github.md
+index 9a72194..3d46c8d 100644
+--- a/docs/tools/github.md
++++ b/docs/tools/github.md
+@@ -153,7 +153,7 @@ Worktree and metadata behavior:
+ - Local branch name is always `pr-<number>`.
+ - Worktree path is `getWorktreeDir("<number>-<repo-hash>")` = `path.join(getWorktreesDir(), "<number>-<repo-hash>")`, where `<number>` is the PR number and `<repo-hash>` is `hashPath(primaryRepoRoot)` (a 7-hex digest of the primary repo root). `getWorktreesDir()` resolves the base in this order: a valid `OMP_WORKTREE_DIR`, the applied `worktree.base` setting, then the profile/XDG-aware data-root default (normally `~/.omp/wt`). Both overrides expand a leading `~` and must resolve to an absolute path; an invalid relative value is ignored and resolution falls through. `resolveAvailableWorktreePath()` appends a `-2`/`-3`… suffix when the resulting path is already registered with git or present on disk.
+ - Existing worktree detection is by branch ref `refs/heads/pr-<number>` from `repository.worktrees()` (`@oh-my-pi/pi-natives/vcs`).
+-- New worktree creation calls `repository.worktreeAdd(finalWorktreePath, localBranch, { detach: false, clone, backend }, signal)` after choosing an unused path. `clone` follows `worktree.clone` (default `true`); `backend` follows `isolation.backend` (default `"auto"`). Clone failure falls back to plain checkout with a warning; successful clone metadata appears as `clonedWith`.
++- New worktree creation calls `repository.worktreeAdd(finalWorktreePath, localBranch, { detach: false, clone, backend }, signal)` after choosing an unused path. `clone` follows `worktree.clone` (default `true`) and is off when the worktree path resolves inside the source checkout (`canCloneCheckoutInto`); `backend` follows `isolation.backend` (default `"auto"`). Clone failure falls back to plain checkout with a warning; successful clone metadata appears as `clonedWith`.
+ - For same-repo PRs, remote is `origin`. For cross-repo PRs, the tool resolves a clone URL for the head repo, reuses an existing remote with the same URL when possible, or creates `fork-<owner>` / `fork-<owner>-<n>`.
+ - The branch push metadata is persisted with `git config` under the repository's shared `.git/config` as:
+    - `branch.pr-<number>.remote`
+diff --git a/packages/ai/src/auth/affinity.ts b/packages/ai/src/auth/affinity.ts
+index 68ebf09..833250d 100644
+--- a/packages/ai/src/auth/affinity.ts
++++ b/packages/ai/src/auth/affinity.ts
+@@ -1,7 +1,16 @@
+ import { logger } from "@oh-my-pi/pi-utils";
+ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+ import { getEnvApiKey } from "../env-api-key";
+-import type { AuthCredential, OAuthCredential, SessionRestrictionLease, SessionsApi } from "./types";
++import type { AccountPins } from "./pins";
++import { isCredentialIdEligible } from "./selection";
++import type {
++	AccountSelectionReason,
++	AuthCredential,
++	AuthCredentialSelectionPolicy,
++	OAuthCredential,
++	SessionRestrictionLease,
++	SessionsApi,
++} from "./types";
+ import type { AuthCredentialStore } from "./store";
+ import type { CredentialPool } from "./pool";
+ import type { KeyOverrides } from "./cascade";
+@@ -34,12 +43,46 @@ type PersistedSticky = {
+ export type SessionCredential = {
+ 	type: AuthCredential["type"];
+ 	index: number;
+-	credentialId?: number;
++	credentialId: number;
+ 	lastUsedAtMs?: number;
+ 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
+ 	explicit?: true;
+ };
+ 
++/** Recording options: policy scope, backdating, and the journal reason. */
++export type RecordSessionCredentialOptions = {
++	selection?: AuthCredentialSelectionPolicy;
++	/** Backdates the sticky (session-file pin restores on resume); defaults to now. */
++	lastUsedAtMs?: number;
++	/** Cause shown by `/account`'s session log. */
++	reason?: AccountSelectionReason;
++	/** Human-readable cause detail. */
++	detail?: string;
++	/** Marks the entry a user pin that ranking and reserve never evict. */
++	explicit?: boolean;
++};
++
++/** Storage key for one provider's session map, scoped by policy when present. */
++function storageKey(provider: string, selection: AuthCredentialSelectionPolicy | undefined): string {
++	return selection ? `${provider}\0${selection.policyKey}` : provider;
++}
++
++/** True when `key` is `provider`'s unscoped or policy-scoped storage key. */
++function isProviderStorageKey(key: string, provider: string): boolean {
++	return key === provider || key.startsWith(`${provider}\0`);
++}
++
++/** Persistent cache key for one session's sticky, scoped by policy when present. */
++function stickyCacheKey(
++	provider: string,
++	sessionId: string,
++	selection: AuthCredentialSelectionPolicy | undefined,
++): string {
++	return selection
++		? `${SESSION_STICKY_CACHE_PREFIX}${provider}:policy:${selection.policyKey}:${sessionId}`
++		: `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
++}
++
+ /** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
+ type SessionRestriction = { readonly allowed: ReadonlySet<string>; readonly lease: SessionRestrictionLease };
+ 
+@@ -52,25 +95,30 @@ export type SessionRestrictions = Map<string, Map<string, SessionRestriction>>;
+ 
+ /** Session → credential affinity (pins), persisted in the store cache. */
+ export class SessionAffinity implements SessionsApi {
+-	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
++	/** Tracks the last used credential per (provider, policy) for a session (used for rate-limit switching). */
+ 	#sessionLastCredential: Map<string, LRUCache<string, SessionCredential>> = new Map();
+-	/** Persisted sticky rows per provider, keyed by session id, so unchanged re-records skip the write. */
++	/** Storage key -> session id -> credential a pin/priority edit released, pending the next selection's journal entry. */
++	#releasedSessionCredentials: Map<string, LRUCache<string, number>> = new Map();
++	/** Persisted sticky rows per (provider, policy), keyed by session id, so unchanged re-records skip the write. */
+ 	#persistedSticky: Map<string, LRUCache<string, PersistedSticky>> = new Map();
+ 	#store: AuthCredentialStore;
+ 	#pool: CredentialPool;
+ 	#overrides: KeyOverrides;
+ 	#restrictions: SessionRestrictions;
++	#pins: AccountPins;
+ 
+ 	constructor(
+ 		store: AuthCredentialStore,
+ 		pool: CredentialPool,
+ 		overrides: KeyOverrides,
+ 		restrictions: SessionRestrictions,
++		pins: AccountPins,
+ 	) {
+ 		this.#store = store;
+ 		this.#pool = pool;
+ 		this.#overrides = overrides;
+ 		this.#restrictions = restrictions;
++		this.#pins = pins;
+ 	}
+ 
+ 	restrict(provider: string, sessionId: string, identityKeys: readonly string[]): SessionRestrictionLease {
+@@ -119,20 +167,38 @@ export class SessionAffinity implements SessionsApi {
+ 		return entry !== undefined && this.allows(provider, sessionId, entry.credential);
+ 	}
+ 
+-	/** Bounded per-provider session map, created on first use. */
+-	static #sessionsFor<V>(maps: Map<string, LRUCache<string, V>>, provider: string): LRUCache<string, V> {
+-		let sessions = maps.get(provider);
++	/** Bounded per-(provider, policy) session map, created on first use. */
++	static #sessionsFor<V>(maps: Map<string, LRUCache<string, V>>, key: string): LRUCache<string, V> {
++		let sessions = maps.get(key);
+ 		if (!sessions) {
+ 			sessions = new LRUCache<string, V>({ max: SESSION_AFFINITY_MAX_SESSIONS_PER_PROVIDER });
+-			maps.set(provider, sessions);
++			maps.set(key, sessions);
+ 		}
+ 		return sessions;
+ 	}
+ 
+-	/** Drop every pin for a provider, both in memory and in the persisted cache. */
++	/**
++	 * Drop every session's sticky credential for `provider` (memory + persistent
++	 * cache) while keeping rate-limit blocks, round-robin cursors, and the
++	 * journal intact — used both by credential-set changes and by pin/priority
++	 * edits, which must make bound sessions (the primary AND every advisor
++	 * provider-session) re-resolve against the new order instead of riding
++	 * their old pin for the rest of the session.
++	 */
+ 	clearProvider(provider: string): void {
+-		this.#sessionLastCredential.delete(provider);
+-		this.#persistedSticky.delete(provider);
++		// Deleting the visited key mid-iteration is well-defined for Map, so no snapshot.
++		for (const [key, sessionMap] of this.#sessionLastCredential) {
++			if (!isProviderStorageKey(key, provider)) continue;
++			const released = SessionAffinity.#sessionsFor(this.#releasedSessionCredentials, key);
++			for (const sessionId of sessionMap.keys()) {
++				const entry = sessionMap.peek(sessionId);
++				if (entry) released.set(sessionId, entry.credentialId);
++			}
++			this.#sessionLastCredential.delete(key);
++		}
++		for (const key of this.#persistedSticky.keys()) {
++			if (isProviderStorageKey(key, provider)) this.#persistedSticky.delete(key);
++		}
+ 		const prefix = `${SESSION_STICKY_CACHE_PREFIX}${provider}:`;
+ 		try {
+ 			this.#store.deleteCachePrefix?.(prefix);
+@@ -143,14 +209,20 @@ export class SessionAffinity implements SessionsApi {
+ 
+ 	/** Drop only this in-memory session pin after OAuth selection falls through. */
+ 	forget(provider: string, sessionId: string): void {
+-		this.#sessionLastCredential.get(provider)?.delete(sessionId);
++		for (const [key, sessionMap] of this.#sessionLastCredential) {
++			if (!isProviderStorageKey(key, provider)) continue;
++			sessionMap.delete(sessionId);
++		}
+ 	}
+ 
+ 	/**
+-	 * Records which credential was used for a session (for rate-limit switching).
+-	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
+-	 * it defaults to now for live selections. Automatic re-recording of the same
+-	 * durable row preserves an explicit user pin.
++	 * Records which credential was used for a session (for rate-limit switching)
++	 * and journals the change when the serving credential actually moved.
++	 * `options.lastUsedAtMs` backdates the sticky (session-file pin restores on
++	 * resume); it defaults to now for live selections. `options.reason` is the
++	 * cause shown by `/account`'s session log. Automatic re-recording of the same
++	 * durable row preserves an explicit user pin. A restricted session never
++	 * records a credential outside its allowlist.
+ 	 *
+ 	 * The in-memory sticky is always exact. The persisted row is rewritten only
+ 	 * when the credential, its type, or explicitness changes, or when the stored
+@@ -162,18 +234,25 @@ export class SessionAffinity implements SessionsApi {
+ 		sessionId: string | undefined,
+ 		type: AuthCredential["type"],
+ 		index: number,
+-		lastUsedAtMs?: number,
+-		explicit = false,
++		options: RecordSessionCredentialOptions = {},
+ 	): void {
+ 		if (!sessionId || !this.#permits(provider, sessionId, index)) return;
+-		const nowMs = lastUsedAtMs ?? Date.now();
+-		const credentialId = this.#pool.entries(provider)[index]?.id;
+-		const sessionMap = SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider);
++		const stored = this.#pool.entries(provider)[index];
++		const credentialId = stored?.id;
++		if (credentialId === undefined) return;
++		const selection = options.selection;
++		const nowMs = options.lastUsedAtMs ?? Date.now();
++		const key = storageKey(provider, selection);
++		const sessionMap = SessionAffinity.#sessionsFor(this.#sessionLastCredential, key);
++		// A pin/priority edit releases the sticky before this re-selection, so the
++		// prior binding lives in the release map rather than the sticky map.
++		const released = this.#releasedSessionCredentials.get(key);
++		const releasedCredentialId = released?.get(sessionId);
++		released?.delete(sessionId);
+ 		const previous = sessionMap.get(sessionId);
+-		const sameCredential =
+-			previous?.type === type &&
+-			(credentialId !== undefined ? previous.credentialId === credentialId : previous.index === index);
+-		const isExplicit = explicit || (sameCredential && previous?.explicit === true);
++		const previousCredentialId = previous?.credentialId ?? releasedCredentialId;
++		const sameCredential = previous?.credentialId === credentialId && previous.type === type;
++		const isExplicit = options.explicit === true || (sameCredential && previous?.explicit === true);
+ 		const sessionCredential: SessionCredential = {
+ 			type,
+ 			index,
+@@ -182,11 +261,23 @@ export class SessionAffinity implements SessionsApi {
+ 			...(isExplicit ? { explicit: true as const } : {}),
+ 		};
+ 		sessionMap.set(sessionId, sessionCredential);
++		if (previousCredentialId !== credentialId) {
++			this.#pins.journalAccountSelection({
++				atMs: Date.now(),
++				provider,
++				sessionId,
++				credentialId,
++				previousCredentialId,
++				reason: options.reason ?? (previousCredentialId === undefined ? "initial" : "policy"),
++				email: stored.credential.type === "oauth" ? stored.credential.email : undefined,
++				accountId: stored.credential.type === "oauth" ? stored.credential.accountId : undefined,
++				detail: options.detail,
++			});
++		}
+ 
+-		if (credentialId === undefined) return;
+-		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
++		const cacheKey = stickyCacheKey(provider, sessionId, selection);
+ 		const expiresAtSec = Math.floor(nowMs / 1000) + SESSION_STICKY_TTL_SEC;
+-		const persistedSessions = SessionAffinity.#sessionsFor(this.#persistedSticky, provider);
++		const persistedSessions = SessionAffinity.#sessionsFor(this.#persistedSticky, key);
+ 		const persisted = persistedSessions.get(sessionId);
+ 		if (
+ 			persisted &&
+@@ -212,54 +303,67 @@ export class SessionAffinity implements SessionsApi {
+ 	}
+ 
+ 	/**
+-	 * Retrieves the last credential used by a session. A restricted session
+-	 * never sees a pin outside its allowlist — inherited, restored, or recorded
+-	 * before the restriction — so it re-ranks inside the allowlist instead.
++	 * Retrieves the last credential used by a session, scoped to `selection`'s
++	 * pool when given. A restricted session never sees a pin outside its
++	 * allowlist — inherited, restored, or recorded before the restriction — so
++	 * it re-ranks inside the allowlist instead.
+ 	 */
+-	get(provider: string, sessionId: string | undefined): SessionCredential | undefined {
++	get(
++		provider: string,
++		sessionId: string | undefined,
++		selection?: AuthCredentialSelectionPolicy,
++	): SessionCredential | undefined {
+ 		if (!sessionId) return undefined;
+-		const credential = this.#lookup(provider, sessionId);
++		const credential = this.#lookup(provider, sessionId, selection);
+ 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
+ 	}
+ 
+-	#lookup(provider: string, sessionId: string): SessionCredential | undefined {
+-		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
++	#lookup(
++		provider: string,
++		sessionId: string,
++		selection: AuthCredentialSelectionPolicy | undefined,
++	): SessionCredential | undefined {
++		const key = storageKey(provider, selection);
++		const live = this.#sessionLastCredential.get(key)?.get(sessionId);
+ 		if (live) {
+ 			// Another process can add or drop rows mid-session and the pool is an
+ 			// index-ordered snapshot, so re-resolve the pin through its durable row
+ 			// id: a compacted array must not point the session at a different
+ 			// account, and a deleted account must not hand its slot to a sibling.
+-			if (live.credentialId === undefined) return live;
+ 			const stored = this.#pool.entries(provider);
+ 			const actualIndex = stored.findIndex(entry => entry.id === live.credentialId);
+-			if (actualIndex === -1 || stored[actualIndex]?.credential.type !== live.type) {
+-				this.#sessionLastCredential.get(provider)?.delete(sessionId);
+-				return undefined;
++			const actual = actualIndex >= 0 ? stored[actualIndex] : undefined;
++			if (
++				actual !== undefined &&
++				actual.credential.type === live.type &&
++				isCredentialIdEligible(actual.id, selection)
++			) {
++				live.index = actualIndex;
++				return live;
+ 			}
+-			live.index = actualIndex;
+-			return live;
++			this.#sessionLastCredential.get(key)?.delete(sessionId);
+ 		}
+ 		try {
+-			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
++			const cacheKey = stickyCacheKey(provider, sessionId, selection);
+ 			const raw = this.#store.getCache(cacheKey);
+ 			if (raw) {
+ 				const val = JSON.parse(raw) as SessionCredential;
+ 
+-				if (val.credentialId !== undefined) {
+-					const stored = this.#pool.entries(provider);
+-					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
+-					if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
+-						this.#persistedSticky.get(provider)?.delete(sessionId);
+-						this.#store.setCache(cacheKey, "", 0);
+-						return undefined;
+-					}
+-					val.index = actualIndex;
+-				} else {
+-					// Fallback: drop unsafe index-only cache rows to prevent wrong-account routing
+-					this.#persistedSticky.get(provider)?.delete(sessionId);
++				if (!isCredentialIdEligible(val.credentialId, selection)) {
++					this.#persistedSticky.get(key)?.delete(sessionId);
++					this.#store.setCache(cacheKey, "", 0);
++					return undefined;
++				}
++				// Index-only legacy rows carry no durable id and never match, so they
++				// are dropped here instead of risking wrong-account routing.
++				const stored = this.#pool.entries(provider);
++				const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
++				if (actualIndex === -1 || stored[actualIndex]?.credential.type !== val.type) {
++					this.#persistedSticky.get(key)?.delete(sessionId);
+ 					this.#store.setCache(cacheKey, "", 0);
+ 					return undefined;
+ 				}
++				val.index = actualIndex;
+ 
+ 				const sessionVal: SessionCredential = {
+ 					type: val.type,
+@@ -269,14 +373,14 @@ export class SessionAffinity implements SessionsApi {
+ 					...(val.explicit === true ? { explicit: true } : {}),
+ 				};
+ 				if (typeof val.lastUsedAtMs === "number") {
+-					SessionAffinity.#sessionsFor(this.#persistedSticky, provider).set(sessionId, {
++					SessionAffinity.#sessionsFor(this.#persistedSticky, key).set(sessionId, {
+ 						type: val.type,
+ 						credentialId: val.credentialId,
+ 						explicit: val.explicit === true,
+ 						lastUsedAtMs: val.lastUsedAtMs,
+ 					});
+ 				}
+-				SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider).set(sessionId, sessionVal);
++				SessionAffinity.#sessionsFor(this.#sessionLastCredential, key).set(sessionId, sessionVal);
+ 				return sessionVal;
+ 			}
+ 		} catch (err) {
+@@ -285,18 +389,19 @@ export class SessionAffinity implements SessionsApi {
+ 		return undefined;
+ 	}
+ 
+-	/** Clears the last credential used by a session for a provider. */
+-	clear(provider: string, sessionId: string | undefined): void {
++	/** Clears the last credential used by a session for a provider (scoped to `selection` when given). */
++	clear(provider: string, sessionId: string | undefined, selection?: AuthCredentialSelectionPolicy): void {
+ 		if (!sessionId) return;
+-		const sessionMap = this.#sessionLastCredential.get(provider);
++		const key = storageKey(provider, selection);
++		const sessionMap = this.#sessionLastCredential.get(key);
+ 		if (sessionMap) {
+ 			sessionMap.delete(sessionId);
+ 			if (sessionMap.size === 0) {
+-				this.#sessionLastCredential.delete(provider);
++				this.#sessionLastCredential.delete(key);
+ 			}
+ 		}
+-		const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
+-		this.#persistedSticky.get(provider)?.delete(sessionId);
++		const cacheKey = stickyCacheKey(provider, sessionId, selection);
++		this.#persistedSticky.get(key)?.delete(sessionId);
+ 		try {
+ 			this.#store.setCache(cacheKey, "", 0);
+ 		} catch (err) {
+@@ -361,7 +466,11 @@ export class SessionAffinity implements SessionsApi {
+ 		const target = stored[index];
+ 		if (target?.credential.type !== "oauth" || !this.allows(provider, sessionId, target.credential)) return false;
+ 		const restoredAtMs = options?.restoredAtMs;
+-		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined);
++		this.record(provider, sessionId, "oauth", index, {
++			lastUsedAtMs: restoredAtMs,
++			explicit: restoredAtMs === undefined,
++			reason: "manual-pin",
++		});
+ 		return true;
+ 	}
+ 
+@@ -385,14 +494,10 @@ export class SessionAffinity implements SessionsApi {
+ 			const credential = this.get(provider, sourceSessionId);
+ 			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
+ 			if (include && !include(provider, credential.explicit === true)) continue;
+-			this.record(
+-				provider,
+-				targetSessionId,
+-				credential.type,
+-				credential.index,
+-				credential.lastUsedAtMs,
+-				credential.explicit === true,
+-			);
++			this.record(provider, targetSessionId, credential.type, credential.index, {
++				lastUsedAtMs: credential.lastUsedAtMs,
++				explicit: credential.explicit === true,
++			});
+ 			inherited += 1;
+ 		}
+ 		return inherited;
+diff --git a/packages/ai/src/auth/cascade.ts b/packages/ai/src/auth/cascade.ts
+index cf4e827..3092b8c 100644
+--- a/packages/ai/src/auth/cascade.ts
++++ b/packages/ai/src/auth/cascade.ts
+@@ -8,15 +8,17 @@ import { AUTHENTICATED_SENTINEL } from "../registry/types";
+ import type { SessionAffinity } from "./affinity";
+ import type { CredentialPool } from "./pool";
+ import type { CredentialSelector, OAuthResolutionResult } from "./select";
++import type { AccountPins } from "./pins";
+ import type {
+ 	AuthApiKeyOptions,
++	AuthApiKeySelectionResult,
+ 	AuthPeekOptions,
+ 	AuthCredential,
++	AuthCredentialSelectionPolicy,
+ 	AuthSource,
+ 	AuthSourceOptions,
+ 	KeysApi,
+ 	LimitsApi,
+-	OAuthRequestIdentity,
+ } from "./types";
+ 
+ /**
+@@ -146,6 +148,7 @@ export interface KeyCascadeDeps {
+ 	overrides: KeyOverrides;
+ 	selector: CredentialSelector;
+ 	affinity: SessionAffinity;
++	pins: AccountPins;
+ 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
+ 	rotate: LimitsApi["rotate"];
+ 	sourceLabel?: string;
+@@ -330,15 +333,9 @@ export class KeyCascade implements KeysApi {
+ 		sessionId?: string,
+ 		options?: AuthApiKeyOptions,
+ 	): Promise<ResolvedApiKey | undefined> {
+-		let credentialId: number | undefined;
+-		let oauthIdentity: OAuthRequestIdentity | undefined;
+-		let oauthAccess: string | undefined;
+-		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access) => {
+-			credentialId = id;
+-			oauthIdentity = identity;
+-			oauthAccess = access;
+-		});
+-		if (apiKey === undefined) return undefined;
++		const result = await this.resolveApiKeySelection(provider, sessionId, options);
++		if (!result.ok) return undefined;
++		const { apiKey, credentialId, oauthAccess, oauthIdentity } = result.credential;
+ 		return {
+ 			apiKey,
+ 			credentialId,
+@@ -350,18 +347,18 @@ export class KeyCascade implements KeysApi {
+ 	/**
+ 	 * Get API key for a provider.
+ 	 * Priority (first match wins): runtime override, config override, OAuth,
+-	 * login API key, environment variable, then another stored API key.
+-	 * A session restricted by `sessions.restrict` resolves only its allowed
+-	 * OAuth accounts and throws {@link AIError.MissingApiKeyError} when none
+-	 * can serve or a config key (a models.yml `apiKey`, often for a proxy
+-	 * `baseUrl`) owns the provider, rather than using any other credential.
+-	 * A transient OAuth refresh failure resolves `undefined`, so availability
+-	 * probes move on to their next candidate; request paths use
++	 * login API key, config fallback, environment variable, then another stored API key.
++	 * Delegates to {@link resolveApiKeySelection} so the durable-row journaling,
++	 * default-account fallover notices, selection-policy restriction, and
++	 * `sessions.restrict` account pools apply to every resolve path, not only the
++	 * gateway's. A transient OAuth refresh failure resolves `undefined`, so
++	 * availability probes move on to their next candidate; request paths use
+ 	 * {@link KeyCascade.getWithCredential}, which surfaces it.
+ 	 */
+ 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+ 		try {
+-			return await this.#resolve(provider, sessionId, options);
++			const result = await this.resolveApiKeySelection(provider, sessionId, options);
++			return result.ok ? result.credential.apiKey : undefined;
+ 		} catch (error) {
+ 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
+ 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });
+@@ -376,17 +373,40 @@ export class KeyCascade implements KeysApi {
+ 		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
+ 	}
+ 
+-	async #resolve(
++	/**
++	 * Resolve the bearer that authenticates a request, with the durable stored
++	 * row and cascade leg that supplied it. An explicit
++	 * {@link AuthCredentialSelectionPolicy} keeps the walk inside the pool the
++	 * caller names, so a server that grants credential pools sees which row
++	 * answered.
++	 *
++	 * Priority (first match wins): runtime override, config override, OAuth,
++	 * login-persisted API key, config fallback, environment variable, then another stored API key.
++	 * A session restricted by `sessions.restrict` resolves only its allowed
++	 * OAuth accounts and throws {@link AIError.MissingApiKeyError} when none
++	 * can serve or a config key (a models.yml `apiKey`, often for a proxy
++	 * `baseUrl`) owns the provider, rather than using any other credential.
++	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} when a transient
++	 * OAuth refresh failure left no other permitted source (request-path
++	 * semantics, as {@link KeyCascade.getWithCredential}).
++	 */
++	async resolveApiKeySelection(
+ 		provider: string,
+ 		sessionId?: string,
+ 		options?: AuthApiKeyOptions,
+-		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
+-	): Promise<string | undefined> {
++	): Promise<AuthApiKeySelectionResult> {
++		const selection = options?.selection;
++		if (selection) {
++			return this.#deps.selector.resolveApiKeyFromExplicitSelection(provider, sessionId, {
++				...options,
++				selection,
++			});
++		}
+ 		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
+ 		// Runtime override takes highest priority
+ 		const runtimeKey = restricted ? undefined : this.#deps.overrides.runtimeKey(provider);
+ 		if (runtimeKey) {
+-			return runtimeKey;
++			return { ok: true, credential: { apiKey: runtimeKey, source: "runtime" } };
+ 		}
+ 
+ 		// Config override: explicit apiKey pinned in models.yml beats the broker's
+@@ -402,7 +422,10 @@ export class KeyCascade implements KeysApi {
+ 		}
+ 		const configKey = restricted ? undefined : this.#deps.overrides.configKey(provider);
+ 		if (configKey !== undefined) {
+-			return this.#deps.overrides.resolve(configKey);
++			const resolvedConfigKey = await this.#deps.overrides.resolve(configKey);
++			if (resolvedConfigKey) {
++				return { ok: true, credential: { apiKey: resolvedConfigKey, source: "config" } };
++			}
+ 		}
+ 
+ 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
+@@ -418,12 +441,18 @@ export class KeyCascade implements KeysApi {
+ 			oauthRefreshFailure = error;
+ 		}
+ 		if (oauthResolved) {
+-			if (onCredentialId && oauthResolved.credentialId !== undefined) {
+-				const { orgId, region, inferenceRegion } = oauthResolved.credential;
+-				const identity = { orgId, region, inferenceRegion };
+-				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
+-			}
+-			return oauthResolved.apiKey;
++			const { orgId, region, inferenceRegion } = oauthResolved.credential;
++			return {
++				ok: true,
++				credential: {
++					apiKey: oauthResolved.apiKey,
++					credentialId: oauthResolved.credentialId,
++					credentialType: "oauth",
++					source: "oauth",
++					oauthAccess: oauthResolved.credential.access,
++					oauthIdentity: { orgId, region, inferenceRegion },
++				},
++			};
+ 		}
+ 		if (restricted) {
+ 			if (oauthRefreshFailure) throw oauthRefreshFailure;
+@@ -432,6 +461,7 @@ export class KeyCascade implements KeysApi {
+ 				`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool and none of those accounts is available)`,
+ 			);
+ 		}
++
+ 		const loginApiKeySelection = await this.#deps.selector.selectApiKey(
+ 			provider,
+ 			sessionId,
+@@ -439,27 +469,27 @@ export class KeyCascade implements KeysApi {
+ 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
+ 		);
+ 		if (loginApiKeySelection) {
+-			if (options?.recordAffinity !== false) {
+-				this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
+-			}
+-			const credentialId = onCredentialId
+-				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
+-				: undefined;
++			const credentialId = this.#recordApiKeySelection(provider, sessionId, loginApiKeySelection.index, options);
+ 			const apiKey = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+-			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
+-			return apiKey;
++			if (!apiKey) return { ok: false, reason: "no_credential" };
++			return { ok: true, credential: { apiKey, credentialId, credentialType: "api_key", source: "api_key" } };
+ 		}
+ 
+ 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
+-		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly
+-		// suppresses account_uuid for this session.
+-		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
++		// env/api_key, not OAuth, so clear it now so account identity lookups correctly
++		// suppress account_uuid for this session.
++		if (sessionId) this.#deps.affinity.clear(provider, sessionId);
+ 
+ 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
+-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
++		if (fallbackKey !== undefined) {
++			const resolvedFallbackKey = await this.#deps.overrides.resolve(fallbackKey);
++			if (!resolvedFallbackKey) return { ok: false, reason: "no_credential" };
++			return { ok: true, credential: { apiKey: resolvedFallbackKey, source: "config" } };
++		}
+ 
+ 		const envKey = getEnvApiKey(provider);
+-		if (envKey) return envKey;
++		if (envKey) return { ok: true, credential: { apiKey: envKey, source: "env" } };
++
+ 		const apiKeySelection = await this.#deps.selector.selectApiKey(
+ 			provider,
+ 			sessionId,
+@@ -467,16 +497,41 @@ export class KeyCascade implements KeysApi {
+ 			credential => credential.source !== "login",
+ 		);
+ 		if (apiKeySelection) {
+-			if (options?.recordAffinity !== false) {
+-				this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
+-			}
+-			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
++			const credentialId = this.#recordApiKeySelection(provider, sessionId, apiKeySelection.index, options);
+ 			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
+-			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
+-			return apiKey;
++			if (!apiKey) return { ok: false, reason: "no_credential" };
++			return { ok: true, credential: { apiKey, credentialId, credentialType: "api_key", source: "api_key" } };
+ 		}
+ 		if (oauthRefreshFailure) throw oauthRefreshFailure;
+-		return undefined;
++
++		return { ok: false, reason: "no_credential" };
++	}
++
++	/**
++	 * Record a stored api_key pick as the session's sticky (journaled with the
++	 * pin-aware selection reason) and note a default-account fallover, unless
++	 * `recordAffinity: false` asks to select without binding the session.
++	 * Returns the picked row's durable id.
++	 */
++	#recordApiKeySelection(
++		provider: string,
++		sessionId: string | undefined,
++		index: number,
++		options: AuthApiKeyOptions | undefined,
++	): number | undefined {
++		const credentialId = this.#deps.pool.entries(provider)[index]?.id;
++		if (options?.recordAffinity === false) return credentialId;
++		this.#deps.affinity.record(provider, sessionId, "api_key", index, {
++			...(credentialId === undefined
++				? {}
++				: this.#deps.pins.classifyAccountSelection(provider, index, {
++						providerKey: `${provider}:api_key`,
++					})),
++		});
++		if (credentialId !== undefined) {
++			this.#deps.pins.noteDefaultAccountSelection(provider, sessionId, credentialId);
++		}
++		return credentialId;
+ 	}
+ 
+ 	/**
+@@ -488,15 +543,24 @@ export class KeyCascade implements KeysApi {
+ 	 * - step (c) `lastChance` → rotate to a sibling and re-resolve, unless quota exhaustion has no sibling.
+ 	 *
+ 	 * Used by web-search providers and other consumers that hold a KeyCascade
+-	 * directly (no ModelRegistry in scope).
++	 * directly (no ModelRegistry in scope). `selection` restricts every resolve
++	 * and rotation step to the caller's credential pool.
+ 	 */
+-	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
+-		const { sessionId, baseUrl, modelId } = options ?? {};
++	resolver(
++		provider: string,
++		options?: {
++			sessionId?: string;
++			baseUrl?: string;
++			modelId?: string;
++			selection?: AuthCredentialSelectionPolicy;
++		},
++	): ApiKeyResolver {
++		const { sessionId, baseUrl, modelId, selection } = options ?? {};
+ 		// One resolver serves many requests, and they fail out of order, so the
+ 		// token a 401 rejected is looked up from the bearer that request sent.
+ 		const provenance = createOAuthProvenance();
+ 		const resolve = async (extra: AuthApiKeyOptions): Promise<ResolvedApiKey | undefined> => {
+-			const resolved = await this.getWithCredential(provider, sessionId, { baseUrl, modelId, ...extra });
++			const resolved = await this.getWithCredential(provider, sessionId, { baseUrl, modelId, selection, ...extra });
+ 			provenance.record(resolved);
+ 			return resolved;
+ 		};
+@@ -511,6 +575,7 @@ export class KeyCascade implements KeysApi {
+ 					modelId,
+ 					signal,
+ 					apiKey: previousKey,
++					selection,
+ 				});
+ 				if (!rotation.switched) {
+ 					const status = AIError.status(error);
+diff --git a/packages/ai/src/auth/oauth.ts b/packages/ai/src/auth/oauth.ts
+index b09ee32..5ff59d9 100644
+--- a/packages/ai/src/auth/oauth.ts
++++ b/packages/ai/src/auth/oauth.ts
+@@ -6,14 +6,17 @@ import type { OAuthProviderId } from "../registry/oauth/types";
+ import { providerTypeKey } from "./blocks";
+ import type { SessionAffinity } from "./affinity";
+ import type { KeyOverrides } from "./cascade";
++import { buildOAuthAccountIdentity } from "./pins";
+ import type { AccountPolicies } from "./policy";
+ import type { CredentialPool } from "./pool";
+ import type { OAuthRefresher } from "./refresh";
++import { isCredentialIdEligible } from "./selection";
+ import type { CredentialSelector } from "./select";
+ import type {
+ 	AuthAccountPolicy,
+ 	AuthApiKeyOptions,
+ 	AuthCredentialSnapshotEntry,
++	AuthCredentialSelectionPolicy,
+ 	OAuthAccess,
+ 	OAuthAccessResolution,
+ 	OAuthAccountIdentity,
+@@ -137,8 +140,13 @@ export class OAuthAccounts implements OAuthApi {
+ 		// Runtime / config overrides intentionally short-circuit OAuth: when the
+ 		// user has pinned an API key, they expect the OAuth identity to be
+ 		// suppressed (same contract as account identity lookup). A session
+-		// restricted to an account pool never uses a runtime key.
+-		if (this.#deps.overrides.suppressesOAuth(provider, this.#deps.affinity.isRestricted(provider, sessionId))) {
++		// restricted to an account pool never uses a runtime key. A credential-id
++		// selection policy explicitly restricts resolution to stored rows, so it
++		// is never short-circuited.
++		if (
++			!options?.selection &&
++			this.#deps.overrides.suppressesOAuth(provider, this.#deps.affinity.isRestricted(provider, sessionId))
++		) {
+ 			return undefined;
+ 		}
+ 		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
+@@ -159,8 +167,12 @@ export class OAuthAccounts implements OAuthApi {
+ 		};
+ 	}
+ 
+-	/** Stored OAuth credentials for `provider` in stable order, paired with their full-list index and row id. */
+-	#getStoredOAuthSelections(provider: string): StoredOAuthSelection[] {
++	/**
++	 * Stored OAuth credentials for `provider` in stable order, paired with their
++	 * full-list index and row id. With a selection policy only eligible rows
++	 * appear, and the array position addresses the restricted list.
++	 */
++	#getStoredOAuthSelections(provider: string, selection?: AuthCredentialSelectionPolicy): StoredOAuthSelection[] {
+ 		return this.#deps.pool
+ 			.entries(provider)
+ 			.map((entry, index) => ({
+@@ -168,7 +180,10 @@ export class OAuthAccounts implements OAuthApi {
+ 				credential: entry.credential,
+ 				index,
+ 			}))
+-			.filter((entry): entry is StoredOAuthSelection => entry.credential.type === "oauth");
++			.filter(
++				(entry): entry is StoredOAuthSelection =>
++					entry.credential.type === "oauth" && isCredentialIdEligible(entry.credentialId, selection),
++			);
+ 	}
+ 
+ 	/** Refresh one stored OAuth selection and shape it as an {@link OAuthAccessResolution}. */
+@@ -286,12 +301,12 @@ export class OAuthAccounts implements OAuthApi {
+ 	 * exercise each stored account exactly once.
+ 	 */
+ 	async accessAll(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
+-		if (this.#deps.overrides.has(provider)) {
++		if (!options?.selection && this.#deps.overrides.has(provider)) {
+ 			return [];
+ 		}
+ 		const providerKey = providerTypeKey(provider, "oauth");
+ 		return Promise.all(
+-			this.#getStoredOAuthSelections(provider).map(selection =>
++			this.#getStoredOAuthSelections(provider, options?.selection).map(selection =>
+ 				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
+ 			),
+ 		);
+@@ -314,10 +329,10 @@ export class OAuthAccounts implements OAuthApi {
+ 		credentialId: number,
+ 		options?: AuthApiKeyOptions,
+ 	): Promise<OAuthAccessResolution | undefined> {
+-		if (this.#deps.overrides.has(provider)) {
++		if (!options?.selection && this.#deps.overrides.has(provider)) {
+ 			return undefined;
+ 		}
+-		const selection = this.#getStoredOAuthSelections(provider).find(
++		const selection = this.#getStoredOAuthSelections(provider, options?.selection).find(
+ 			candidate => candidate.credentialId === credentialId,
+ 		);
+ 		if (!selection) return undefined;
+@@ -333,24 +348,7 @@ export class OAuthAccounts implements OAuthApi {
+ 	identity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
+ 		const preferred = this.#deps.affinity.activeOAuth(provider, sessionId);
+ 		if (!preferred) return undefined;
+-		const identity: OAuthAccountIdentity = {};
+-		if (typeof preferred.accountId === "string" && preferred.accountId.length > 0) {
+-			identity.accountId = preferred.accountId;
+-		}
+-		if (typeof preferred.email === "string" && preferred.email.length > 0) {
+-			identity.email = preferred.email;
+-		}
+-		if (typeof preferred.projectId === "string" && preferred.projectId.length > 0) {
+-			identity.projectId = preferred.projectId;
+-		}
+-		if (typeof preferred.orgId === "string" && preferred.orgId.length > 0) {
+-			identity.orgId = preferred.orgId;
+-		}
+-		if (typeof preferred.orgName === "string" && preferred.orgName.length > 0) {
+-			identity.orgName = preferred.orgName;
+-		}
+-		if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
+-		return identity;
++		return buildOAuthAccountIdentity(preferred);
+ 	}
+ 
+ 	/**
+diff --git a/packages/ai/src/auth/pins.ts b/packages/ai/src/auth/pins.ts
+new file mode 100644
+index 0000000..5390254
+--- /dev/null
++++ b/packages/ai/src/auth/pins.ts
+@@ -0,0 +1,428 @@
++/**
++ * Per-provider account pinning: the `providers.defaultAccount` /
++ * `providers.accountPriority` configuration, the durable selector matching it
++ * performs against stored rows, the one-shot default-account fallover notices
++ * a blocked pin emits, and the classification of why a session ended up on the
++ * account it is using.
++ *
++ * Separate from {@link AccountPolicies} (upstream's per-account routing
++ * priority/reserve): a pin is a user decision expressed as an ordered selector
++ * list; its head is the provider's default, and the resolved order outranks
++ * live-usage ranking wherever the ranking comparator allows.
++ */
++import { logger } from "@oh-my-pi/pi-utils";
++import type { CredentialBlocks } from "./blocks";
++import { providerTypeKey } from "./blocks";
++import type { CredentialPool, StoredCredential } from "./pool";
++import type {
++	AccountSelectionEvent,
++	AccountSelectionReason,
++	AuthCredentialSelectionPolicy,
++	DefaultAccountFallover,
++	OAuthAccountIdentity,
++} from "./types";
++
++/** Bounded history kept for `/account`'s session account-change log. */
++const ACCOUNT_SELECTION_JOURNAL_LIMIT = 256;
++
++/** Display slice of an OAuth credential's identity; undefined when it has none. */
++export function buildOAuthAccountIdentity(credential: OAuthAccountIdentity): OAuthAccountIdentity | undefined {
++	const identity: OAuthAccountIdentity = {};
++	if (typeof credential.accountId === "string" && credential.accountId.length > 0) {
++		identity.accountId = credential.accountId;
++	}
++	if (typeof credential.email === "string" && credential.email.length > 0) {
++		identity.email = credential.email;
++	}
++	if (typeof credential.projectId === "string" && credential.projectId.length > 0) {
++		identity.projectId = credential.projectId;
++	}
++	if (typeof credential.orgId === "string" && credential.orgId.length > 0) {
++		identity.orgId = credential.orgId;
++	}
++	if (typeof credential.orgName === "string" && credential.orgName.length > 0) {
++		identity.orgName = credential.orgName;
++	}
++	if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
++	return identity;
++}
++
++/** Context the selection-reason classifier needs about the current request. */
++export interface AccountSelectionContext {
++	providerKey: string;
++	selectionPolicy?: AuthCredentialSelectionPolicy;
++	blockScopes?: string | readonly string[];
++}
++
++/**
++ * Provider account pins: configured default/priority selectors, their live
++ * resolution against the credential pool, fallover notices, and the bounded
++ * in-process account-selection journal.
++ */
++export class AccountPins {
++	/** Provider id (lowercased) -> configured default-account selector (lowercased, trimmed). */
++	#defaultAccountSelectors: Map<string, string> = new Map();
++	/** `provider\0selector` tuples whose miss/ambiguity was already logged, to avoid per-request log spam. */
++	#defaultAccountLogged: Set<string> = new Set();
++	/** Provider id (lowercased) -> ordered account selectors (lowercased, trimmed); head is the pinned default. */
++	#accountPrioritySelectors: Map<string, string[]> = new Map();
++	/** `provider\0sessionId` -> pending fallover notice, drained once by the session. */
++	#pendingDefaultFallovers: Map<string, DefaultAccountFallover> = new Map();
++	/** `provider\0sessionId\0usedCredentialId` tuples already announced. */
++	#announcedDefaultFallovers: Set<string> = new Set();
++	/** Account-selection journal, oldest first, capped at {@link ACCOUNT_SELECTION_JOURNAL_LIMIT}. */
++	#accountSelectionEvents: AccountSelectionEvent[] = [];
++	#pool: CredentialPool;
++	#blocks: CredentialBlocks;
++
++	constructor(
++		pool: CredentialPool,
++		blocks: CredentialBlocks,
++		defaultAccounts: Readonly<Record<string, string>> | undefined,
++		accountPriorities: Readonly<Record<string, readonly string[]>> | undefined,
++	) {
++		this.#pool = pool;
++		this.#blocks = blocks;
++		if (defaultAccounts) {
++			for (const [rawProvider, rawSelector] of Object.entries(defaultAccounts)) {
++				const provider = rawProvider.trim().toLowerCase();
++				const selector = rawSelector.trim().toLowerCase();
++				if (provider.length === 0 || selector.length === 0) continue;
++				this.#defaultAccountSelectors.set(provider, selector);
++			}
++		}
++		if (accountPriorities) {
++			for (const [rawProvider, rawSelectors] of Object.entries(accountPriorities)) {
++				const provider = rawProvider.trim().toLowerCase();
++				if (provider.length === 0) continue;
++				const selectors = AccountPins.#normalizeAccountPrioritySelectors(rawSelectors);
++				if (selectors.length > 0) this.#accountPrioritySelectors.set(provider, selectors);
++			}
++		}
++	}
++
++	/** Trim/lowercase/dedupe a configured priority list, dropping empty entries. */
++	static #normalizeAccountPrioritySelectors(selectors: readonly string[]): string[] {
++		const normalized: string[] = [];
++		for (const raw of selectors) {
++			if (typeof raw !== "string") continue;
++			const selector = raw.trim().toLowerCase();
++			if (selector.length === 0 || normalized.includes(selector)) continue;
++			normalized.push(selector);
++		}
++		return normalized;
++	}
++
++	/** Position of `index` in the configured priority order; unranked rows sort last. */
++	static priorityRankOf(priorityIndices: readonly number[] | undefined, index: number): number {
++		const rank = priorityIndices?.indexOf(index) ?? -1;
++		return rank === -1 ? Number.POSITIVE_INFINITY : rank;
++	}
++
++	/** Drop pin bookkeeping for a provider whose credential set changed. */
++	forgetProvider(provider: string): void {
++		const key = provider.toLowerCase();
++		for (const logKey of this.#defaultAccountLogged) {
++			if (logKey.startsWith(`${key}\0`)) this.#defaultAccountLogged.delete(logKey);
++		}
++		for (const announceKey of this.#announcedDefaultFallovers) {
++			if (announceKey.startsWith(`${provider}\0`)) this.#announcedDefaultFallovers.delete(announceKey);
++		}
++		for (const pendingKey of this.#pendingDefaultFallovers.keys()) {
++			if (pendingKey.startsWith(`${provider}\0`)) this.#pendingDefaultFallovers.delete(pendingKey);
++		}
++	}
++
++	/**
++	 * Carry the configured default/priority selectors over from the pins of a
++	 * replaced credential store. Fallover notices, log de-duplication, and the
++	 * journal reference the old store's row ids, so they start fresh.
++	 */
++	adoptSelectors(previous: AccountPins): void {
++		this.#defaultAccountSelectors = new Map(previous.#defaultAccountSelectors);
++		this.#accountPrioritySelectors = new Map(previous.#accountPrioritySelectors);
++	}
++
++	/** True when `selector` (already lowercased/trimmed) identifies `entry`. */
++	#credentialMatchesSelector(entry: StoredCredential, selector: string): boolean {
++		if (`#${entry.id}` === selector) return true;
++		const credential = entry.credential;
++		if (credential.type !== "oauth") return false;
++		const candidates = [credential.email, credential.accountId, credential.projectId, credential.enterpriseUrl];
++		return candidates.some(value => typeof value === "string" && value.trim().toLowerCase() === selector);
++	}
++
++	/**
++	 * Index (into `pool.entries(provider)`) the selector resolves to, or
++	 * `undefined` when it matches nothing or more than one row. Misses and
++	 * ambiguity are logged once per `(provider, selector)` pair.
++	 */
++	#selectorCredentialIndex(provider: string, selector: string, configKey: string): number | undefined {
++		const stored = this.#pool.entries(provider);
++		const matches: number[] = [];
++		for (let index = 0; index < stored.length; index += 1) {
++			if (this.#credentialMatchesSelector(stored[index]!, selector)) matches.push(index);
++		}
++		if (matches.length === 1) return matches[0];
++		const logKey = `${provider.toLowerCase()}\0${selector}`;
++		if (matches.length === 0) {
++			if (!this.#defaultAccountLogged.has(logKey)) {
++				this.#defaultAccountLogged.add(logKey);
++				logger.debug(`${configKey} selector matched no stored account`, { provider, selector });
++			}
++			return undefined;
++		}
++		if (!this.#defaultAccountLogged.has(logKey)) {
++			this.#defaultAccountLogged.add(logKey);
++			logger.warn(`Ambiguous ${configKey} selector`, { provider, selector });
++		}
++		return undefined;
++	}
++
++	/**
++	 * Credential indices the configured `providers.accountPriority` list
++	 * resolves to, in priority order. Unresolvable and duplicate entries are
++	 * dropped, so the result is the live preference order among stored rows.
++	 */
++	priorityCredentialIndices(provider: string): number[] {
++		const selectors = this.#accountPrioritySelectors.get(provider.toLowerCase());
++		if (!selectors || selectors.length === 0) return [];
++		const indices: number[] = [];
++		for (const selector of selectors) {
++			const index = this.#selectorCredentialIndex(provider, selector, "providers.accountPriority");
++			if (index !== undefined && !indices.includes(index)) indices.push(index);
++		}
++		return indices;
++	}
++
++	/**
++	 * Index (into `pool.entries(provider)`) of the pinned default account: the
++	 * head of `providers.accountPriority` when a priority list is configured,
++	 * else the `providers.defaultAccount` selector. `undefined` when nothing is
++	 * configured or the selector does not resolve to exactly one stored row.
++	 */
++	defaultCredentialIndex(provider: string): number | undefined {
++		const priorityHead = this.priorityCredentialIndices(provider)[0];
++		if (priorityHead !== undefined) return priorityHead;
++		const selector = this.#defaultAccountSelectors.get(provider.toLowerCase());
++		if (!selector) return undefined;
++		return this.#selectorCredentialIndex(provider, selector, "providers.defaultAccount");
++	}
++
++	/** Configured default-account selector for `provider`, verbatim, or undefined. */
++	getDefaultAccountSelector(provider: string): string | undefined {
++		return this.#defaultAccountSelectors.get(provider.toLowerCase());
++	}
++
++	/** Durable credential id the configured default resolves to, or undefined. */
++	getDefaultAccountCredentialId(provider: string): number | undefined {
++		const index = this.defaultCredentialIndex(provider);
++		if (index === undefined) return undefined;
++		return this.#pool.entries(provider)[index]?.id;
++	}
++
++	/** Identity of the configured default OAuth account, for display. Undefined for api_key rows. */
++	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
++		const index = this.defaultCredentialIndex(provider);
++		if (index === undefined) return undefined;
++		const credential = this.#pool.entries(provider)[index]?.credential;
++		if (credential?.type !== "oauth") return undefined;
++		return buildOAuthAccountIdentity(credential);
++	}
++
++	/** Configured `providers.accountPriority` selectors for `provider`, in order. */
++	getAccountPrioritySelectors(provider: string): readonly string[] {
++		return this.#accountPrioritySelectors.get(provider.toLowerCase()) ?? [];
++	}
++
++	/** Durable credential ids the configured priority list resolves to, in order. */
++	getAccountPriorityCredentialIds(provider: string): readonly number[] {
++		const stored = this.#pool.entries(provider);
++		return this.priorityCredentialIndices(provider)
++			.map(index => stored[index]?.id)
++			.filter((id): id is number => id !== undefined);
++	}
++
++	/**
++	 * Selector string that resolves to exactly `credentialId` for `provider`:
++	 * the most portable identity (email → accountId → projectId →
++	 * enterpriseUrl) that is unique among stored rows, else the durable
++	 * `#<credentialId>` form. Same-email multi-org accounts therefore get an
++	 * unambiguous pin instead of a selector `defaultCredentialIndex` would
++	 * reject, while single-account setups keep a config value that survives a
++	 * re-login into a new row id.
++	 */
++	describeAccountSelector(provider: string, credentialId: number): string | undefined {
++		const stored = this.#pool.entries(provider);
++		const entry = stored.find(row => row.id === credentialId);
++		if (!entry) return undefined;
++		if (entry.credential.type === "oauth") {
++			const candidates = [
++				entry.credential.email,
++				entry.credential.accountId,
++				entry.credential.projectId,
++				entry.credential.enterpriseUrl,
++			];
++			for (const candidate of candidates) {
++				const trimmed = candidate?.trim();
++				if (!trimmed) continue;
++				const selector = trimmed.toLowerCase();
++				const matches = stored.filter(row => this.#credentialMatchesSelector(row, selector));
++				if (matches.length === 1) return trimmed;
++			}
++		}
++		return `#${credentialId}`;
++	}
++
++	/** Replace the in-memory default selector; `undefined` clears it. */
++	setDefaultAccountSelector(provider: string, selector: string | undefined): boolean {
++		const key = provider.toLowerCase();
++		const normalized = selector?.trim().toLowerCase();
++		if (this.#defaultAccountSelectors.get(key) === normalized) return false;
++		if (!normalized) {
++			this.#defaultAccountSelectors.delete(key);
++		} else {
++			this.#defaultAccountSelectors.set(key, normalized);
++		}
++		this.forgetProvider(provider);
++		return true;
++	}
++
++	/**
++	 * Replace the in-memory account priority order; `undefined`/empty clears it,
++	 * which also unpins the head-derived default.
++	 */
++	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): boolean {
++		const key = provider.toLowerCase();
++		const normalized = selectors === undefined ? [] : AccountPins.#normalizeAccountPrioritySelectors(selectors);
++		const previous = this.#accountPrioritySelectors.get(key) ?? [];
++		if (previous.length === normalized.length && previous.every((entry, at) => entry === normalized[at])) {
++			return false;
++		}
++		if (normalized.length === 0) {
++			this.#accountPrioritySelectors.delete(key);
++		} else {
++			this.#accountPrioritySelectors.set(key, normalized);
++		}
++		this.forgetProvider(provider);
++		return true;
++	}
++
++	/**
++	 * Note which credential actually served a resolve. When the configured
++	 * default has a block relevant to this request and a sibling won, queue a
++	 * one-shot fallover notice for `sessionId`. Announced at most once per
++	 * (provider, session, winning credential), so a second fallover to a
++	 * *different* account is reported again.
++	 */
++	noteDefaultAccountSelection(
++		provider: string,
++		sessionId: string | undefined,
++		credentialId: number,
++		blockScopeOrScopes?: string | readonly string[],
++	): void {
++		if (sessionId === undefined) return;
++		const pendingKey = `${provider}\0${sessionId}`;
++		const defaultIndex = this.defaultCredentialIndex(provider);
++		if (defaultIndex === undefined) {
++			this.#pendingDefaultFallovers.delete(pendingKey);
++			return;
++		}
++		const defaultEntry = this.#pool.entries(provider)[defaultIndex];
++		const defaultCredentialId = defaultEntry?.id;
++		if (defaultCredentialId === undefined || defaultCredentialId === credentialId) {
++			this.#pendingDefaultFallovers.delete(pendingKey);
++			return;
++		}
++		const providerKey = providerTypeKey(provider, defaultEntry.credential.type);
++		const retryAtMs = this.#blocks.blockedUntil(provider, providerKey, defaultIndex, blockScopeOrScopes);
++		// Resuming or explicitly pinning a sibling is not evidence that the
++		// default is unavailable. Only a block relevant to this request is.
++		if (retryAtMs === undefined) {
++			this.#pendingDefaultFallovers.delete(pendingKey);
++			return;
++		}
++		const announceKey = `${provider}\0${sessionId}\0${credentialId}`;
++		if (this.#announcedDefaultFallovers.has(announceKey)) return;
++		this.#announcedDefaultFallovers.add(announceKey);
++		this.#pendingDefaultFallovers.set(pendingKey, {
++			provider,
++			defaultCredentialId,
++			usedCredentialId: credentialId,
++			retryAtMs,
++		});
++	}
++
++	/** Take the pending fallover notice for `(provider, sessionId)`, if any. Consumes it. */
++	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
++		const key = `${provider}\0${sessionId}`;
++		const pending = this.#pendingDefaultFallovers.get(key);
++		if (pending) this.#pendingDefaultFallovers.delete(key);
++		return pending;
++	}
++
++	/**
++	 * Why `index` ended up serving: the configured priority order it satisfies,
++	 * a fallover because a higher-ranked account is blocked, live-usage ranking
++	 * when nothing is pinned, or an explicit selection policy. Derived from
++	 * current state so every recording site gets the same vocabulary without
++	 * threading selection internals through the call stack.
++	 */
++	classifyAccountSelection(
++		provider: string,
++		index: number,
++		context: AccountSelectionContext,
++	): { reason: AccountSelectionReason; detail?: string } {
++		if (context.selectionPolicy !== undefined) {
++			return { reason: "policy", detail: `${context.selectionPolicy.strategy} selection policy` };
++		}
++		const priority = this.priorityCredentialIndices(provider);
++		const defaultIndex = this.defaultCredentialIndex(provider);
++		const order = priority.length > 0 ? priority : defaultIndex !== undefined ? [defaultIndex] : [];
++		if (order.length === 0) return { reason: "usage-ranking" };
++		const rank = order.indexOf(index);
++		if (rank === 0) return { reason: "pinned-default" };
++		const skipped = rank === -1 ? order : order.slice(0, rank);
++		const blockedSkipped = skipped.filter(candidate =>
++			this.#blocks.isBlocked(provider, context.providerKey, candidate, context.blockScopes),
++		);
++		if (blockedSkipped.length > 0) {
++			return {
++				reason: "fallover-blocked",
++				detail:
++					blockedSkipped.length === skipped.length
++						? "every higher-priority account is rate-limited"
++						: "a higher-priority account is rate-limited",
++			};
++		}
++		if (rank > 0) return { reason: "priority", detail: `priority #${rank + 1}` };
++		return { reason: "usage-ranking", detail: "outranked the pinned accounts on plan or quota" };
++	}
++
++	/** Append to the bounded in-process account-selection journal. */
++	journalAccountSelection(event: AccountSelectionEvent): void {
++		this.#accountSelectionEvents.push(event);
++		if (this.#accountSelectionEvents.length > ACCOUNT_SELECTION_JOURNAL_LIMIT) {
++			this.#accountSelectionEvents.splice(0, this.#accountSelectionEvents.length - ACCOUNT_SELECTION_JOURNAL_LIMIT);
++		}
++	}
++
++	/**
++	 * Account-selection journal for this process, oldest first: which account
++	 * started serving a session, and why. Powers `/account`'s session log.
++	 */
++	listAccountSelectionEvents(options?: {
++		provider?: string;
++		sessionId?: string;
++		limit?: number;
++	}): readonly AccountSelectionEvent[] {
++		const provider = options?.provider?.toLowerCase();
++		const filtered = this.#accountSelectionEvents.filter(
++			event =>
++				(provider === undefined || event.provider.toLowerCase() === provider) &&
++				(options?.sessionId === undefined || event.sessionId === options.sessionId),
++		);
++		const limit = options?.limit;
++		return limit !== undefined && limit >= 0 && filtered.length > limit ? filtered.slice(-limit) : filtered;
++	}
++}
+diff --git a/packages/ai/src/auth/pool.ts b/packages/ai/src/auth/pool.ts
+index f0809a5..ac4fd59 100644
+--- a/packages/ai/src/auth/pool.ts
++++ b/packages/ai/src/auth/pool.ts
+@@ -334,6 +334,8 @@ export class CredentialPool implements CredentialsApi {
+ 	 */
+ 	replace(provider: string, credentials: StoredCredential[]): void {
+ 		const current = this.#data.get(provider) ?? [];
++		const credentialOrderChanged =
++			current.length !== credentials.length || current.some((entry, index) => entry.id !== credentials[index]?.id);
+ 		if (storedCredentialArraysEqual(current, credentials)) return;
+ 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);
+ 		if (trackedBearerFingerprints) {
+@@ -351,6 +353,11 @@ export class CredentialPool implements CredentialsApi {
+ 			this.#data.set(provider, credentials);
+ 		}
+ 		this.bump("credentials");
++		// Only a *reordering* invalidates positional assignments. First population
++		// (a fresh AuthStorage.credentials.reload()) has nothing to invalidate, and resetting
++		// there also wipes the persisted session-sticky rows — which is exactly the
++		// pin a restarted process is trying to restore.
++		if (credentialOrderChanged && current.length > 0) this.#options.onReset(provider);
+ 	}
+ 
+ 	noteBearer(provider: string, bearer: string, credentialId: number | undefined): void {
+diff --git a/packages/ai/src/auth/rank.ts b/packages/ai/src/auth/rank.ts
+index 89b80c1..7b03337 100644
+--- a/packages/ai/src/auth/rank.ts
++++ b/packages/ai/src/auth/rank.ts
+@@ -8,8 +8,8 @@ export type CredentialSelection<T extends AuthCredential> = {
+ };
+ /** Selected OAuth credential for routing. */
+ export type OAuthSelection = CredentialSelection<OAuthCredential>;
+-/** Selected API-key credential for routing. */
+-export type ApiKeySelection = CredentialSelection<ApiKeyCredential>;
++/** Selected API-key credential for routing, with its durable row id. */
++export type ApiKeySelection = CredentialSelection<ApiKeyCredential> & { id: number };
+ 
+ /** Selected credential with its observed usage. */
+ export type UsageCandidate<T extends AuthCredential> = {
+@@ -50,6 +50,12 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
+ 	hasPriorityBoost: boolean;
+ 	allowanceSpent: boolean;
+ 	usageMeasured: boolean;
++	/**
++	 * Position in the configured `providers.accountPriority` order (0 = pinned
++	 * default), `Number.POSITIVE_INFINITY` when the account is unranked. Wins
++	 * every comparison the plan filter allows: the order is a user decision.
++	 */
++	priorityRank: number;
+ 	planPriority: number;
+ 	secondaryUsed: number;
+ 	secondaryRequiredDrain: number;
+@@ -104,6 +110,13 @@ function compareUsageRankedCandidatePriority(
+ 	// allowance yields to any sibling whose renewable allowance is left (#13889).
+ 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
+ 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
++	// The configured account order (`providers.accountPriority`, whose head is
++	// `providers.defaultAccount`) outranks usage ranking once the plan filter
++	// and reserve protection have had their say: the order is a user decision,
++	// and ranking only runs here at all because the request is plan-gated (see
++	// `shouldRank`). Blocked/exhausted and plan-ineligible rows already lost
++	// above, which is exactly the documented fallover behavior.
++	if (left.priorityRank !== right.priorityRank) return left.priorityRank < right.priorityRank ? -1 : 1;
+ 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
+ 	// Short-window guard: candidates whose primary (e.g. 5h) window is
+ 	// nearly exhausted rank behind cool ones regardless of drain urgency —
+diff --git a/packages/ai/src/auth/rotation.ts b/packages/ai/src/auth/rotation.ts
+index e901785..0039720 100644
+--- a/packages/ai/src/auth/rotation.ts
++++ b/packages/ai/src/auth/rotation.ts
+@@ -18,8 +18,10 @@ import type { KeyOverrides } from "./cascade";
+ import type { SessionAffinity } from "./affinity";
+ import type { CredentialPool } from "./pool";
+ import type { AuthCredentialStore } from "./store";
++import { isCredentialIdEligible } from "./selection";
+ import type {
+ 	AuthCredential,
++	AuthCredentialSelectionPolicy,
+ 	CredentialRotation,
+ 	InvalidateCredentialMatchingOptions,
+ 	LimitsApi,
+@@ -77,7 +79,12 @@ export class RateLimits implements LimitsApi {
+ 	async #resolveCredentialTarget(
+ 		provider: string,
+ 		sessionId: string | undefined,
+-		options?: { credentialId?: number; apiKey?: string; allowStaleOAuthBearer?: boolean },
++		options?: {
++			credentialId?: number;
++			apiKey?: string;
++			selection?: AuthCredentialSelectionPolicy;
++			allowStaleOAuthBearer?: boolean;
++		},
+ 	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
+ 		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
+ 		if (explicit) {
+@@ -91,13 +98,19 @@ export class RateLimits implements LimitsApi {
+ 			const stored = this.#deps.pool.entries(provider);
+ 			const index = stored.findIndex(entry => entry.id === options.credentialId);
+ 			const entry = index === -1 ? undefined : stored[index];
+-			if (entry) return { type: entry.credential.type, index, explicit: true };
++			if (entry && isCredentialIdEligible(entry.id, options.selection)) {
++				return { type: entry.credential.type, index, explicit: true };
++			}
+ 		}
+ 		if (options?.apiKey !== undefined) {
+ 			const stored = this.#deps.pool.entries(provider);
+ 			for (let index = 0; index < stored.length; index++) {
+ 				const entry = stored[index];
+-				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
++				if (
++					entry &&
++					isCredentialIdEligible(entry.id, options.selection) &&
++					(await this.#credentialMatchesApiKey(entry.credential, options.apiKey))
++				) {
+ 					return { type: entry.credential.type, index, explicit: true };
+ 				}
+ 			}
+@@ -105,14 +118,14 @@ export class RateLimits implements LimitsApi {
+ 			if (options.allowStaleOAuthBearer && options.credentialId === undefined) {
+ 				const credentialId = this.#deps.pool.idForBearer(provider, options.apiKey);
+ 				const index =
+-					credentialId === undefined
++					credentialId === undefined || !isCredentialIdEligible(credentialId, options.selection)
+ 						? -1
+ 						: stored.findIndex(entry => entry.id === credentialId && entry.credential.type === "oauth");
+ 				if (index >= 0) return { type: "oauth", index, explicit: true };
+ 			}
+ 		}
+ 		if (explicit) return undefined;
+-		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
++		const sessionCredential = this.#deps.affinity.get(provider, sessionId, options?.selection);
+ 		return sessionCredential ? { ...sessionCredential, explicit: false } : undefined;
+ 	}
+ 	#credentialBlockRouting(
+@@ -139,6 +152,14 @@ export class RateLimits implements LimitsApi {
+ 			siblingBlockScopes,
+ 		};
+ 	}
++	/**
++	 * Blocks `targetIndex` and reports whether an eligible sibling remains.
++	 *
++	 * With a selection policy in play the sibling scan runs over durable row ids
++	 * rather than positions, and admits credentials of any type: the policy —
++	 * not the failing credential's type — defines the pool the caller may rotate
++	 * into.
++	 */
+ 	#blockCredentialForRotation(
+ 		provider: string,
+ 		sessionId: string | undefined,
+@@ -147,7 +168,9 @@ export class RateLimits implements LimitsApi {
+ 		blockedUntil: number,
+ 		routing: CredentialBlockRouting,
+ 		providerTimed: boolean,
++		selection?: AuthCredentialSelectionPolicy,
+ 	): UsageLimitMarkResult {
++		const targetCredentialId = targetIndex >= 0 ? this.#deps.pool.entries(provider)[targetIndex]?.id : undefined;
+ 		// Snapshot the live block deadline BEFORE this call's mark: the merged
+ 		// value below masks a pre-existing block shorter than this call's own
+ 		// request (longest-wins), and recovery that replaces this call's
+@@ -185,12 +208,13 @@ export class RateLimits implements LimitsApi {
+ 				: blockedUntil;
+ 
+ 		const remainingCredentials = this.#deps.pool
+-			.credentials(provider)
+-			.map((credential, index) => ({ credential, index }))
++			.entries(provider)
++			.map((entry, index) => ({ id: entry.id, credential: entry.credential, index }))
+ 			.filter(
+-				(entry): entry is { credential: AuthCredential; index: number } =>
+-					entry.credential.type === credentialType &&
+-					entry.index !== targetIndex &&
++				entry =>
++					isCredentialIdEligible(entry.id, selection) &&
++					entry.id !== targetCredentialId &&
++					(selection !== undefined || entry.credential.type === credentialType) &&
+ 					this.#deps.affinity.allows(provider, sessionId, entry.credential),
+ 			);
+ 
+@@ -200,7 +224,7 @@ export class RateLimits implements LimitsApi {
+ 			// this reports a sibling as free that selection will then refuse.
+ 			const candidateBlockedUntil = this.#deps.blocks.blockedUntil(
+ 				provider,
+-				routing.providerKey,
++				providerTypeKey(provider, candidate.credential.type),
+ 				candidate.index,
+ 				routing.siblingBlockScopes,
+ 			);
+@@ -235,9 +259,11 @@ export class RateLimits implements LimitsApi {
+ 		options?: MarkUsageLimitOptions,
+ 	): Promise<UsageLimitMarkResult> {
+ 		await this.#deps.pool.adoptExternalChanges();
++		const selection = options?.selection;
+ 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+ 			credentialId: options?.credentialId,
+ 			apiKey: options?.apiKey,
++			selection,
+ 			allowStaleOAuthBearer: true,
+ 		});
+ 		if (!sessionCredential) return { switched: false };
+@@ -301,6 +327,7 @@ export class RateLimits implements LimitsApi {
+ 			blockedUntil,
+ 			routing,
+ 			providerTimed,
++			selection,
+ 		);
+ 		return {
+ 			...rotation,
+@@ -332,11 +359,16 @@ export class RateLimits implements LimitsApi {
+ 	): Promise<boolean> {
+ 		const signal = options?.signal;
+ 		const sessionId = options?.sessionId;
++		const selection = options?.selection;
+ 		const stored = this.#deps.pool.entries(provider);
+ 		let matched: { id: number; type: AuthCredential["type"]; index: number } | undefined;
+ 		for (let index = 0; index < stored.length; index++) {
+ 			const entry = stored[index];
+-			if (entry && (await this.#credentialMatchesApiKey(entry.credential, apiKey))) {
++			if (
++				entry &&
++				isCredentialIdEligible(entry.id, selection) &&
++				(await this.#credentialMatchesApiKey(entry.credential, apiKey))
++			) {
+ 				matched = { id: entry.id, type: entry.credential.type, index };
+ 				break;
+ 			}
+@@ -347,7 +379,7 @@ export class RateLimits implements LimitsApi {
+ 			return false;
+ 		}
+ 
+-		this.#deps.affinity.clear(provider, sessionId);
++		this.#deps.affinity.clear(provider, sessionId, selection);
+ 		this.#deps.blocks.mark(
+ 			provider,
+ 			providerTypeKey(provider, matched.type),
+@@ -403,6 +435,7 @@ export class RateLimits implements LimitsApi {
+ 		options?: RotateCredentialOptions,
+ 	): Promise<CredentialRotation> {
+ 		await this.#deps.pool.adoptExternalChanges();
++		const selection = options?.selection;
+ 		const error = options?.error;
+ 		const status = AIError.status(error);
+ 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+@@ -420,6 +453,7 @@ export class RateLimits implements LimitsApi {
+ 				apiKey: options?.apiKey,
+ 				credentialId: options?.credentialId,
+ 				signal: options?.signal,
++				selection,
+ 			});
+ 			return awaitSiblingUnblock(mark, options?.signal);
+ 		}
+@@ -431,6 +465,7 @@ export class RateLimits implements LimitsApi {
+ 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+ 			credentialId: options?.credentialId,
+ 			apiKey: options?.apiKey,
++			selection,
+ 			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
+ 		});
+ 		if (!sessionCredential) return { switched: false };
+@@ -451,12 +486,12 @@ export class RateLimits implements LimitsApi {
+ 			);
+ 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
+ 			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
+-			const sticky = this.#deps.affinity.get(provider, sessionId);
++			const sticky = this.#deps.affinity.get(provider, sessionId, selection);
+ 			if (
+ 				!sessionCredential.explicit ||
+ 				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+ 			) {
+-				this.#deps.affinity.clear(provider, sessionId);
++				this.#deps.affinity.clear(provider, sessionId, selection);
+ 			}
+ 			const mark = this.#blockCredentialForRotation(
+ 				provider,
+@@ -466,6 +501,7 @@ export class RateLimits implements LimitsApi {
+ 				Date.now() + DEFAULT_BLOCK_MS,
+ 				routing,
+ 				false,
++				selection,
+ 			);
+ 			return awaitSiblingUnblock(mark, options?.signal);
+ 		}
+@@ -474,21 +510,22 @@ export class RateLimits implements LimitsApi {
+ 		// Snapshot sibling availability before mutating so a soft-deleting
+ 		// suspect hook can't reindex the answer out from under us.
+ 		const hasSibling = this.#deps.pool
+-			.credentials(provider)
++			.entries(provider)
+ 			.some(
+-				(credential, index) =>
+-					credential.type === sessionCredential.type &&
++				(entry, index) =>
++					isCredentialIdEligible(entry.id, selection) &&
++					entry.credential.type === sessionCredential.type &&
+ 					index !== sessionCredential.index &&
+ 					!this.#deps.blocks.isBlocked(provider, providerKey, index) &&
+-					this.#deps.affinity.allows(provider, sessionId, credential),
++					this.#deps.affinity.allows(provider, sessionId, entry.credential),
+ 			);
+ 		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
+-		const sticky = this.#deps.affinity.get(provider, sessionId);
++		const sticky = this.#deps.affinity.get(provider, sessionId, selection);
+ 		if (
+ 			!sessionCredential.explicit ||
+ 			(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+ 		) {
+-			this.#deps.affinity.clear(provider, sessionId);
++			this.#deps.affinity.clear(provider, sessionId, selection);
+ 		}
+ 		this.#deps.blocks.mark(
+ 			provider,
+diff --git a/packages/ai/src/auth/select.ts b/packages/ai/src/auth/select.ts
+index 4bab440..36668a5 100644
+--- a/packages/ai/src/auth/select.ts
++++ b/packages/ai/src/auth/select.ts
+@@ -6,8 +6,8 @@ import type { Provider } from "../types";
+ import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
+ import { isWithinUsageReserve } from "../usage";
+ import type { RankingStrategyResolver } from "../usage/registry";
+-import type { SessionAffinity } from "./affinity";
+ import { raceSignal } from "./abort";
++import type { SessionAffinity } from "./affinity";
+ import {
+ 	AUTH_BLOCK_SCOPE,
+ 	credentialBlockScopesForRequest,
+@@ -15,7 +15,9 @@ import {
+ 	providerTypeKey,
+ 	type CredentialBlocks,
+ } from "./blocks";
++import type { KeyOverrides } from "./cascade";
+ import type { AccountPolicies } from "./policy";
++import { AccountPins } from "./pins";
+ import { authCredentialEquals, type CredentialPool } from "./pool";
+ import {
+ 	orderUsageRankedCandidates,
+@@ -29,14 +31,19 @@ import {
+ 	type UsageRankingResult,
+ } from "./rank";
+ import { mergeRefreshedCredential, OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
++import { eligibleSelectionCredentialIds, eligibleStoredCredentials, findStoredSelectionCredential } from "./selection";
+ import type { AuthCredentialStore } from "./store";
+ import {
+ 	type ApiKeyCredential,
+ 	type AuthApiKeyOptions,
++	type AuthApiKeySelectionResult,
+ 	type AuthCredential,
++	type AuthCredentialSelectionPolicy,
+ 	type OAuthCredential,
+ 	oauthAccountKey,
++	type ResolvedAuthCredential,
+ 	type StoredAuthCredential,
++	type StoredSelectionCredential,
+ } from "./types";
+ import type { UsageService } from "./usage";
+ import {
+@@ -54,6 +61,15 @@ export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+ /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
+ export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
+ 
++/** OAuth resolution that completed through a credential-selection mode (durable id guaranteed). */
++type ResolvedOAuthSelection = { apiKey: string; credential: OAuthCredential; credentialId: number };
++
++/** How {@link CredentialSelector.resolveOAuthMode} scopes candidate evaluation. */
++type OAuthSelectionMode =
++	| { kind: "default" }
++	| { kind: "target"; credentialId: number }
++	| { kind: "live-usage"; attemptedCredentialIds: Set<number> };
++
+ /** Options for CredentialSelector.tryOAuth when evaluating one OAuth credential. */
+ export type TryOAuthOptions = {
+ 	checkUsage: boolean;
+@@ -77,10 +93,12 @@ export interface CredentialSelectorDeps {
+ 	store: AuthCredentialStore;
+ 	pool: CredentialPool;
+ 	policies: AccountPolicies;
++	pins: AccountPins;
+ 	blocks: CredentialBlocks;
+ 	affinity: SessionAffinity;
+ 	usage: UsageService;
+ 	refresher: OAuthRefresher;
++	overrides: KeyOverrides;
+ 	strategies: RankingStrategyResolver;
+ }
+ 
+@@ -94,10 +112,10 @@ export class CredentialSelector {
+ 		this.#deps = deps;
+ 	}
+ 
+-	/** Restart round-robin assignments after a provider's credential set changes. */
++	/** Restart round-robin assignments after a provider's credential set changed. */
+ 	resetRoundRobin(provider: string): void {
+ 		for (const key of this.#providerRoundRobinIndex.keys()) {
+-			if (key.startsWith(`${provider}:`)) {
++			if (key.startsWith(`${provider}:`) || key.includes(`:${provider}:`)) {
+ 				this.#providerRoundRobinIndex.delete(key);
+ 			}
+ 		}
+@@ -142,53 +160,82 @@ export class CredentialSelector {
+ 		return order;
+ 	}
+ 
++	/** Round-robin cursor key: policies keep their own cursor per provider:type. */
++	#selectionRoundRobinKey(
++		provider: string,
++		type: AuthCredential["type"],
++		selection: AuthCredentialSelectionPolicy | undefined,
++	): string {
++		const providerKey = providerTypeKey(provider, type);
++		return selection ? `${selection.policyKey}:${providerKey}` : providerKey;
++	}
++
+ 	/**
+ 	 * Selects a credential of the specified type for a provider.
+-	 * Returns both the credential and its index in the original array (for updates/removal).
+-	 * With `sessionId` the scan starts at the session's hashed index; without one it starts at the
+-	 * first stored credential and never advances round-robin. Model discovery peeks through this,
+-	 * and credential-scoped catalogs (e.g. GitHub Copilot) key their cache rows on the credential
+-	 * picked, so a rotating pick would read another account's cache namespace on every pass.
+-	 * Blocked credentials are skipped when possible.
++	 * Returns the credential, its durable row id, and its index in the pool
++	 * array (for updates/removal). Without a selection policy, `sessionId`
++	 * starts the scan at the session's hashed index; without one the scan starts
++	 * at the first stored credential and never advances round-robin. Model
++	 * discovery peeks through this, and credential-scoped catalogs (e.g. GitHub
++	 * Copilot) key their cache rows on the credential picked, so a rotating pick
++	 * would read another account's cache namespace on every pass. Blocked
++	 * credentials are skipped when possible. With a selection policy, only
++	 * eligible rows participate and the policy's own strategy (sticky-session,
++	 * round-robin, least-used, failover) decides the walk; an exhausted policy
++	 * pool returns undefined instead of a blocked fallback.
+ 	 */
+ 	selectByType<T extends AuthCredential["type"]>(
+ 		provider: string,
+ 		type: T,
+ 		sessionId?: string,
+ 		filter?: (credential: AuthCredential) => boolean,
+-	): { credential: Extract<AuthCredential, { type: T }>; index: number } | undefined {
+-		const credentials = this.#deps.pool
+-			.credentials(provider)
+-			.map((credential, index) => ({ credential, index }))
+-			.filter(
+-				(
+-					entry,
+-				): entry is {
+-					credential: Extract<AuthCredential, { type: T }>;
+-					index: number;
+-				} => {
+-					if (entry.credential.type !== type) return false;
+-					return filter?.(entry.credential) ?? true;
+-				},
+-			);
++		selection?: AuthCredentialSelectionPolicy,
++	): StoredSelectionCredential<Extract<AuthCredential, { type: T }>> | undefined {
++		const credentials = eligibleStoredCredentials(this.#deps.pool, provider, type, selection, filter);
+ 
+ 		if (credentials.length === 0) return undefined;
+-		if (credentials.length === 1) return credentials[0];
+ 
+ 		const providerKey = providerTypeKey(provider, type);
+-		const order = sessionId
+-			? this.#getCredentialOrder(providerKey, sessionId, credentials.length)
+-			: credentials.map((_, index) => index);
+-		const fallback = credentials[order[0]];
++		const sticky = this.#deps.affinity.get(provider, sessionId, selection);
++		const stickyPosition =
++			sticky?.type === type
++				? credentials.findIndex(
++						candidate =>
++							candidate.index === sticky.index &&
++							!this.#deps.blocks.isBlocked(provider, providerKey, sticky.index),
++					)
++				: -1;
++		const shouldKeepSticky = selection?.strategy === "sticky-session" || selection?.strategy === "round-robin";
++		if (shouldKeepSticky && stickyPosition >= 0) return credentials[stickyPosition];
++
++		let order: number[];
++		if (selection?.strategy === "round-robin") {
++			const start = this.#getNextRoundRobinIndex(
++				this.#selectionRoundRobinKey(provider, type, selection),
++				credentials.length,
++			);
++			order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
++		} else if (selection?.strategy === "least-used" || selection?.strategy === "failover") {
++			order = credentials.map((_credential, index) => index);
++		} else if (sessionId) {
++			order = this.#getCredentialOrder(
++				this.#selectionRoundRobinKey(provider, type, selection),
++				sessionId,
++				credentials.length,
++			);
++		} else {
++			order = credentials.map((_credential, index) => index);
++		}
+ 
++		const fallback = credentials[order[0]];
+ 		for (const idx of order) {
+ 			const candidate = credentials[idx];
+-			if (!this.#deps.blocks.isBlocked(provider, providerKey, candidate.index)) {
++			if (candidate && !this.#deps.blocks.isBlocked(provider, providerKey, candidate.index)) {
+ 				return candidate;
+ 			}
+ 		}
+ 
+-		return fallback;
++		return selection ? undefined : fallback;
+ 	}
+ 
+ 	async #rankApiKeySelections(args: {
+@@ -286,6 +333,7 @@ export class CredentialSelector {
+ 				accountPriority: 0,
+ 				allowanceSpent: remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0,
+ 				usageMeasured,
++				priorityRank: Number.POSITIVE_INFINITY,
+ 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
+ 				planPriority: 0,
+ 				secondaryUsed: normalizeUsageFraction(secondary),
+@@ -305,8 +353,8 @@ export class CredentialSelector {
+ 		filter?: (credential: ApiKeyCredential) => boolean,
+ 	): Promise<ApiKeySelection | undefined> {
+ 		const credentials = this.#deps.pool
+-			.credentials(provider)
+-			.map((credential, index) => ({ credential, index }))
++			.entries(provider)
++			.map((entry, index) => ({ id: entry.id, credential: entry.credential, index }))
+ 			.filter((entry): entry is ApiKeySelection => {
+ 				if (entry.credential.type !== "api_key") return false;
+ 				return filter?.(entry.credential) ?? true;
+@@ -316,10 +364,15 @@ export class CredentialSelector {
+ 		if (credentials.length === 1) return credentials[0];
+ 
+ 		const providerKey = providerTypeKey(provider, "api_key");
+-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
++		const defaultIndex =
++			options?.selection === undefined ? this.#deps.pins.defaultCredentialIndex(provider) : undefined;
++		const defaultPos = defaultIndex !== undefined ? credentials.findIndex(entry => entry.index === defaultIndex) : -1;
++		const hasDefault = defaultPos >= 0;
++		const baseOrder = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
++		const order = hasDefault ? [defaultPos, ...baseOrder.filter(pos => pos !== defaultPos)] : baseOrder;
+ 		const fallback = credentials[order[0]];
+ 		const strategy = this.#deps.strategies(provider);
+-		if (!strategy) {
++		if (!strategy || hasDefault) {
+ 			for (const idx of order) {
+ 				const candidate = credentials[idx];
+ 				if (!this.#deps.blocks.isBlocked(provider, providerKey, candidate.index)) {
+@@ -345,7 +398,11 @@ export class CredentialSelector {
+ 			blockScope,
+ 			blockScopes,
+ 		});
+-		return candidates[0]?.selection ?? fallback;
++		const winner = candidates[0]?.selection;
++		if (!winner) return fallback;
++		// The ranked candidate list carries the pool-relative selection; re-resolve
++		// it onto the id-bearing entry so callers can address the durable row.
++		return credentials.find(entry => entry.index === winner.index) ?? fallback;
+ 	}
+ 
+ 	#oauthUsagePolicy(
+@@ -353,6 +410,8 @@ export class CredentialSelector {
+ 		credentials: readonly OAuthSelection[],
+ 		strategy: CredentialRankingStrategy | undefined,
+ 		hasPlanRequirement: boolean,
++		/** A live-usage pool strategy ranks even a single eligible account. */
++		liveUsage = false,
+ 	): { policyReserveEnabled: boolean; checkUsage: boolean } {
+ 		const hasAccountPolicy = credentials.some(
+ 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
+@@ -361,7 +420,9 @@ export class CredentialSelector {
+ 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+ 		return {
+ 			policyReserveEnabled,
+-			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement),
++			checkUsage:
++				(strategy !== undefined || policyReserveEnabled) &&
++				(liveUsage || credentials.length > 1 || hasPlanRequirement),
+ 		};
+ 	}
+ 
+@@ -415,6 +476,10 @@ export class CredentialSelector {
+ 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+ 		const planGate = strategy?.planGate?.(rankingContext);
+ 		if (!this.#oauthUsagePolicy(provider, credentials, strategy, planGate !== undefined).checkUsage) return;
++		// A pinned default account serves in fixed order without ranking unless a
++		// plan gate needs it, so its siblings' usage is never read.
++		const defaultIndex = this.#deps.pins.defaultCredentialIndex(provider);
++		if (planGate === undefined && credentials.some(entry => entry.index === defaultIndex)) return;
+ 		const blockScope = strategy?.blockScope?.(rankingContext);
+ 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+ 		const providerKey = providerTypeKey(provider, "oauth");
+@@ -442,6 +507,8 @@ export class CredentialSelector {
+ 		blockScope?: string;
+ 		/** Scopes a block may live under for this request; reads honour all of them. */
+ 		blockScopes?: readonly string[];
++		/** Credential indices in configured priority order; position 0 is the pinned default. */
++		priorityIndices?: readonly number[];
+ 	}): Promise<OAuthCandidate[]> {
+ 		const nowMs = Date.now();
+ 		const { strategy } = args;
+@@ -542,6 +609,7 @@ export class CredentialSelector {
+ 					remainingFraction !== undefined &&
+ 					remainingFraction * 100 >= policy.reclaimAbovePct,
+ 				usageMeasured,
++				priorityRank: AccountPins.priorityRankOf(args.priorityIndices, selection.index),
+ 				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
+ 				planPriority: planPriority(args.planGate, usage),
+ 				secondaryUsed: strategy ? normalizeUsageFraction(secondary) : 0,
+@@ -580,17 +648,38 @@ export class CredentialSelector {
+ 		options?: AuthApiKeyOptions,
+ 	): Promise<OAuthResolutionResult | undefined> {
+ 		await this.#deps.pool.adoptExternalChanges();
+-		const stored = this.#deps.pool
+-			.credentials(provider)
+-			.map((credential, index) => ({ credential, index }))
+-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
++		return this.resolveOAuthMode(provider, sessionId, options, { kind: "default" });
++	}
++
++	/**
++	 * {@link CredentialSelector.resolveOAuth} with an explicit resolution mode.
++	 * `target` restricts the ladder to one durable row (exact-account forced
++	 * refresh), `live-usage` restricts it to rows a fresh usage report still
++	 * vouches for (least-used policy rotation), and records every row it
++	 * actually attempted so the caller can distinguish "exhausted" from
++	 * "missing".
++	 */
++	async resolveOAuthMode(
++		provider: string,
++		sessionId: string | undefined,
++		options: AuthApiKeyOptions | undefined,
++		mode: OAuthSelectionMode,
++	): Promise<ResolvedOAuthSelection | undefined> {
++		const selectionPolicy = options?.selection;
++		// A session restriction drops every other account before ranking, pins,
++		// and the fallback passes below, so none of them can route back to it.
++		const credentials = eligibleStoredCredentials(this.#deps.pool, provider, "oauth", selectionPolicy, credential =>
++			this.#deps.affinity.allows(provider, sessionId, credential),
++		);
++		// Validate the full stored set, not the policy's slice: an account-policy
++		// row outside this principal's pool is still configured and must not read
++		// as "matches no stored OAuth account".
+ 		this.#deps.policies.validateFor(
+ 			provider,
+-			stored.map(entry => entry.credential),
++			this.#deps.pool
++				.credentials(provider)
++				.filter((credential): credential is OAuthCredential => credential.type === "oauth"),
+ 		);
+-		// A session restriction drops every other account before ranking, pins,
+-		// and the fallback passes below, so none of them can route back to it.
+-		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
+ 
+ 		if (credentials.length === 0) return undefined;
+ 		// Ranking and preflight both await provider work; preserve the row each
+@@ -599,7 +688,19 @@ export class CredentialSelector {
+ 		this.#deps.policies.validateUsageCapability(provider, this.#deps.usage.canFetchOAuthUsage(provider));
+ 
+ 		const providerKey = providerTypeKey(provider, "oauth");
+-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
++		const defaultIndex = selectionPolicy === undefined ? this.#deps.pins.defaultCredentialIndex(provider) : undefined;
++		const hasDefault = defaultIndex !== undefined && credentials.some(entry => entry.index === defaultIndex);
++		// Explicit selection policies (round-robin, least-used, …) own their own
++		// ordering; the user's configured priority applies to normal traffic.
++		// A bare `providers.defaultAccount` is the one-entry list, so both config
++		// shapes reach ranking and ordering through the same vector.
++		const configuredPriority =
++			selectionPolicy === undefined
++				? this.#deps.pins
++						.priorityCredentialIndices(provider)
++						.filter(index => credentials.some(entry => entry.index === index))
++				: [];
++		const priorityIndices = configuredPriority.length > 0 ? configuredPriority : hasDefault ? [defaultIndex!] : [];
+ 		const strategy = this.#deps.strategies(provider);
+ 		const rankingContext: CredentialRankingContext = {
+ 			modelId: options?.modelId,
+@@ -624,8 +725,9 @@ export class CredentialSelector {
+ 			credentials,
+ 			strategy,
+ 			hasPlanRequirement,
++			mode.kind === "live-usage",
+ 		);
+-		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
++		const sessionCredential = this.#deps.affinity.get(provider, sessionId, selectionPolicy);
+ 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+ 		const sessionPreferredCredential =
+ 			sessionPreferredIndex !== undefined
+@@ -639,10 +741,12 @@ export class CredentialSelector {
+ 		// cache may still be warm. Providers without a verified idle boundary retain indefinite
+ 		// stickiness rather than risk switching while their prompt cache remains warm. New sessions
+ 		// (no preference), blocked pins, and sessions idle past the provider's sticky window still
+-		// rank. Legacy pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
++		// rank. A configured default pin is never demoted for warmth reasons: it is a user decision.
++		// Legacy pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
+ 		const sessionPreferredLastUsedAtMs =
+ 			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
+ 		const sessionPreferredIsWarm =
++			hasDefault ||
+ 			strategy?.stickyWarmMs === undefined ||
+ 			sessionPreferredLastUsedAtMs === undefined ||
+ 			Date.now() - sessionPreferredLastUsedAtMs < strategy.stickyWarmMs;
+@@ -651,42 +755,101 @@ export class CredentialSelector {
+ 			sessionPreferredCanRefreshOrUse &&
+ 			!this.#deps.blocks.isBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
+ 		const sessionPinIsExplicit = sessionCredential?.type === "oauth" && sessionCredential.explicit === true;
++		const shouldKeepOAuthSticky =
++			selectionPolicy === undefined ||
++			selectionPolicy.strategy === "sticky-session" ||
++			selectionPolicy.strategy === "round-robin" ||
++			selectionPolicy.strategy === "least-used";
++		let order: number[];
++		if (selectionPolicy?.strategy === "round-robin") {
++			if (sessionPreferredIsAvailable) {
++				const stickyPosition = credentials.findIndex(entry => entry.index === sessionPreferredIndex);
++				order = [
++					stickyPosition,
++					...credentials.map((_credential, index) => index).filter(index => index !== stickyPosition),
++				].filter(index => index >= 0);
++			} else {
++				const start = this.#getNextRoundRobinIndex(
++					this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
++					credentials.length,
++				);
++				order = Array.from({ length: credentials.length }, (_value, index) => (start + index) % credentials.length);
++			}
++		} else if (selectionPolicy?.strategy === "least-used" || selectionPolicy?.strategy === "failover") {
++			order = credentials.map((_credential, index) => index);
++		} else if (hasDefault) {
++			const baseOrder = this.#getCredentialOrder(
++				this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
++				sessionId,
++				credentials.length,
++			);
++			// Configured order first (head = pinned default), then the rest of the
++			// list, then the session-hash order for unranked accounts. The session's
++			// current sticky still leads so an announced fallover stays put instead
++			// of flapping back to a default that is blocked for this session.
++			const priorityPositions = priorityIndices.map(index => credentials.findIndex(entry => entry.index === index));
++			const sessionPreferredPos = sessionPreferredIsAvailable
++				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
++				: -1;
++			const prefix = [sessionPreferredPos, ...priorityPositions].filter(pos => pos >= 0);
++			order = [...new Set([...prefix, ...baseOrder])];
++		} else {
++			order = this.#getCredentialOrder(
++				this.#selectionRoundRobinKey(provider, "oauth", selectionPolicy),
++				sessionId,
++				credentials.length,
++			);
++		}
++		// Accounts configured with an explicit routing priority lead the order
++		// even when nothing is pinned, so reserve/priority policies take effect
++		// on the non-ranking path too.
++		const policyOrder = hasPriorityPolicy
++			? [...order].sort((leftIndex, rightIndex) => {
++					const leftPriority =
++						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
++					const rightPriority =
++						this.#deps.policies.forCredential(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
++					return rightPriority - leftPriority || leftIndex - rightIndex;
++				})
++			: order;
++
++		// A pinned credential only suppresses ranking while it is both usable and prompt-cache warm.
++		const sessionPreferredIsSticky = sessionPreferredIsAvailable && sessionPreferredIsWarm;
+ 		const rankDespitePin =
+-			!sessionPreferredIsAvailable ||
+-			!sessionPreferredIsWarm ||
+-			hasPlanRequirement ||
+-			(policyReserveEnabled && !sessionPinIsExplicit);
++			!sessionPreferredIsSticky || hasPlanRequirement || (policyReserveEnabled && !sessionPinIsExplicit);
++		// A configured default account never ranks (a user decision, like an
++		// explicit pin), and fixed-order policies only rank for plan gates.
++		const fixedOrder =
++			(hasDefault && !hasPlanRequirement) ||
++			selectionPolicy?.strategy === "round-robin" ||
++			selectionPolicy?.strategy === "failover";
+ 		// A warm automatic pin whose allowance is spent keeps serving on paid overage
+ 		// (Codex credits) and is never blocked, so check it and rank when spent: a
+ 		// sibling with renewable allowance left must take over (#13889). tryOAuth
+ 		// reads this same report for the pin, so it is handed on below.
+ 		const sessionPreferredUsage =
+-			checkUsage && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
++			checkUsage && !fixedOrder && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
+ 				? await this.#deps.usage.report(provider, sessionPreferredCredential, {
+ 						...options,
+ 						timeoutMs: this.#deps.usage.requestTimeoutMs,
+ 					})
+ 				: undefined;
+ 		const shouldRank =
+-			checkUsage &&
+-			(rankDespitePin ||
+-				(sessionPreferredUsage !== undefined &&
+-					remainingUsageFraction(strategy, sessionPreferredUsage, rankingContext, Date.now()) === 0));
++			hasDefault && !hasPlanRequirement
++				? false
++				: checkUsage &&
++					(selectionPolicy?.strategy === "round-robin" || selectionPolicy?.strategy === "failover"
++						? hasPlanRequirement
++						: rankDespitePin ||
++							(sessionPreferredUsage !== undefined &&
++								remainingUsageFraction(strategy, sessionPreferredUsage, rankingContext, Date.now()) === 0));
+ 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
+ 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
+ 		// sibling — this respects the residual value of a same-account shared static prefix that other
+ 		// workspace traffic may have kept warm, while still rotating away from a clearly-worse account.
+ 		const baseRankingOrder = credentials.map((_credential, index) => index);
+-		const policyOrder = hasPriorityPolicy
+-			? [...baseRankingOrder].sort((leftIndex, rightIndex) => {
+-					const leftPriority =
+-						this.#deps.policies.forCredential(provider, credentials[leftIndex]!.credential)?.priority ?? 0;
+-					const rightPriority =
+-						this.#deps.policies.forCredential(provider, credentials[rightIndex]!.credential)?.priority ?? 0;
+-					return rightPriority - leftPriority || leftIndex - rightIndex;
+-				})
+-			: order;
+-		let rankingOrder = shouldRank && sessionId ? baseRankingOrder : policyOrder;
++		let rankingOrder =
++			shouldRank && sessionId && selectionPolicy?.strategy !== "least-used" ? baseRankingOrder : policyOrder;
+ 		const sessionPreferredRankingPos =
+ 			shouldRank && sessionId && sessionPreferredIndex !== undefined && !hasPlanRequirement
+ 				? credentials.findIndex(entry => entry.index === sessionPreferredIndex)
+@@ -697,7 +860,7 @@ export class CredentialSelector {
+ 				...baseRankingOrder.filter(index => index !== sessionPreferredRankingPos),
+ 			];
+ 		}
+-		const candidates: OAuthCandidate[] = shouldRank
++		let candidates: OAuthCandidate[] = shouldRank
+ 			? await this.#rankOAuthSelections({
+ 					providerKey,
+ 					provider,
+@@ -710,10 +873,11 @@ export class CredentialSelector {
+ 					rankingContext,
+ 					blockScope,
+ 					blockScopes,
++					priorityIndices,
+ 				})
+ 			: policyOrder
+ 					.map(idx => credentials[idx])
+-					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
++					.filter((selection): selection is NonNullable<typeof selection> => Boolean(selection))
+ 					.map(selection =>
+ 						selection.index === sessionPreferredIndex && sessionPreferredUsage !== undefined
+ 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
+@@ -778,7 +942,10 @@ export class CredentialSelector {
+ 			});
+ 		};
+ 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
++		// An explicit selection policy other than sticky/round-robin/least-used
++		// owns the order, so do not hoist the sticky past it.
+ 		if (
++			shouldKeepOAuthSticky &&
+ 			!hasPlanRequirement &&
+ 			sessionPreferredCandidate > 0 &&
+ 			(!shouldRank || sessionPinIsExplicit || (sessionPreferredIsWarm && !pinEvictedBeforePreflight))
+@@ -789,10 +956,15 @@ export class CredentialSelector {
+ 		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
+ 		// the session-preferred credential (or the first candidate when no
+ 		// session preference exists yet) even if its cached token still looks
+-		// valid — a peer/broker may have rotated it out from under us.
+-		const forceRefreshIndex = options?.forceRefresh
+-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+-			: undefined;
++		// valid — a peer/broker may have rotated it out from under us. A target
++		// mode only ever forces the row it addresses.
++		const forceRefreshIndex =
++			options?.forceRefresh && mode.kind === "target"
++				? candidates.find(candidate => credentialIds[candidate.selection.index] === mode.credentialId)?.selection
++						.index
++				: options?.forceRefresh
++					? (sessionPreferredIndex ?? candidates[0]?.selection.index)
++					: undefined;
+ 		// Candidate IDs were captured before ranking. Their synchronous rebinds
+ 		// share one provider re-list; resyncs after refresh await re-read the store.
+ 		let preflightRows: StoredAuthCredential[] | undefined;
+@@ -827,7 +999,7 @@ export class CredentialSelector {
+ 					candidate.selection.credential = latestCredential;
+ 					return;
+ 				}
+-				const credentialId = this.#deps.pool.entries(provider)[candidate.selection.index]?.id;
++				const credentialId = this.#credentialIdAt(provider, candidate.selection.index);
+ 				try {
+ 					// Hand the refresher a stale clone (expires:0) so its
+ 					// not-yet-expired short-circuit doesn't suppress the forced
+@@ -859,7 +1031,7 @@ export class CredentialSelector {
+ 						const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
+ 						if (idx !== -1) candidate.selection.index = idx;
+ 					} else {
+-						const rowId = this.#deps.pool.entries(provider)[candidate.selection.index]?.id;
++						const rowId = this.#credentialIdAt(provider, candidate.selection.index);
+ 						if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
+ 					}
+ 				} catch (error) {
+@@ -877,8 +1049,8 @@ export class CredentialSelector {
+ 						// A dead grant discovered during preflight must be disabled here too —
+ 						// the final candidate pass below skips every `preflightFailures` entry,
+ 						// so if this branch only blocked the row (like the transient case), the
+-						// definitive failure would never reach `tryOAuth`'s own
+-						// disable logic and the row would be retried forever instead of torn down.
++						// definitive failure would never reach tryOAuth's own disable logic and
++						// the row would be retried forever instead of torn down.
+ 						const outcome = await this.#deps.refresher.disableDefinitiveFailure(
+ 							provider,
+ 							credentialId,
+@@ -926,6 +1098,7 @@ export class CredentialSelector {
+ 
+ 		const pinEvictedAfterPreflight = automaticPinWouldBeEvicted(true);
+ 		if (
++			shouldKeepOAuthSticky &&
+ 			!hasPlanRequirement &&
+ 			preferredCandidate !== undefined &&
+ 			!preflightFailures.has(preferredCandidate) &&
+@@ -945,6 +1118,22 @@ export class CredentialSelector {
+ 		// by allowing the normal candidate fallback to attempt the request.
+ 		const enforcePlanRequirement =
+ 			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
++		if (mode.kind === "target") {
++			candidates = candidates.filter(
++				candidate => this.#credentialIdAt(provider, candidate.selection.index) === mode.credentialId,
++			);
++		} else if (mode.kind === "live-usage") {
++			// Least-used rotation only trusts what a fresh report vouched for: a
++			// row with no usage data or a spent meter must not serve this pass.
++			candidates = candidates.filter(candidate => {
++				const credentialId = this.#credentialIdAt(provider, candidate.selection.index);
++				if (credentialId === undefined) return false;
++				if (this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScope)) return false;
++				if (candidate.usage === null) return false;
++				if (planGate && planGate(candidate.usage) === false) return false;
++				return true;
++			});
++		}
+ 
+ 		// Plan-gated models rank on every resolve to re-verify account tiers,
+ 		// so the drain-urgency order can flip between two eligible accounts as their
+@@ -962,25 +1151,34 @@ export class CredentialSelector {
+ 			}
+ 		}
+ 
++		// With an explicit selection policy there is no fallback outside the
++		// pool: a blocked eligible row stays blocked rather than admitting a
++		// blocked pass (or a non-eligible row) the grant forbids.
+ 		const passes: Array<{
+ 			allowBlocked: boolean;
+ 			enforcePlanRequirement: boolean;
+ 			enforceAccounts: boolean;
+-		}> = [
+-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
+-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
+-		];
+-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
++		}> = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
++		if (selectionPolicy === undefined) {
++			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
++			if (enforcePlanRequirement) {
++				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
++			}
++		}
+ 		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+ 		// Blocked candidates rank earliest-unblock first, which would route a
+ 		// blocked explicit pin to an equally blocked sibling. Once the strict
+-		// pass finds no unblocked account, the user's pin goes first.
+-		const lastResortCandidates = explicitPin
+-			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
+-			: candidates;
++		// pass finds no unblocked account, the user's pin goes first. A target
++		// or live-usage mode may have filtered the pin out; it stays out.
++		const lastResortCandidates =
++			explicitPin && candidates.includes(explicitPin)
++				? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
++				: candidates;
+ 
+ 		for (const pass of passes) {
+ 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
++				const candidateId = this.#credentialIdAt(provider, candidate.selection.index);
++				if (mode.kind === "live-usage" && candidateId !== undefined) mode.attemptedCredentialIds.add(candidateId);
+ 				if (preflightFailures.has(candidate)) continue;
+ 				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
+ 				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
+@@ -996,9 +1194,13 @@ export class CredentialSelector {
+ 					rankingContext,
+ 					blockScope,
+ 					blockScopes,
++					allowFallback: mode.kind === "default",
+ 					onTransientRefreshFailure: recordTransientRefreshFailure,
+ 				});
+-				if (resolved) return resolved;
++				if (resolved) {
++					const credentialId = resolved.credentialId ?? candidateId;
++					if (credentialId !== undefined) return { ...resolved, credentialId };
++				}
+ 			}
+ 		}
+ 
+@@ -1008,6 +1210,11 @@ export class CredentialSelector {
+ 		return undefined;
+ 	}
+ 
++	/** Durable row id at a pool position, or undefined when the row is gone. */
++	#credentialIdAt(provider: string, index: number): number | undefined {
++		return this.#deps.pool.entries(provider)[index]?.id;
++	}
++
+ 	#syncOAuthSelectionFromStore(
+ 		provider: string,
+ 		selection: { credential: OAuthCredential; index: number },
+@@ -1083,7 +1290,27 @@ export class CredentialSelector {
+ 			!allowBlocked &&
+ 			this.#deps.blocks.isBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
+ 		) {
+-			return undefined;
++			// Default-account and sticky selection can bypass ranking. Give a
++			// healable block the same usage probe before skipping this credential.
++			if (
++				!usagePrechecked &&
++				this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes ?? blockScope)
++			) {
++				const targetId = this.#credentialIdAt(provider, selection.index);
++				if (targetId === undefined) return undefined;
++				await raceSignal(
++					this.#deps.usage.report(provider, selection.credential, {
++						...options,
++						timeoutMs: this.#deps.usage.requestTimeoutMs,
++					}),
++					options?.signal,
++					"usage fetch aborted",
++				);
++				if (!this.#syncOAuthSelectionFromStore(provider, selection, targetId)) return undefined;
++			}
++			if (this.#deps.blocks.isBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)) {
++				return undefined;
++			}
+ 		}
+ 
+ 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
+@@ -1093,7 +1320,7 @@ export class CredentialSelector {
+ 		// resynced selection.index from the store. A concurrent disable during the
+ 		// usage/refresh awaits below can shift positional indices, so every later
+ 		// refresh / persist / CAS-disable addresses the row by this stable id.
+-		const credentialId = this.#deps.pool.entries(provider)[selection.index]?.id;
++		const credentialId = this.#credentialIdAt(provider, selection.index);
+ 
+ 		const planGate = providedPlanGate ?? this.#deps.strategies(provider)?.planGate?.({ modelId: options?.modelId });
+ 		const hasPlanRequirement = planGate !== undefined;
+@@ -1169,7 +1396,7 @@ export class CredentialSelector {
+ 				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
+ 				if (idx !== -1) selection.index = idx;
+ 			} else {
+-				const rowId = this.#deps.pool.entries(provider)[selection.index]?.id;
++				const rowId = this.#credentialIdAt(provider, selection.index);
+ 				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
+ 			}
+ 			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
+@@ -1202,7 +1429,29 @@ export class CredentialSelector {
+ 			}
+ 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
+ 			if (options?.recordAffinity !== false) {
+-				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
++				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index, {
++					selection: options?.selection,
++					...this.#deps.pins.classifyAccountSelection(provider, selection.index, {
++						providerKey,
++						selectionPolicy: options?.selection,
++						blockScopes: blockScopes ?? blockScope,
++					}),
++				});
++				// A default outside a `sessions.restrict` allowlist can never serve
++				// this session, so its block is no fallover worth announcing.
++				const defaultCredentialId = this.#deps.pins.getDefaultAccountCredentialId(provider);
++				const defaultServesSession =
++					defaultCredentialId === undefined ||
++					sessionId === undefined ||
++					this.#deps.affinity.permits(provider, sessionId, defaultCredentialId);
++				if (options?.selection === undefined && credentialId !== undefined && defaultServesSession) {
++					this.#deps.pins.noteDefaultAccountSelection(
++						provider,
++						sessionId,
++						credentialId,
++						blockScopes ?? blockScope,
++					);
++				}
+ 			}
+ 			return { apiKey: result.apiKey, credential: updated, credentialId };
+ 		} catch (error) {
+@@ -1249,4 +1498,217 @@ export class CredentialSelector {
+ 
+ 		return undefined;
+ 	}
++
++	/**
++	 * Resolve one durable row through the selection ladder: API-key rows are
++	 * read straight from the pool, OAuth rows through {@link CredentialSelector.resolveOAuthMode}
++	 * in `target` mode so a sibling can never answer for them.
++	 */
++	async resolveExplicitSelectionCredentialId(
++		provider: string,
++		sessionId: string | undefined,
++		credentialId: number,
++		options: AuthApiKeyOptions & { selection: AuthCredentialSelectionPolicy },
++		blockScope: string | undefined,
++	): Promise<ResolvedAuthCredential | undefined> {
++		const row = findStoredSelectionCredential(this.#deps.pool, provider, credentialId);
++		if (!row) return undefined;
++		// A `sessions.restrict` pool never admits a row outside its allowlist,
++		// even when the grant's selection policy does.
++		if (!this.#deps.affinity.allows(provider, sessionId, row.credential)) return undefined;
++		if (
++			this.#deps.blocks.isBlocked(provider, providerTypeKey(provider, row.credential.type), row.index, blockScope)
++		) {
++			return undefined;
++		}
++		if (row.credential.type === "api_key") {
++			const apiKey = await this.#deps.overrides.resolve(row.credential.key);
++			if (!apiKey) return undefined;
++			if (options.recordAffinity !== false) {
++				this.#deps.affinity.record(provider, sessionId, "api_key", row.index, {
++					selection: options.selection,
++					reason: "policy",
++				});
++			}
++			return { apiKey, credentialId: row.id, credentialType: "api_key", source: "api_key" };
++		}
++		const resolved = await this.resolveOAuthMode(provider, sessionId, options, {
++			kind: "target",
++			credentialId: row.id,
++		});
++		return resolved ? this.#resolvedOAuthCredential(resolved) : undefined;
++	}
++
++	/** Shape an OAuth resolution as a selection credential carrying its non-secret account scope. */
++	#resolvedOAuthCredential(resolved: ResolvedOAuthSelection): ResolvedAuthCredential {
++		const { orgId, region, inferenceRegion } = resolved.credential;
++		return {
++			apiKey: resolved.apiKey,
++			credentialId: resolved.credentialId,
++			credentialType: "oauth",
++			source: "oauth",
++			oauthIdentity: { orgId, region, inferenceRegion },
++		};
++	}
++
++	/** True when the row a session sticky points at still exists, matches type, and is unblocked. */
++	#selectionCredentialIsUnblocked(
++		provider: string,
++		row: StoredSelectionCredential,
++		blockScope: string | undefined,
++	): boolean {
++		return !this.#deps.blocks.isBlocked(
++			provider,
++			providerTypeKey(provider, row.credential.type),
++			row.index,
++			blockScope,
++		);
++	}
++
++	/** Policy-order ids walked by the strategy: sticky-first, round-robin rotation, or as given. */
++	#orderedSelectionCredentialIds(
++		provider: string,
++		sessionId: string | undefined,
++		selection: AuthCredentialSelectionPolicy,
++		credentialIds: readonly number[],
++		blockScope: string | undefined,
++	): number[] {
++		if (selection.strategy === "failover" || selection.strategy === "least-used") return [...credentialIds];
++		const sticky = this.#deps.affinity.get(provider, sessionId, selection);
++		if (sticky && credentialIds.includes(sticky.credentialId)) {
++			const stickyRow = findStoredSelectionCredential(this.#deps.pool, provider, sticky.credentialId);
++			if (
++				stickyRow &&
++				stickyRow.credential.type === sticky.type &&
++				this.#selectionCredentialIsUnblocked(provider, stickyRow, blockScope)
++			) {
++				return [sticky.credentialId, ...credentialIds.filter(id => id !== sticky.credentialId)];
++			}
++		}
++
++		const key = `${selection.policyKey}:${provider}:selected`;
++		if (selection.strategy === "round-robin") {
++			const start = this.#getNextRoundRobinIndex(key, credentialIds.length);
++			return Array.from(
++				{ length: credentialIds.length },
++				(_value, index) => credentialIds[(start + index) % credentialIds.length]!,
++			).filter((id): id is number => id !== undefined);
++		}
++		const order = this.#getCredentialOrder(key, sessionId, credentialIds.length);
++		return order.map(index => credentialIds[index]).filter((id): id is number => id !== undefined);
++	}
++
++	/** Earliest unblock deadline across the pool, or undefined when any row is unblocked. */
++	#selectionBlockedRetryAtMs(
++		provider: string,
++		credentialIds: readonly number[],
++		blockScope: string | undefined,
++	): number | undefined {
++		let retryAtMs: number | undefined;
++		for (const credentialId of credentialIds) {
++			const row = findStoredSelectionCredential(this.#deps.pool, provider, credentialId);
++			if (!row) continue;
++			const blockedUntil = this.#deps.blocks.blockedUntil(
++				provider,
++				providerTypeKey(provider, row.credential.type),
++				row.index,
++				blockScope,
++			);
++			if (blockedUntil === undefined) return undefined;
++			if (retryAtMs === undefined || blockedUntil < retryAtMs) retryAtMs = blockedUntil;
++		}
++		return retryAtMs;
++	}
++
++	/**
++	 * Credential-resolution for an explicit {@link AuthCredentialSelectionPolicy}:
++	 * walk the pool by strategy, resolving each row on its own terms, and
++	 * report exhaustion (no rows vs every row blocked) instead of falling
++	 * through the cascade to keys the grant does not include.
++	 */
++	async resolveApiKeyFromExplicitSelection(
++		provider: string,
++		sessionId: string | undefined,
++		options: AuthApiKeyOptions & { selection: AuthCredentialSelectionPolicy },
++	): Promise<AuthApiKeySelectionResult> {
++		const selection = options.selection;
++		const strategy = this.#deps.strategies(provider);
++		const blockScope = strategy?.blockScope?.({ modelId: options.modelId });
++		const attemptedCredentialIds = new Set<number>();
++		const liveCredentialIds = eligibleSelectionCredentialIds(this.#deps.pool, provider, selection);
++		if (liveCredentialIds.length === 0) return { ok: false, reason: "no_eligible_credential" };
++		// A transient OAuth refresh failure on one row must not end the walk: the
++		// next eligible row may still serve. It is rethrown only when none did.
++		let transientRefreshFailure: AIError.OAuthRefreshUnavailableError | undefined;
++		const absorbTransientRefreshFailure = async <T>(attempt: Promise<T>): Promise<T | undefined> => {
++			try {
++				return await attempt;
++			} catch (error) {
++				if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
++				transientRefreshFailure = error;
++				return undefined;
++			}
++		};
++
++		const tryCredential = async (credentialId: number): Promise<ResolvedAuthCredential | undefined> => {
++			attemptedCredentialIds.add(credentialId);
++			const before = findStoredSelectionCredential(this.#deps.pool, provider, credentialId);
++			const resolved = await absorbTransientRefreshFailure(
++				this.resolveExplicitSelectionCredentialId(provider, sessionId, credentialId, options, blockScope),
++			);
++			if (!resolved && before?.credential.type === "oauth") {
++				// A refresh may have re-raced the pool (peer upsert after our
++				// snapshot); admit rows that appeared during the attempt.
++				for (const id of eligibleSelectionCredentialIds(this.#deps.pool, provider, selection)) {
++					if (!liveCredentialIds.includes(id)) liveCredentialIds.push(id);
++				}
++			}
++			return resolved;
++		};
++
++		if (selection.strategy === "least-used") {
++			const sticky = this.#deps.affinity.get(provider, sessionId, selection);
++			if (sticky && liveCredentialIds.includes(sticky.credentialId)) {
++				const stickyRow = findStoredSelectionCredential(this.#deps.pool, provider, sticky.credentialId);
++				if (
++					stickyRow &&
++					stickyRow.credential.type === sticky.type &&
++					this.#selectionCredentialIsUnblocked(provider, stickyRow, blockScope)
++				) {
++					const resolved = await tryCredential(sticky.credentialId);
++					if (resolved) return { ok: true, credential: resolved };
++				}
++			}
++			const oauthResolved = await absorbTransientRefreshFailure(
++				this.resolveOAuthMode(provider, sessionId, options, {
++					kind: "live-usage",
++					attemptedCredentialIds,
++				}),
++			);
++			if (oauthResolved) return { ok: true, credential: this.#resolvedOAuthCredential(oauthResolved) };
++			for (const credentialId of liveCredentialIds) {
++				if (attemptedCredentialIds.has(credentialId)) continue;
++				const resolved = await tryCredential(credentialId);
++				if (resolved) return { ok: true, credential: resolved };
++			}
++		} else {
++			for (const credentialId of this.#orderedSelectionCredentialIds(
++				provider,
++				sessionId,
++				selection,
++				liveCredentialIds,
++				blockScope,
++			)) {
++				const resolved = await tryCredential(credentialId);
++				if (resolved) return { ok: true, credential: resolved };
++			}
++		}
++		if (transientRefreshFailure) throw transientRefreshFailure;
++
++		const remainingLiveIds = eligibleSelectionCredentialIds(this.#deps.pool, provider, selection);
++		if (remainingLiveIds.length === 0) return { ok: false, reason: "no_eligible_credential" };
++		const retryAtMs = this.#selectionBlockedRetryAtMs(provider, remainingLiveIds, blockScope);
++		if (retryAtMs !== undefined) return { ok: false, reason: "all_eligible_blocked", retryAtMs };
++		return { ok: false, reason: "no_eligible_credential" };
++	}
+ }
+diff --git a/packages/ai/src/auth/selection.ts b/packages/ai/src/auth/selection.ts
+new file mode 100644
+index 0000000..3d44a5c
+--- /dev/null
++++ b/packages/ai/src/auth/selection.ts
+@@ -0,0 +1,77 @@
++/**
++ * Shared queries for the fork's credential-selection policy: the durable-row
++ * pool a caller (an auth-gateway principal's grant) is allowed to use, kept
++ * consistent across selection, ranking, and rotation so every service admits
++ * exactly the same rows.
++ */
++import type { CredentialPool } from "./pool";
++import type { AuthCredential, AuthCredentialSelectionPolicy, StoredSelectionCredential } from "./types";
++
++/** True when `selection` does not restrict the pool, or admits row `id`. */
++export function isCredentialIdEligible(id: number, selection: AuthCredentialSelectionPolicy | undefined): boolean {
++	return selection === undefined || selection.eligibleCredentialIds.includes(id);
++}
++
++/**
++ * Stored rows of one type the policy admits. Without a policy the pool order
++ * is kept; with one, rows follow the policy's preference order and carry their
++ * live pool index so block lookups stay positional.
++ */
++export function eligibleStoredCredentials<T extends AuthCredential["type"]>(
++	pool: CredentialPool,
++	provider: string,
++	type: T,
++	selection: AuthCredentialSelectionPolicy | undefined,
++	filter?: (credential: AuthCredential) => boolean,
++): StoredSelectionCredential<Extract<AuthCredential, { type: T }>>[] {
++	const stored = pool.entries(provider);
++	const matchAt = (index: number): StoredSelectionCredential<Extract<AuthCredential, { type: T }>> | undefined => {
++		const entry = stored[index];
++		if (!entry) return undefined;
++		const credential = entry.credential;
++		if (credential.type !== type) return undefined;
++		if (!(filter?.(credential) ?? true)) return undefined;
++		return { id: entry.id, credential: credential as Extract<AuthCredential, { type: T }>, index };
++	};
++	if (!selection) {
++		return stored
++			.map((_entry, index) => matchAt(index))
++			.filter(
++				(entry): entry is StoredSelectionCredential<Extract<AuthCredential, { type: T }>> => entry !== undefined,
++			);
++	}
++	const indexById = new Map<number, number>();
++	stored.forEach((entry, index) => {
++		indexById.set(entry.id, index);
++	});
++	const credentials: StoredSelectionCredential<Extract<AuthCredential, { type: T }>>[] = [];
++	for (const id of selection.eligibleCredentialIds) {
++		const index = indexById.get(id);
++		if (index === undefined) continue;
++		const matched = matchAt(index);
++		if (matched) credentials.push(matched);
++	}
++	return credentials;
++}
++
++/** One stored row addressed by durable id, with its current pool position. */
++export function findStoredSelectionCredential(
++	pool: CredentialPool,
++	provider: string,
++	credentialId: number,
++): StoredSelectionCredential | undefined {
++	const stored = pool.entries(provider);
++	const index = stored.findIndex(entry => entry.id === credentialId);
++	const entry = index >= 0 ? stored[index] : undefined;
++	return entry ? { id: entry.id, credential: entry.credential, index } : undefined;
++}
++
++/** Policy-admitted rows that still exist in the pool, in policy order. */
++export function eligibleSelectionCredentialIds(
++	pool: CredentialPool,
++	provider: string,
++	selection: AuthCredentialSelectionPolicy,
++): number[] {
++	const currentIds = new Set(pool.entries(provider).map(entry => entry.id));
++	return selection.eligibleCredentialIds.filter(id => currentIds.has(id));
++}
+diff --git a/packages/ai/src/auth/types.ts b/packages/ai/src/auth/types.ts
+index 8df625b..b82a148 100644
+--- a/packages/ai/src/auth/types.ts
++++ b/packages/ai/src/auth/types.ts
+@@ -45,6 +45,96 @@ export type AuthCredentialEntry = AuthCredential | AuthCredential[];
+ /** Provider-to-credential snapshot returned by the storage facade. */
+ export type AuthStorageData = Record<string, AuthCredentialEntry>;
+ 
++/** Credential acquired from an interactive login, ready to persist. */
++export interface AcquiredAuthCredential {
++	provider: string;
++	credential: AuthCredential;
++}
++
++/** Credential-pool routing strategy a selection policy imposes. */
++export type AuthCredentialSelectionStrategy = "sticky-session" | "least-used" | "round-robin" | "failover";
++
++/**
++ * Per-request credential selection policy: the durable row ids the caller may
++ * use (in preference order) plus how to walk them. Threaded through key
++ * resolution, usage-limit marking/rotation, invalidation, health checks, and
++ * OAuth access so a gateway principal never rotates outside its pool grant.
++ */
++export interface AuthCredentialSelectionPolicy {
++	policyKey: string;
++	eligibleCredentialIds: readonly number[];
++	strategy: AuthCredentialSelectionStrategy;
++}
++
++/** A stored credential row paired with its pool position. */
++export type StoredSelectionCredential<T extends AuthCredential = AuthCredential> = {
++	id: number;
++	credential: T;
++	index: number;
++};
++
++/** Resolved bearer plus the durable row and cascade leg that supplied it. */
++export interface ResolvedAuthCredential {
++	apiKey: string;
++	credentialId?: number;
++	credentialType?: AuthCredential["type"];
++	source: CredentialOriginKind;
++	/** Non-secret account scope of the OAuth credential that answered, when one did. */
++	oauthIdentity?: OAuthRequestIdentity;
++	/**
++	 * Access token of the OAuth row that answered, so a later 401 on this bearer
++	 * names the token the provider rejected (see `AuthApiKeyOptions.rejectedAccessToken`).
++	 */
++	oauthAccess?: string;
++}
++
++/** Outcome of an explicit credential-selection resolve. */
++export type AuthApiKeySelectionResult =
++	| { ok: true; credential: ResolvedAuthCredential }
++	| { ok: false; reason: "no_credential" | "no_eligible_credential" | "all_eligible_blocked"; retryAtMs?: number };
++
++/** Emitted once when a recorded block makes a session use a sibling of its configured default. */
++export interface DefaultAccountFallover {
++	provider: string;
++	/** Durable id of the configured default account. */
++	defaultCredentialId: number;
++	/** Durable id of the account actually serving the session. */
++	usedCredentialId: number;
++	/** Earliest ms the default's block expires, when a block is recorded. */
++	retryAtMs?: number;
++}
++
++/** Why a session's serving credential became the one it is. */
++export type AccountSelectionReason =
++	| "initial"
++	| "pinned-default"
++	| "priority"
++	| "session-sticky"
++	| "usage-ranking"
++	| "fallover-blocked"
++	| "manual-pin"
++	| "policy";
++
++/**
++ * One entry of the in-process account-selection journal: the account a session
++ * started using, and why. Recorded only when the serving credential actually
++ * changes, so the journal reads as the session's account history rather than a
++ * per-request trace.
++ */
++export interface AccountSelectionEvent {
++	atMs: number;
++	provider: string;
++	sessionId?: string;
++	credentialId: number;
++	/** Credential this session was using before, when it had one. */
++	previousCredentialId?: number;
++	reason: AccountSelectionReason;
++	email?: string;
++	accountId?: string;
++	/** Human-readable cause detail, e.g. "default blocked, retry in 42m". */
++	detail?: string;
++}
++
+ /** Identity fields matched by an account routing policy. */
+ export interface AuthAccountSelector {
+ 	readonly email?: string;
+@@ -339,6 +429,22 @@ export type AuthStorageOptions = {
+ 	accountPolicies?: AuthAccountPolicies;
+ 	/** Global reserve fallback for accounts without a matching reservePct policy. */
+ 	defaultReservePct?: number;
++	/**
++	 * Per-provider default account, from `providers.defaultAccount` in
++	 * config.yml. Values are matched against a stored credential's identity
++	 * (see {@link AuthStorage.getDefaultAccountCredentialId}). Providers absent
++	 * from the map keep the existing session-hash / round-robin ordering and
++	 * live-usage ranking.
++	 */
++	defaultAccounts?: Readonly<Record<string, string>>;
++	/**
++	 * Per-provider ordered account preference, from `providers.accountPriority`
++	 * in config.yml. Each entry is matched like {@link AuthStorageOptions.defaultAccounts},
++	 * and the resolved order wins over session-hash ordering and live-usage
++	 * ranking; the head doubles as the provider's pinned default, so a
++	 * one-entry list is exactly `providers.defaultAccount`.
++	 */
++	accountPriorities?: Readonly<Record<string, readonly string[]>>;
+ 	usageFetch?: typeof fetch;
+ 	usageRequestTimeoutMs?: number;
+ 	usageLogger?: UsageLogger;
+@@ -394,16 +500,13 @@ export type AuthStorageOptions = {
+ };
+ 
+ /**
+- * Outcome of {@link AuthStorage.limits.markReached}.
+- *
+- * `switched` is `true` when an unblocked same-type sibling credential is
+- * available right now, so the caller can retry immediately and the next
+- * `getApiKey` will hand it out. When `false`, `retryAtMs` (epoch ms) carries
+- * the earliest moment any same-type sibling's temporary block expires —
+- * callers should prefer waiting until then over the provider's (often
+- * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
+- * no sibling credentials exist at all, or when the session has no tracked
+- * credential to rotate away from.
++ * With no explicit policy, `switched`/`retryAtMs` describe unblocked
++ * same-type sibling credentials, preserving the legacy cascade's retry
++ * behavior. With an explicit {@link AuthCredentialSelectionPolicy}, they
++ * describe all other currently eligible cross-type pool members; when every
++ * eligible sibling is blocked, `retryAtMs` is the earliest unblock time.
++ * `retryAtMs` is `undefined` when no sibling credentials exist at all, or
++ * when the session has no tracked credential to rotate away from.
+  *
+  * `blockedUntilMs` (epoch ms) is the just-blocked credential's own unblock
+  * deadline — the later of the caller's retry-after and any exhausted window
+@@ -495,6 +598,8 @@ export type AuthApiKeyOptions = {
+ 	 * that a peer/broker rotated out from under us is replaced before retrying.
+ 	 */
+ 	forceRefresh?: boolean;
++	/** Credential-selection policy restricting resolution to a caller-owned pool. */
++	selection?: AuthCredentialSelectionPolicy;
+ 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
+ 	refreshReason?: OAuthRefreshReason;
+ 	/**
+@@ -619,10 +724,11 @@ export interface OAuthAccountSummary {
+ 	/** Last use recorded on the session sticky; set only on the `active` account. */
+ 	lastUsedAtMs?: number;
+ }
+-/** Scope a matching-key invalidation to a session or signal. */
++/** Scope a matching-key invalidation to a session, signal, or credential pool. */
+ export interface InvalidateCredentialMatchingOptions {
+ 	signal?: AbortSignal;
+ 	sessionId?: string;
++	selection?: AuthCredentialSelectionPolicy;
+ }
+ 
+ /** Options for refreshing one stored OAuth row through durable ownership. */
+@@ -769,6 +875,8 @@ export type MarkUsageLimitOptions = {
+ 	apiKey?: string;
+ 	credentialId?: number;
+ 	signal?: AbortSignal;
++	/** Restrict the sibling scan to the caller's credential pool. */
++	selection?: AuthCredentialSelectionPolicy;
+ };
+ 
+ /** Resolve a failed request to its credential and rotate if possible. */
+@@ -778,6 +886,8 @@ export type RotateCredentialOptions = {
+ 	apiKey?: string;
+ 	credentialId?: number;
+ 	signal?: AbortSignal;
++	/** Restrict rotation to the caller's credential pool. */
++	selection?: AuthCredentialSelectionPolicy;
+ };
+ 
+ /**
+@@ -955,6 +1065,17 @@ export interface KeysApi {
+ 	 * pinned sessions, and pools that do not rank usage do no work.
+ 	 */
+ 	prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void>;
++	/**
++	 * Fork feature: resolve the bearer together with its durable stored row and
++	 * the cascade leg that supplied it. With an
++	 * {@link AuthCredentialSelectionPolicy} the walk stays inside the granted
++	 * pool and exhaustion is reported instead of falling through the cascade.
++	 */
++	resolveApiKeySelection(
++		provider: string,
++		sessionId?: string,
++		options?: AuthApiKeyOptions,
++	): Promise<AuthApiKeySelectionResult>;
+ 	/**
+ 	 * Resolve a bearer together with its durable stored credential row id, when known.
+ 	 * Same precedence as {@link KeysApi.get}, but rejects with
+@@ -1050,7 +1171,10 @@ export interface KeysApi {
+ 	 * Used by web-search providers and other consumers that hold an AuthStorage
+ 	 * directly (no ModelRegistry in scope).
+ 	 */
+-	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver;
++	resolver(
++		provider: string,
++		options?: { sessionId?: string; baseUrl?: string; modelId?: string; selection?: AuthCredentialSelectionPolicy },
++	): ApiKeyResolver;
+ }
+ 
+ /** Controls whether a row-id refresh may reuse a recently minted token. */
+diff --git a/packages/ai/src/providers/openai-codex-responses.ts b/packages/ai/src/providers/openai-codex-responses.ts
+index e6c0545..21c8776 100644
+--- a/packages/ai/src/providers/openai-codex-responses.ts
++++ b/packages/ai/src/providers/openai-codex-responses.ts
+@@ -175,6 +175,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
+ 	codexMode?: boolean;
+ 	toolChoice?: ToolChoice;
+ 	preferWebsockets?: boolean;
++	/** Per-request Codex WebSocket proxy; wins over the env-derived one. See SimpleStreamOptions.webSocketProxy. */
++	webSocketProxy?: string;
+ 	serviceTier?: ServiceTier;
+ 	/**
+ 	 * Responses Lite transport opt-in. Normal inference defaults to full
+@@ -1826,6 +1828,7 @@ async function openCodexWebSocketTransport(
+ 		websocketHeaders,
+ 		model.provider,
+ 		requestSetup.requestSignal,
++		options?.webSocketProxy,
+ 	);
+ 	const timeouts: CodexWebSocketRequestTimeouts = {
+ 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
+@@ -1871,6 +1874,7 @@ async function openCodexWebSocketTransport(
+ 				websocketHeaders,
+ 				model.provider,
+ 				requestSetup.requestSignal,
++				options?.webSocketProxy,
+ 			);
+ 		}
+ 	}
+@@ -3386,6 +3390,7 @@ export async function prewarmOpenAICodexResponses(
+ 		| "providerSessionState"
+ 		| "responsesLite"
+ 		| "serviceTier"
++		| "webSocketProxy"
+ 	>,
+ ): Promise<void> {
+ 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+@@ -3439,6 +3444,7 @@ export async function prewarmOpenAICodexResponses(
+ 		headers,
+ 		model.provider,
+ 		options?.signal,
++		options?.webSocketProxy,
+ 	);
+ 	state.prewarmed = true;
+ }
+@@ -4556,8 +4562,9 @@ async function getOrCreateCodexWebSocketConnection(
+ 	headers: Headers,
+ 	provider: string,
+ 	signal?: AbortSignal,
++	proxyOverride?: string,
+ ): Promise<CodexWebSocketConnection> {
+-	const proxy = getProxyForUrl(provider, new URL(url));
++	const proxy = proxyOverride ?? getProxyForUrl(provider, new URL(url));
+ 	const headerRecord = headersToRecord(headers);
+ 	// Join an in-flight handshake instead of tearing it down: closing a
+ 	// CONNECTING socket rejects the concurrent caller (prewarm racing the first
+diff --git a/packages/ai/src/registry/engine/oauth-code.ts b/packages/ai/src/registry/engine/oauth-code.ts
+index af1bbe0..6a231fa 100644
+--- a/packages/ai/src/registry/engine/oauth-code.ts
++++ b/packages/ai/src/registry/engine/oauth-code.ts
+@@ -120,13 +120,37 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
+ 		}
+ 	}
+ 
+-	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
++	/** Client settings the token exchange reuses; resolved by `generateAuthUrl` and by `resume`. */
++	async #resolveClient(signal?: AbortSignal): Promise<void> {
+ 		const rule = this.#rule;
+-		const signal = this.ctrl.signal;
+ 		this.#clientId = rule.clientId ? await resolveValue(rule.clientId, signal) : undefined;
+ 		this.#clientSecret = rule.clientSecret ? await resolveValue(rule.clientSecret, signal) : undefined;
+ 		this.#base = rule.baseUrl ? (await resolveValue(rule.baseUrl, signal)).replace(/\/+$/, "") : undefined;
+ 		this.#auth = rule.authUrl ? (await resolveValue(rule.authUrl, signal)).replace(/\/+$/, "") : undefined;
++	}
++
++	/**
++	 * Fork: the PKCE verifier minted by the last `generateAuthUrl`, so a server
++	 * can persist it (encrypted) and finish the flow in another process.
++	 */
++	get pkceVerifier(): string {
++		return this.#verifier;
++	}
++
++	/**
++	 * Fork: prepare `exchangeToken` in a process that did not run
++	 * `generateAuthUrl` (split start/complete): re-resolve the client settings
++	 * and restore the verifier saved from {@link pkceVerifier}.
++	 */
++	async resume(verifier: string): Promise<void> {
++		await this.#resolveClient(this.ctrl.signal);
++		this.#verifier = verifier;
++	}
++
++	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
++		const rule = this.#rule;
++		const signal = this.ctrl.signal;
++		await this.#resolveClient(signal);
+ 		let challenge: string | undefined;
+ 		if (rule.pkce) {
+ 			const pkce = await generatePKCE();
+diff --git a/packages/ai/src/registry/engine/refresh.ts b/packages/ai/src/registry/engine/refresh.ts
+index 112437a..12d60c9 100644
+--- a/packages/ai/src/registry/engine/refresh.ts
++++ b/packages/ai/src/registry/engine/refresh.ts
+@@ -6,6 +6,7 @@
+ import type { CompiledAuthProvider, CompiledRefresh } from "@oh-my-pi/pi-catalog/compat/types";
+ import * as AIError from "../../error";
+ import { claudeCodeSdkVersion } from "../../providers/claude-code-fingerprint";
++import type { FetchImpl } from "../../types";
+ import type { OAuthCredentials } from "../oauth/types";
+ import {
+ 	applyAfterExchange,
+@@ -20,7 +21,11 @@ import {
+ } from "./common";
+ 
+ type RequestRefresh = Extract<CompiledRefresh, { kind: "request" }>;
+-type Refresher = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
++type Refresher = (
++	credentials: OAuthCredentials,
++	signal?: AbortSignal,
++	fetchImpl?: FetchImpl,
++) => Promise<OAuthCredentials>;
+ 
+ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
+ 	const login = policy.login;
+@@ -49,7 +54,7 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
+ 
+ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
+ 	const provider = policy.id;
+-	return async (credentials, signal) => {
++	return async (credentials, signal, fetchImpl = fetch) => {
+ 		for (const field of rule.require) {
+ 			if (!credentials[field as keyof OAuthCredentials]) {
+ 				throw new AIError.OAuthError(`${provider} credentials are missing ${field}; sign in again`, {
+@@ -61,7 +66,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
+ 		throwIfCancelled(signal);
+ 		const client = await loginClient(policy, signal);
+ 		const hookHeaders = rule.headersHook ? (await loadHeadersHook(rule.headersHook))() : undefined;
+-		const context = { provider, fetch, signal, headers: hookHeaders };
++		const context = { provider, fetch: fetchImpl, signal, headers: hookHeaders };
+ 		const vars: TemplateVars = {
+ 			refresh_token: credentials.refresh,
+ 			client_id: client.clientId,
+@@ -91,7 +96,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
+ 			provider,
+ 			phase: "refresh",
+ 			raw: body,
+-			fetch,
++			fetch: fetchImpl,
+ 			signal,
+ 			stored: credentials,
+ 		});
+@@ -103,7 +108,8 @@ export function createRefresh(policy: CompiledAuthProvider): Refresher | undefin
+ 	const rule = policy.refresh;
+ 	if (!rule || rule.kind === "none") return undefined;
+ 	if (rule.kind === "hook") {
+-		return async (credentials, signal) => (await loadRefreshHook(rule.hook))(credentials, signal);
++		return async (credentials, signal, fetchImpl) =>
++			(await loadRefreshHook(rule.hook))(credentials, signal, fetchImpl);
+ 	}
+ 	return createRequestRefresh(rule, policy);
+ }
+diff --git a/packages/ai/src/registry/hooks/types.ts b/packages/ai/src/registry/hooks/types.ts
+index dce9ce8..50439f9 100644
+--- a/packages/ai/src/registry/hooks/types.ts
++++ b/packages/ai/src/registry/hooks/types.ts
+@@ -11,8 +11,12 @@ import type { OAuthController, OAuthCredentials, OAuthPrompt } from "../oauth/ty
+ /** Whole-flow login implementation (`login "custom" hook=…`); rejects a bare controller at runtime when it needs prompts. */
+ export type LoginHook = (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
+ 
+-/** Whole-flow refresh implementation (`refresh hook=…`). */
+-export type RefreshHook = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
++/** Whole-flow refresh implementation (`refresh hook=…`); `fetchImpl` routes provider calls (default global fetch). */
++export type RefreshHook = (
++	credentials: OAuthCredentials,
++	signal?: AbortSignal,
++	fetchImpl?: FetchImpl,
++) => Promise<OAuthCredentials>;
+ 
+ /** Runtime context handed to `after-exchange` / `after-refresh` hooks. */
+ export interface ExchangeContext {
+diff --git a/packages/ai/src/registry/oauth/index.ts b/packages/ai/src/registry/oauth/index.ts
+index 8d151b5..9ea7a4a 100644
+--- a/packages/ai/src/registry/oauth/index.ts
++++ b/packages/ai/src/registry/oauth/index.ts
+@@ -4,6 +4,7 @@
+ 
+ import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+ import * as AIError from "../../error";
++import type { FetchImpl } from "../../types";
+ import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
+ import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
+ import type {
+@@ -63,11 +64,13 @@ export function unregisterOAuthProviders(sourceId: string): void {
+ 
+ /**
+  * Refresh a built-in OAuth grant, cancelling provider work when refresh ownership ends.
++ * `fetchImpl` carries every provider call of the refresh (fork: per-credential proxy).
+  */
+ export async function refreshOAuthToken(
+ 	provider: OAuthProvider,
+ 	credentials: OAuthCredentials,
+ 	signal?: AbortSignal,
++	fetchImpl?: FetchImpl,
+ ): Promise<OAuthCredentials> {
+ 	if (!credentials) {
+ 		throw new AIError.OAuthError(`No OAuth credentials found for ${provider}`, {
+@@ -84,7 +87,7 @@ export async function refreshOAuthToken(
+ 	}
+ 	// Providers without a real refresher (static bearer tokens / API keys that
+ 	// don't expire) return the credentials unchanged.
+-	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
++	return def.refreshToken ? def.refreshToken(credentials, signal, fetchImpl) : credentials;
+ }
+ const JWT_EXPIRY_SKEW_MS = 5 * 60_000;
+ export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provider: string, credentials: T): T {
+diff --git a/packages/ai/src/registry/oauth/openai-codex.ts b/packages/ai/src/registry/oauth/openai-codex.ts
+index 40a6602..0d97ec2 100644
+--- a/packages/ai/src/registry/oauth/openai-codex.ts
++++ b/packages/ai/src/registry/oauth/openai-codex.ts
+@@ -209,11 +209,14 @@ async function exchangeCodeForToken(
+  *
+  * Avoids a local callback server entirely — useful when port 1455 is unavailable
+  * or when the browser callback flow fails with 403 (e.g. network/proxy issues).
++ * Every request (user code, polling, code exchange) goes through `ctrl.fetch`
++ * when set (fork: per-account proxy), else the global fetch.
+  */
+ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAuthCredentials> {
++	const fetchImpl: FetchImpl = ctrl.fetch ?? fetch;
+ 	ctrl.onProgress?.("Initiating device authorization…");
+ 
+-	const initResponse = await fetch(DEVICE_USERCODE_URL, {
++	const initResponse = await fetchImpl(DEVICE_USERCODE_URL, {
+ 		method: "POST",
+ 		headers: { "Content-Type": "application/json" },
+ 		body: JSON.stringify({ client_id: CLIENT_ID }),
+@@ -259,7 +262,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
+ 			throw new AIError.LoginCancelledError("Device authorization cancelled");
+ 		}
+ 
+-		const pollResponse = await fetch(DEVICE_TOKEN_URL, {
++		const pollResponse = await fetchImpl(DEVICE_TOKEN_URL, {
+ 			method: "POST",
+ 			headers: { "Content-Type": "application/json" },
+ 			body: JSON.stringify({
+@@ -293,7 +296,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
+ 		}
+ 
+ 		ctrl.onProgress?.("Exchanging authorization code for tokens…");
+-		return exchangeCodeForToken(pollData.authorization_code, pollData.code_verifier, DEVICE_REDIRECT_URI);
++		return exchangeCodeForToken(pollData.authorization_code, pollData.code_verifier, DEVICE_REDIRECT_URI, fetchImpl);
+ 	}
+ 
+ 	throw new AIError.OAuthError("Device authorization timed out — user did not complete login in time", {
+diff --git a/packages/ai/src/registry/types.ts b/packages/ai/src/registry/types.ts
+index 260ec3b..d30c36a 100644
+--- a/packages/ai/src/registry/types.ts
++++ b/packages/ai/src/registry/types.ts
+@@ -82,8 +82,15 @@ export interface ProviderDefinition {
+ 	// --- interactive login (OAuthProviderInterface-compatible) ---
+ 	/** Interactive login; flows that need `onPrompt`/`onAuth` reject a bare controller at runtime. */
+ 	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
+-	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
+-	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
++	/**
++	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
++	 * `fetchImpl` carries the token request (fork: per-credential proxy); default global fetch.
++	 */
++	readonly refreshToken?: (
++		credentials: OAuthCredentials,
++		signal?: AbortSignal,
++		fetchImpl?: FetchImpl,
++	) => Promise<OAuthCredentials>;
+ 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
+ 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
+ 	readonly storeCredentialsAs?: string;
+diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
+index d19e4f7..6a6e834 100644
+--- a/packages/ai/src/stream.ts
++++ b/packages/ai/src/stream.ts
+@@ -2087,6 +2087,7 @@ function mapOptionsForApi<TApi extends Api>(
+ 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
+ 				serviceTier: options?.serviceTier,
+ 				preferWebsockets: options?.preferWebsockets,
++				webSocketProxy: options?.webSocketProxy,
+ 				codexCompaction: options?.codexCompaction,
+ 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+ 				textVerbosity: options?.textVerbosity,
+diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
+index b318ba4..4a0ad54 100644
+--- a/packages/ai/src/types.ts
++++ b/packages/ai/src/types.ts
+@@ -838,6 +838,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
+ 	syntheticApiFormat?: "openai" | "anthropic";
+ 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+ 	preferWebsockets?: boolean;
++	/**
++	 * Proxy URL for the Codex WebSocket handshake of this request (`http(s)://[user:pass@]host:port`).
++	 * Wins over `PI_PROXY_*` / `HTTPS_PROXY`. HTTP transports take their proxy from {@link StreamOptions.fetch}.
++	 */
++	webSocketProxy?: string;
+ 	/**
+ 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
+ 	 * the request targets OpenRouter (`model.provider === "openrouter"`). Common
+diff --git a/packages/ai/test/claude-block-healing.test.ts b/packages/ai/test/claude-block-healing.test.ts
+index 641e0e4..0c34fc2 100644
+--- a/packages/ai/test/claude-block-healing.test.ts
++++ b/packages/ai/test/claude-block-healing.test.ts
+@@ -304,7 +304,6 @@ describe("claude usage-block healing", () => {
+ 		});
+ 		expect(blocks.get("1:tier:fable")).toBeLessThan(Date.now() + 120_000);
+ 	});
+-
+ 	it("keeps the block when the report predates it", async () => {
+ 		// A broker serves its retained last-good report for hours after `/usage`
+ 		// starts failing; those healthy limits describe the account before the
+diff --git a/packages/catalog/test/build.test.ts b/packages/catalog/test/build.test.ts
+index e5bad75..86f7649 100644
+--- a/packages/catalog/test/build.test.ts
++++ b/packages/catalog/test/build.test.ts
+@@ -750,6 +750,29 @@ describe("openai-completions wire-quirk compat detection", () => {
+ 			).compat.supportsForcedToolChoice,
+ 		).toBe(true);
+ 	});
++	it("downgrades forced tool choice for Claude Opus 5.5 on every host", () => {
++		// Anthropic 400s Opus 5.5 on `tool_choice: {type:"tool"|"any"}`; the older
++		// Opus line still accepts it, including Venice's squashed `opus-45` (4.5).
++		const anthropic = (id: string, provider = "anthropic") =>
++			resolveModelPolicy({
++				id,
++				name: id,
++				api: "anthropic-messages",
++				provider,
++				baseUrl: "https://api.anthropic.com",
++				reasoning: true,
++				input: ["text"],
++				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++				contextWindow: 1_000_000,
++				maxTokens: 128_000,
++			}).compat.supportsForcedToolChoice;
++		expect(anthropic("claude-opus-5-5")).toBe(false);
++		expect(anthropic("claude-opus-5")).toBe(true);
++		expect(anthropic("claude-opus-45", "venice")).toBe(true);
++		expect(
++			resolveModelPolicy(openrouterSpec({ id: "anthropic/claude-opus-5.5" })).compat.supportsForcedToolChoice,
++		).toBe(false);
++	});
+ 	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
+ 		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
+ 		// cannot round-trip encrypted reasoning: the upstream binds
+diff --git a/packages/coding-agent/src/cli/worktree-cli.ts b/packages/coding-agent/src/cli/worktree-cli.ts
+index f9f8253..8f25469 100644
+--- a/packages/coding-agent/src/cli/worktree-cli.ts
++++ b/packages/coding-agent/src/cli/worktree-cli.ts
+@@ -24,7 +24,7 @@ import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+ import { Settings } from "../config/settings";
+ import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
++import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+ 
+ import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
+ 
+@@ -149,7 +149,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
+ 	}
+ 	const result = await repository.worktreeAdd(worktreePath, ref, {
+ 		detach,
+-		clone: cfgWorktreeClone.get(settings),
++		clone: cfgWorktreeClone.get(settings) && (await canCloneCheckoutInto(repository.info().repoRoot, worktreePath)),
+ 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+ 	});
+ 	if (!options.quiet) {
+diff --git a/packages/coding-agent/src/task/settings.ts b/packages/coding-agent/src/task/settings.ts
+index 3f9ea81..7801e62 100644
+--- a/packages/coding-agent/src/task/settings.ts
++++ b/packages/coding-agent/src/task/settings.ts
+@@ -83,7 +83,7 @@ export const cfgWorktreeClone = register({
+ 		group: "Isolation",
+ 		label: "Clone Checkout into Worktrees",
+ 		description:
+-			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone",
++			"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone or the worktree path is inside the checkout",
+ 	},
+ });
+ 
+diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
+index 0bb8353..6b9dd86 100644
+--- a/packages/coding-agent/src/task/worktree.ts
++++ b/packages/coding-agent/src/task/worktree.ts
+@@ -6,7 +6,15 @@ import * as path from "node:path";
+ import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
+ import * as natives from "@oh-my-pi/pi-natives";
+ import * as vcs from "@oh-my-pi/pi-natives/vcs";
+-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
++import {
++	formatBytes,
++	getWorktreeDir,
++	isEnoent,
++	logger,
++	normalizePathForComparison,
++	relativePathWithinNormalizedRoot,
++	Snowflake,
++} from "@oh-my-pi/pi-utils";
+ import type { SettingValueOf } from "../config/registry";
+ 
+ import { withRepoLock } from "../utils/repo-lock";
+@@ -579,6 +587,38 @@ export function formatIsolationBackend(backend: IsoBackendKind): Exclude<Isolati
+ 	}
+ }
+ 
++/**
++ * Whether `worktree add` may clone the checkout at `sourceRoot` into
++ * `worktreePath` (`worktree.clone`). The native clone copies the whole source
++ * checkout, so a destination inside it is copied into itself until the path is
++ * too long (can1357/oh-my-pi#16076); such a worktree gets a plain checkout.
++ */
++export async function canCloneCheckoutInto(sourceRoot: string, worktreePath: string): Promise<boolean> {
++	const root = normalizePathForComparison(sourceRoot);
++	const destination = normalizePathForComparison(await resolveThroughExistingAncestor(worktreePath));
++	return relativePathWithinNormalizedRoot(root, destination) === null;
++}
++
++/**
++ * `target` with its deepest existing ancestor replaced by that ancestor's real
++ * path. A destination that does not exist yet still compares by physical
++ * location when it is reached through a symlink or junction.
++ */
++async function resolveThroughExistingAncestor(target: string): Promise<string> {
++	const missing: string[] = [];
++	let current = path.resolve(target);
++	for (;;) {
++		try {
++			return path.join(await fs.realpath(current), ...missing);
++		} catch {
++			const parent = path.dirname(current);
++			if (parent === current) return path.resolve(target);
++			missing.unshift(path.basename(current));
++			current = parent;
++		}
++	}
++}
++
+ export interface IsolationHandle {
+ 	/** Merged view materialised by the backend; pass this to the task. */
+ 	mergedDir: string;
+diff --git a/packages/coding-agent/src/tools/gh-pr-checkout.ts b/packages/coding-agent/src/tools/gh-pr-checkout.ts
+index 1582599..a7595cf 100644
+--- a/packages/coding-agent/src/tools/gh-pr-checkout.ts
++++ b/packages/coding-agent/src/tools/gh-pr-checkout.ts
+@@ -6,7 +6,7 @@ import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-
+ import * as vcs from "@oh-my-pi/pi-natives/vcs";
+ import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
+ import { github } from "../utils/github";
+-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
++import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+ import { withRepoLock } from "../utils/repo-lock";
+ import type { ToolSession } from ".";
+ import type { GhPrCheckoutSummary, GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
+@@ -508,7 +508,9 @@ export async function checkoutPullRequest(
+ 					localBranch,
+ 					{
+ 						detach: false,
+-						clone: cfgWorktreeClone.get(session.settings),
++						clone:
++							cfgWorktreeClone.get(session.settings) &&
++							(await canCloneCheckoutInto(repository.info().repoRoot, finalWorktreePath)),
+ 						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
+ 					},
+ 					signal,
