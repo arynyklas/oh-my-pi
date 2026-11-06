@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
 	getPremiumServiceTierRequests,
+	type MessageAttribution,
 	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
@@ -26,6 +27,13 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
+import {
+	emptySpotlightRows,
+	emptySpotlightState,
+	SpotlightCollector,
+	type SpotlightParseRows,
+	type SpotlightParserState,
+} from "./spotlight-ingest";
 import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
@@ -128,11 +136,16 @@ function extractUserText(content: unknown): string {
 }
 
 /**
- * Build user-message stats from an entry. Returns null for empty/synthetic content.
+ * Build user-message stats from an entry. Returns null for empty, synthetic, or agent-attributed content.
  */
 function extractUserStats(sessionFile: string, folder: string, entry: SessionMessageEntry): UserMessageStats | null {
-	const msg = entry.message as { role: "user"; content?: unknown; synthetic?: boolean };
-	if (msg.role !== "user" || msg.synthetic) return null;
+	const msg = entry.message as {
+		role: "user";
+		content?: unknown;
+		synthetic?: boolean;
+		attribution?: MessageAttribution;
+	};
+	if (msg.role !== "user" || msg.synthetic || msg.attribution === "agent") return null;
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);
@@ -416,6 +429,13 @@ function sanitizeToolName(name: string): string | null {
 	return candidate.length > 0 ? candidate : null;
 }
 
+/** A call the agent loop skipped carries a synthetic `executed: false` result: it never ran, so it is no tool error. */
+function isToolExecutionError(message: { isError?: unknown; details?: unknown }): boolean {
+	if (message.isError !== true) return false;
+	const details = message.details as { __synthetic?: unknown; executed?: unknown } | null | undefined;
+	return !(details?.__synthetic === true && details.executed === false);
+}
+
 /**
  * Build the result linkage for a `toolResult` entry: text characters fed back
  * into context plus the error flag, keyed to the originating call.
@@ -435,7 +455,7 @@ function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry):
 		sessionFile,
 		toolCallId: msg.toolCallId,
 		resultChars,
-		isError: msg.isError === true,
+		isError: isToolExecutionError(msg),
 	};
 }
 
@@ -549,8 +569,6 @@ async function scanSessionLines(
 	return { read, done: true };
 }
 
-const SERVICE_TIER_NEEDLE = Buffer.from('"service_tier_change"');
-
 /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	const entries: SessionEntry[] = [];
@@ -567,23 +585,30 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
+/** Cursor state recovered from a transcript prefix: the active service tier and the Spotlight collector state. */
+interface PrefixState {
+	serviceTier: ServiceTierByFamily | null;
+	spotlight: SpotlightParserState;
+}
+
 /**
- * Recover the service tier active at `endOffset` by replaying the preceding
- * bytes without materializing them. `endOffset` always comes from a previous
- * `newOffset` and is therefore a line boundary, so passing it as the byte
- * budget stops the scan exactly there. Lines are prefiltered with a raw byte
- * search, keeping the pass memory-scan bound rather than JSON bound.
+ * Recover the service tier and Spotlight state at `endOffset` by replaying the
+ * preceding bytes without materializing them. `endOffset` always comes from a
+ * previous `newOffset` and is therefore a line boundary, so passing it as the
+ * byte budget stops the scan exactly there. Spotlight consumes entries of every
+ * type, so no line can be skipped by a byte prefilter; each line is parsed.
  */
-async function scanServiceTierPrefix(sessionPath: string, endOffset: number): Promise<ServiceTierByFamily | null> {
+async function scanPrefixState(sessionPath: string, folder: string, endOffset: number): Promise<PrefixState> {
 	let tier: ServiceTierByFamily | undefined;
+	const spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
 	await scanSessionLines(sessionPath, 0, endOffset, line => {
-		const view = Buffer.from(line.buffer as ArrayBuffer, line.byteOffset, line.length);
-		if (!view.includes(SERVICE_TIER_NEEDLE)) return true;
 		const entry = parseJsonLine(line);
-		if (entry && isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
+		if (!entry) return true;
+		if (isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
+		else spotlight.visit(entry);
 		return true;
 	});
-	return tier ?? null;
+	return { serviceTier: tier ?? null, spotlight: spotlight.state };
 }
 
 /**
@@ -602,6 +627,8 @@ export interface SessionParserState {
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
+	spotlight?: SpotlightParserState;
 }
 
 export interface ParseSessionOptions {
@@ -618,8 +645,9 @@ export interface ParseSessionOptions {
 	/**
 	 * Active service tier at `fromOffset` for callers that carry the tier
 	 * without a full cursor. `null` = none active; `undefined` = unknown, which
-	 * makes this call replay the prefix with {@link scanServiceTierPrefix} to
-	 * recover it. Ignored when `state` resumes.
+	 * makes this call replay the prefix with {@link scanPrefixState} to
+	 * recover it (the replay also rebuilds the Spotlight state, so a supplied
+	 * tier only overrides the replayed one). Ignored when `state` resumes.
 	 */
 	serviceTier?: ServiceTierByFamily | null;
 	/** Soft byte budget for this call; the scan stops at the next line boundary past it. */
@@ -632,6 +660,7 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	spotlight: SpotlightParseRows;
 	newOffset: number;
 	/** Cursor to persist and feed back as `state` on the next pass for this file. */
 	parserState?: SessionParserState;
@@ -702,6 +731,7 @@ export async function parseSessionFile(
 	const callsById = new Map<string, ToolCallStats>();
 	let currentServiceTier: ServiceTierByFamily | null | undefined;
 	let reset = false;
+	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
 
 	try {
 		const info = await fs.stat(sessionPath);
@@ -721,19 +751,23 @@ export async function parseSessionFile(
 		const start = reset || replay ? 0 : fromOffset;
 
 		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
-		currentServiceTier =
-			start === 0
-				? null
-				: resume
-					? (state?.serviceTier ?? null)
-					: options.serviceTier !== undefined
-						? options.serviceTier
-						: await scanServiceTierPrefix(sessionPath, start);
+		if (start === 0) {
+			currentServiceTier = null;
+		} else if (resume) {
+			currentServiceTier = state?.serviceTier ?? null;
+			spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+		} else {
+			// The Spotlight state is only recoverable by replaying the prefix, so a caller-supplied tier saves nothing.
+			const prefix = await scanPrefixState(sessionPath, folder, start);
+			currentServiceTier = options.serviceTier !== undefined ? options.serviceTier : prefix.serviceTier;
+			spotlight = new SpotlightCollector(sessionPath, folder, prefix.spotlight);
+		}
 
 		// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 		const { read, done } = await scanSessionLines(sessionPath, start, maxBytes, line => {
 			const entry = parseJsonLine(line);
 			if (!entry) return true;
+			spotlight.visit(entry);
 			if (isServiceTierChange(entry)) {
 				currentServiceTier = coerceServiceTierByFamily(entry.serviceTier) ?? null;
 				return true;
@@ -781,6 +815,7 @@ export async function parseSessionFile(
 			return true;
 		});
 
+		await spotlight.finish();
 		const checkpoint = Bun.hash(await readCheckpoint(sessionPath, read)).toString(16);
 		return {
 			stats,
@@ -788,6 +823,7 @@ export async function parseSessionFile(
 			userLinks,
 			toolCalls,
 			toolResults,
+			spotlight: spotlight.rows,
 			newOffset: read,
 			serviceTier: currentServiceTier ?? null,
 			done,
@@ -802,6 +838,7 @@ export async function parseSessionFile(
 				mtimeMs: info.mtimeMs,
 				checkpoint,
 				serviceTier: currentServiceTier ?? null,
+				spotlight: spotlight.state,
 			},
 		};
 	} catch (err) {
@@ -812,6 +849,7 @@ export async function parseSessionFile(
 				userLinks: [],
 				toolCalls: [],
 				toolResults: [],
+				spotlight: emptySpotlightRows(),
 				newOffset: fromOffset,
 				serviceTier: currentServiceTier ?? null,
 				done: true,

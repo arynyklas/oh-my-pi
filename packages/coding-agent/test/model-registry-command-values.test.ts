@@ -333,7 +333,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
 		writeModelCache(
-			"gateway-proxy:proxy-v2-context-v5",
+			"gateway-proxy:proxy-v2-context-v6",
 			cacheUpdatedAt,
 			[
 				buildModel({
@@ -391,7 +391,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
 		writeModelCache(
-			"gateway-proxy:proxy-v2-context-v5",
+			"gateway-proxy:proxy-v2-context-v6",
 			cacheUpdatedAt,
 			[
 				buildModel({
