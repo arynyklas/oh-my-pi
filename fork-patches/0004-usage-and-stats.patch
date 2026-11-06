@@ -105,18 +105,19 @@ index c983e2e..ab9b399 100644
  	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
  };
 diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/src/cli/stats-cli.ts
-index db1bd56..70bff4c 100644
+index c193bc7..76535f5 100644
 --- a/packages/coding-agent/src/cli/stats-cli.ts
 +++ b/packages/coding-agent/src/cli/stats-cli.ts
-@@ -6,6 +6,7 @@
+@@ -6,7 +6,7 @@
  
  import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
  import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
-+import { formatBytes } from "@oh-my-pi/pi-utils";
+-import { postmortem } from "@oh-my-pi/pi-utils";
++import { formatBytes, postmortem } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { openStandaloneJudge } from "../judgment/standalone";
- import { openPath } from "../utils/open";
-@@ -15,7 +16,13 @@ import { openPath } from "../utils/open";
+ import { openTernPage } from "../tools/browser/tern/user-page";
+@@ -17,7 +17,13 @@ import { openPath } from "../utils/open";
   * the final "Synced ..." summary still prints either way.
   */
  function createSyncProgressReporter(): {
@@ -131,7 +132,7 @@ index db1bd56..70bff4c 100644
  	finish: () => void;
  } {
  	const stream = process.stderr;
-@@ -32,7 +39,13 @@ function createSyncProgressReporter(): {
+@@ -34,7 +40,13 @@ function createSyncProgressReporter(): {
  			const label = chalk.dim(shortenSessionFile(event.sessionFile));
  			const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
  			const counter = chalk.cyan(`[${event.current}/${event.total}]`);
@@ -400,10 +401,10 @@ index 70e25e9..64a0319 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index 44b73e5..90c778d 100644
+index ba375e8..c8d2b30 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -137,6 +137,13 @@
+@@ -160,6 +160,13 @@
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -418,7 +419,7 @@ index 44b73e5..90c778d 100644
  
  ### Changed
 diff --git a/packages/stats/src/aggregator.ts b/packages/stats/src/aggregator.ts
-index c0eedc1..e8ffda7 100644
+index 2ac9cda..0fbc802 100644
 --- a/packages/stats/src/aggregator.ts
 +++ b/packages/stats/src/aggregator.ts
 @@ -1,6 +1,6 @@
@@ -429,7 +430,7 @@ index c0eedc1..e8ffda7 100644
  import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
  import {
  	applySessionParseResults,
-@@ -81,7 +81,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
+@@ -82,7 +82,8 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
  }
  
  /**
@@ -439,7 +440,7 @@ index c0eedc1..e8ffda7 100644
   * `current` is the number of files completed (skipped + parsed),
   * `total` is the size of the work set. `processed` is the running total
   * of inserted rows. Parsed files are reported only after their batch commits.
-@@ -94,6 +95,10 @@ export interface SyncProgress {
+@@ -95,6 +96,10 @@ export interface SyncProgress {
  	processed: number;
  	changes: number;
  	sessionFile: string;
@@ -450,7 +451,7 @@ index c0eedc1..e8ffda7 100644
  }
  
  export interface SyncOptions {
-@@ -292,6 +297,28 @@ async function orderForIngest(files: string[]): Promise<string[]> {
+@@ -293,6 +298,28 @@ async function orderForIngest(files: string[]): Promise<string[]> {
  	return ranked.map(entry => entry.file);
  }
  
@@ -479,7 +480,7 @@ index c0eedc1..e8ffda7 100644
  async function syncAllSessionsLocked(
  	opts?: SyncOptions,
  ): Promise<{ processed: number; files: number; reconcile: boolean }> {
-@@ -305,14 +332,14 @@ async function syncAllSessionsLocked(
+@@ -306,14 +333,14 @@ async function syncAllSessionsLocked(
  	let completed = 0;
  	let cursor = 0;
  	let reconcile = false;
@@ -496,7 +497,7 @@ index c0eedc1..e8ffda7 100644
  		completed++;
  		opts?.onProgress?.({
  			current: completed,
-@@ -320,21 +347,45 @@ async function syncAllSessionsLocked(
+@@ -321,21 +348,45 @@ async function syncAllSessionsLocked(
  			processed: totalProcessed,
  			changes: totalChanges,
  			sessionFile,
@@ -546,7 +547,7 @@ index c0eedc1..e8ffda7 100644
  	};
  
  	const finish = () => {
-@@ -348,15 +399,7 @@ async function syncAllSessionsLocked(
+@@ -349,15 +400,7 @@ async function syncAllSessionsLocked(
  	};
  	if (files.length === 0) return finish();
  
@@ -563,7 +564,7 @@ index c0eedc1..e8ffda7 100644
  		if (index >= metadataEnd) {
  			const batch = files.slice(index, index + SYNC_METADATA_FILES);
  			const offsets = getFileOffsets(batch);
-@@ -376,7 +419,9 @@ async function syncAllSessionsLocked(
+@@ -377,7 +420,9 @@ async function syncAllSessionsLocked(
  		// Capture the position before awaiting: another worker can start the next metadata batch.
  		const metadataIndex = index - metadataStart;
  		const { fileStats, stored } = (await metadata)[metadataIndex];
@@ -574,7 +575,7 @@ index c0eedc1..e8ffda7 100644
  		if (
  			!replay &&
  			stored?.parserState &&
-@@ -384,34 +429,92 @@ async function syncAllSessionsLocked(
+@@ -385,34 +430,92 @@ async function syncAllSessionsLocked(
  			stored.parserState.size === fileStats.size &&
  			matchesSessionFile(stored.parserState, fileStats)
  		) {
@@ -683,7 +684,7 @@ index c0eedc1..e8ffda7 100644
  		pendingRows +=
  			result.stats.length +
  			result.userStats.length +
-@@ -429,17 +532,19 @@ async function syncAllSessionsLocked(
+@@ -431,17 +534,19 @@ async function syncAllSessionsLocked(
  		if (files.every(file => offsets.get(file)?.parserState)) requestedWorkers = 1;
  	}
  	if (requestedWorkers === 1) {
@@ -705,7 +706,7 @@ index c0eedc1..e8ffda7 100644
  			}
  		}
  		return finish();
-@@ -452,18 +557,19 @@ async function syncAllSessionsLocked(
+@@ -454,18 +559,19 @@ async function syncAllSessionsLocked(
  	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
  	async function drain(): Promise<void> {
  		let handle: WorkerHandle | null = null;
@@ -734,11 +735,11 @@ index c0eedc1..e8ffda7 100644
  		} catch (error) {
  			failed = true;
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index decd86e..395b926 100644
+index 6c816ff..c565c71 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
-@@ -274,6 +274,11 @@ export async function initDb(): Promise<Database> {
- 		);
+@@ -388,6 +388,11 @@ export async function initDb(): Promise<Database> {
+ 		) WITHOUT ROWID;
  	`);
  
 +	// Parse cursor for `offset` (file identity, tail hash, and the service tier
@@ -749,7 +750,7 @@ index decd86e..395b926 100644
  	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
  	if (!offsetColumns.some(column => column.name === "parser_state")) {
  		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
-@@ -628,6 +633,12 @@ function backfillNoCacheInputCosts(database: Database): void {
+@@ -841,6 +846,12 @@ function reparseSpotlightSessions(database: Database, key: string): void {
  export interface FileOffset {
  	offset: number;
  	lastModified: number;
@@ -762,8 +763,8 @@ index decd86e..395b926 100644
  	parserState?: SessionParserState;
  }
  
-@@ -867,7 +878,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
- 			updateToolResults(parsedRows(writes, result => result.toolResults));
+@@ -1090,7 +1101,12 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
+ 			upsertSpotlightNeeds(parsedRows(writes, result => result.spotlight.needs));
  		for (const { sessionFile, result } of sessions) {
  			if (result.parserState) {
 -				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
@@ -777,7 +778,7 @@ index decd86e..395b926 100644
  		}
  		if (reconcile) {
 diff --git a/packages/stats/src/index.ts b/packages/stats/src/index.ts
-index 2ebe24b..b8cc20e 100755
+index 3afa874..b796c7e 100755
 --- a/packages/stats/src/index.ts
 +++ b/packages/stats/src/index.ts
 @@ -1,7 +1,7 @@
@@ -789,7 +790,7 @@ index 2ebe24b..b8cc20e 100755
  import chalk from "@oh-my-pi/pi-utils/chalk";
  import { formatErrorRate } from "./client/data/formatters";
  import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
-@@ -183,7 +183,11 @@ Examples:
+@@ -192,7 +192,11 @@ Examples:
  				const idx = event.sessionFile.indexOf(marker);
  				const short = idx >= 0 ? event.sessionFile.slice(idx + marker.length) : event.sessionFile;
  				const pct = ((event.current / event.total) * 100).toFixed(0).padStart(3, " ");
@@ -803,10 +804,10 @@ index 2ebe24b..b8cc20e 100755
  				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
  				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
 diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
-index c60f107..6498232 100644
+index c8e7d2c..adcf6c1 100644
 --- a/packages/stats/src/parser.ts
 +++ b/packages/stats/src/parser.ts
-@@ -13,7 +13,7 @@ import {
+@@ -14,7 +14,7 @@ import {
  	type Usage,
  } from "@oh-my-pi/pi-ai";
  import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -815,7 +816,7 @@ index c60f107..6498232 100644
  import type {
  	AgentType,
  	MessageStatsInput,
-@@ -443,53 +443,155 @@ const LF = 0x0a;
+@@ -463,55 +463,160 @@ const LF = 0x0a;
  const CR = 0x0d;
  const jsonLineDecoder = new TextDecoder();
  
@@ -947,8 +948,6 @@ index c60f107..6498232 100644
 +	return { read, done: true };
  }
  
-+const SERVICE_TIER_NEEDLE = Buffer.from('"service_tier_change"');
-+
  /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
  export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
  	const entries: SessionEntry[] = [];
@@ -966,28 +965,36 @@ index c60f107..6498232 100644
  	return entries;
  }
  
--function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+-/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
+-function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
 -	let currentServiceTier: ServiceTierByFamily | undefined;
 -	visitSessionEntriesLenient(bytes, entry => {
 -		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
++/** Cursor state recovered from a transcript prefix: the active service tier and the Spotlight collector state. */
++interface PrefixState {
++	serviceTier: ServiceTierByFamily | null;
++	spotlight: SpotlightParserState;
++}
++
 +/**
-+ * Recover the service tier active at `endOffset` by replaying the preceding
-+ * bytes without materializing them. `endOffset` always comes from a previous
-+ * `newOffset` and is therefore a line boundary, so passing it as the byte
-+ * budget stops the scan exactly there. Lines are prefiltered with a raw byte
-+ * search, keeping the pass memory-scan bound rather than JSON bound.
++ * Recover the service tier and Spotlight state at `endOffset` by replaying the
++ * preceding bytes without materializing them. `endOffset` always comes from a
++ * previous `newOffset` and is therefore a line boundary, so passing it as the
++ * byte budget stops the scan exactly there. Spotlight consumes entries of every
++ * type, so no line can be skipped by a byte prefilter; each line is parsed.
 + */
-+async function scanServiceTierPrefix(sessionPath: string, endOffset: number): Promise<ServiceTierByFamily | null> {
++async function scanPrefixState(sessionPath: string, folder: string, endOffset: number): Promise<PrefixState> {
 +	let tier: ServiceTierByFamily | undefined;
++	const spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
 +	await scanSessionLines(sessionPath, 0, endOffset, line => {
-+		const view = Buffer.from(line.buffer as ArrayBuffer, line.byteOffset, line.length);
-+		if (!view.includes(SERVICE_TIER_NEEDLE)) return true;
 +		const entry = parseJsonLine(line);
-+		if (entry && isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
++		if (!entry) return true;
++		if (isServiceTierChange(entry)) tier = coerceServiceTierByFamily(entry.serviceTier);
+ 		else spotlight.visit(entry);
 +		return true;
  	});
 -	return currentServiceTier;
-+	return tier ?? null;
++	return { serviceTier: tier ?? null, spotlight: spotlight.state };
  }
 +
 +/**
@@ -999,8 +1006,8 @@ index c60f107..6498232 100644
  export interface SessionParserState {
  	version: 1;
  	offset: number;
-@@ -502,6 +604,28 @@ export interface SessionParserState {
- 	serviceTier: ServiceTierByFamily | null;
+@@ -526,6 +631,29 @@ export interface SessionParserState {
+ 	spotlight?: SpotlightParserState;
  }
  
 +export interface ParseSessionOptions {
@@ -1017,8 +1024,9 @@ index c60f107..6498232 100644
 +	/**
 +	 * Active service tier at `fromOffset` for callers that carry the tier
 +	 * without a full cursor. `null` = none active; `undefined` = unknown, which
-+	 * makes this call replay the prefix with {@link scanServiceTierPrefix} to
-+	 * recover it. Ignored when `state` resumes.
++	 * makes this call replay the prefix with {@link scanPrefixState} to
++	 * recover it (the replay also rebuilds the Spotlight state, so a supplied
++	 * tier only overrides the replayed one). Ignored when `state` resumes.
 +	 */
 +	serviceTier?: ServiceTierByFamily | null;
 +	/** Soft byte budget for this call; the scan stops at the next line boundary past it. */
@@ -1028,9 +1036,9 @@ index c60f107..6498232 100644
  export interface ParseSessionResult {
  	stats: MessageStatsInput[];
  	userStats: UserMessageStats[];
-@@ -509,43 +633,64 @@ export interface ParseSessionResult {
- 	toolCalls: ToolCallStats[];
+@@ -534,43 +662,64 @@ export interface ParseSessionResult {
  	toolResults: ToolResultLink[];
+ 	spotlight: SpotlightParseRows;
  	newOffset: number;
 +	/** Cursor to persist and feed back as `state` on the next pass for this file. */
  	parserState?: SessionParserState;
@@ -1115,15 +1123,17 @@ index c60f107..6498232 100644
  	const folder = extractFolderFromPath(sessionPath);
  	const agentType = classifyAgentType(sessionPath);
  	const stats: MessageStatsInput[] = [];
-@@ -555,118 +700,124 @@ export async function parseSessionFile(
+@@ -580,98 +729,118 @@ export async function parseSessionFile(
  	const toolResults: ToolResultLink[] = [];
  	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
  	const callsById = new Map<string, ToolCallStats>();
 +	let currentServiceTier: ServiceTierByFamily | null | undefined;
 +	let reset = false;
+ 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
  
 -	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 -	const visit = (entry: SessionEntry): void => {
+-		spotlight.visit(entry);
 -		if (isServiceTierChange(entry)) {
 -			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 -			return;
@@ -1160,30 +1170,33 @@ index c60f107..6498232 100644
 -			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
 -			if (modelUsageStats) stats.push(modelUsageStats);
 -			return;
--		}
++		if (fromOffset > info.size) reset = true;
++		const start = reset || replay ? 0 : fromOffset;
++
++		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
++		if (start === 0) {
++			currentServiceTier = null;
++		} else if (resume) {
++			currentServiceTier = state?.serviceTier ?? null;
++			spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
++		} else {
++			// The Spotlight state is only recoverable by replaying the prefix, so a caller-supplied tier saves nothing.
++			const prefix = await scanPrefixState(sessionPath, folder, start);
++			currentServiceTier = options.serviceTier !== undefined ? options.serviceTier : prefix.serviceTier;
++			spotlight = new SpotlightCollector(sessionPath, folder, prefix.spotlight);
+ 		}
 -		if (isAssistantMessage(entry)) {
 -			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 -			if (msgStats) stats.push(msgStats);
 -			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
 -				toolCalls.push(call);
 -				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
-+		if (fromOffset > info.size) reset = true;
-+		const start = reset || replay ? 0 : fromOffset;
-+
-+		// Nothing precedes byte 0, so a fresh parse never pays for a prefix scan.
-+		currentServiceTier =
-+			start === 0
-+				? null
-+				: resume
-+					? (state?.serviceTier ?? null)
-+					: options.serviceTier !== undefined
-+						? options.serviceTier
-+						: await scanServiceTierPrefix(sessionPath, start);
 +
 +		// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 +		const { read, done } = await scanSessionLines(sessionPath, start, maxBytes, line => {
 +			const entry = parseJsonLine(line);
 +			if (!entry) return true;
++			spotlight.visit(entry);
 +			if (isServiceTierChange(entry)) {
 +				currentServiceTier = coerceServiceTierByFamily(entry.serviceTier) ?? null;
 +				return true;
@@ -1237,9 +1250,18 @@ index c60f107..6498232 100644
 -			start = reset || replay ? 0 : Math.max(0, fromOffset);
 -			const readStart = resume ? start : 0;
 -			bytes = await file.slice(readStart, info.size).bytes();
--			currentServiceTier = resume
--				? (state?.serviceTier ?? undefined)
--				: scanLastServiceTier(bytes.subarray(0, start));
+-			if (resume) {
+-				currentServiceTier = state?.serviceTier ?? undefined;
+-				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+-			} else {
+-				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+-				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
++			if (isModelUsage(entry)) {
++				const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
++				if (modelUsageStats) stats.push(modelUsageStats);
++				return true;
+ 			}
 -			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
 -			const newOffset = start + read;
 -			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
@@ -1251,11 +1273,6 @@ index c60f107..6498232 100644
 -		} finally {
 -			await handle.close();
 -		}
-+			if (isModelUsage(entry)) {
-+				const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
-+				if (modelUsageStats) stats.push(modelUsageStats);
-+				return true;
-+			}
 +			if (isAssistantMessage(entry)) {
 +				const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier ?? undefined, agentType);
 +				if (msgStats) stats.push(msgStats);
@@ -1278,6 +1295,7 @@ index c60f107..6498232 100644
 +			return true;
 +		});
 +
++		await spotlight.finish();
 +		const checkpoint = Bun.hash(await readCheckpoint(sessionPath, read)).toString(16);
 +		return {
 +			stats,
@@ -1285,6 +1303,7 @@ index c60f107..6498232 100644
 +			userLinks,
 +			toolCalls,
 +			toolResults,
++			spotlight: spotlight.rows,
 +			newOffset: read,
 +			serviceTier: currentServiceTier ?? null,
 +			done,
@@ -1299,24 +1318,23 @@ index c60f107..6498232 100644
 +				mtimeMs: info.mtimeMs,
 +				checkpoint,
 +				serviceTier: currentServiceTier ?? null,
++				spotlight: spotlight.state,
 +			},
 +		};
  	} catch (err) {
  		if (isEnoent(err))
--			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
-+			return {
-+				stats: [],
-+				userStats: [],
-+				userLinks: [],
-+				toolCalls: [],
-+				toolResults: [],
-+				newOffset: fromOffset,
+ 			return {
+@@ -682,34 +851,11 @@ export async function parseSessionFile(
+ 				toolResults: [],
+ 				spotlight: emptySpotlightRows(),
+ 				newOffset: fromOffset,
 +				serviceTier: currentServiceTier ?? null,
 +				done: true,
-+			};
+ 			};
  		throw err;
  	}
 -
+-	await spotlight.finish();
 -	const newOffset = start + read;
 -	return {
 -		stats,
@@ -1324,6 +1342,7 @@ index c60f107..6498232 100644
 -		userLinks,
 -		toolCalls,
 -		toolResults,
+-		spotlight: spotlight.rows,
 -		newOffset,
 -		reset,
 -		parserState: {
@@ -1336,12 +1355,13 @@ index c60f107..6498232 100644
 -			mtimeMs: info.mtimeMs,
 -			checkpoint,
 -			serviceTier: currentServiceTier ?? null,
+-			spotlight: spotlight.state,
 -		},
 -	};
  }
  
  /**
-@@ -724,19 +875,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+@@ -767,19 +913,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
  }
  
  /**

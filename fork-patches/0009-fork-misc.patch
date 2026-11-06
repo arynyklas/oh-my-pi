@@ -1,5 +1,5 @@
 diff --git a/.gitignore b/.gitignore
-index 23952fc..d0db06b 100644
+index 9ae47c6..d9b27c3 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -11,6 +11,7 @@ target/
@@ -11,10 +11,10 @@ index 23952fc..d0db06b 100644
  /result
  /result-*
 diff --git a/docs/models.md b/docs/models.md
-index 7fcaf6b..92e2495 100644
+index 2cf4b21..dfe2191 100644
 --- a/docs/models.md
 +++ b/docs/models.md
-@@ -207,13 +207,23 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
+@@ -305,13 +305,23 @@ A configured `kind`, explicit or implied by a runner API, outranks the bundled c
  
  Loading models.yml checks a `modelOverrides` `kind` only against an api the file names: the override's own `api`, or that of a `models` entry with the same id. A built-in or discovered model gets its api later, so its override `kind` is checked against that api when the override applies; a kind the api does not serve is ignored and logged. An `api` override without `kind` takes a runner API's kind, keeps a kind the new api still serves, and otherwise makes the model `chat`. A `models` entry that redefines a built-in id on a different api follows the same rule, so redefining an image row on `openai-completions` makes it `chat`.
  
@@ -38,8 +38,8 @@ index 7fcaf6b..92e2495 100644
 +- `transport`: `pi-native` only. When set, every chat model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; image, speech, and transcription runners go to the same gateway's `/v1/<task>` routes instead. `apiKey` is the gateway bearer.
  - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
  - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
- - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; unknown models retain the fast local estimate.
-@@ -562,6 +572,8 @@ derives each model's `api` from the entry's `supported_endpoint_types`:
+ - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, `cl100k` (OpenAI GPT-3.5 and GPT-4) and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; models without one count in o200k.
+@@ -660,6 +670,8 @@ derives each model's `api` from the entry's `supported_endpoint_types`:
  - contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
  - otherwise -> falls back to provider-level `api`, or `openai-completions` when it is omitted
  
@@ -49,10 +49,10 @@ index 7fcaf6b..92e2495 100644
  per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
  from `baseUrl` before appending `/v1/messages`, so a single discovery `baseUrl`
 diff --git a/docs/tools/bash.md b/docs/tools/bash.md
-index bb35e1e..d80ccca 100644
+index 374695b..8a506ae 100644
 --- a/docs/tools/bash.md
 +++ b/docs/tools/bash.md
-@@ -148,7 +148,7 @@ Choose the setting by the desired outcome:
+@@ -150,7 +150,7 @@ Choose the setting by the desired outcome:
  2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
  3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
  4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before execution.
@@ -62,7 +62,7 @@ index bb35e1e..d80ccca 100644
  7. Named services dispatch before finite-command timeout handling, default PTY to `true`, and use `ready.timeout` only for readiness. For finite commands, `timeout: 0` disables the deadline; otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling, then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). Clamping adds a notice line.
  8. Execution path splits:
 diff --git a/docs/tools/github.md b/docs/tools/github.md
-index 9a72194..3d46c8d 100644
+index 15e4fdb..a85b888 100644
 --- a/docs/tools/github.md
 +++ b/docs/tools/github.md
 @@ -153,7 +153,7 @@ Worktree and metadata behavior:
@@ -775,7 +775,7 @@ index cf4e827..3092b8c 100644
  				if (!rotation.switched) {
  					const status = AIError.status(error);
 diff --git a/packages/ai/src/auth/oauth.ts b/packages/ai/src/auth/oauth.ts
-index b09ee32..5ff59d9 100644
+index c1550d5..5b912d2 100644
 --- a/packages/ai/src/auth/oauth.ts
 +++ b/packages/ai/src/auth/oauth.ts
 @@ -6,14 +6,17 @@ import type { OAuthProviderId } from "../registry/oauth/types";
@@ -796,7 +796,7 @@ index b09ee32..5ff59d9 100644
  	OAuthAccess,
  	OAuthAccessResolution,
  	OAuthAccountIdentity,
-@@ -137,8 +140,13 @@ export class OAuthAccounts implements OAuthApi {
+@@ -138,8 +141,13 @@ export class OAuthAccounts implements OAuthApi {
  		// Runtime / config overrides intentionally short-circuit OAuth: when the
  		// user has pinned an API key, they expect the OAuth identity to be
  		// suppressed (same contract as account identity lookup). A session
@@ -812,7 +812,7 @@ index b09ee32..5ff59d9 100644
  			return undefined;
  		}
  		const resolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
-@@ -159,8 +167,12 @@ export class OAuthAccounts implements OAuthApi {
+@@ -160,8 +168,12 @@ export class OAuthAccounts implements OAuthApi {
  		};
  	}
  
@@ -827,7 +827,7 @@ index b09ee32..5ff59d9 100644
  		return this.#deps.pool
  			.entries(provider)
  			.map((entry, index) => ({
-@@ -168,7 +180,10 @@ export class OAuthAccounts implements OAuthApi {
+@@ -169,7 +181,10 @@ export class OAuthAccounts implements OAuthApi {
  				credential: entry.credential,
  				index,
  			}))
@@ -839,7 +839,7 @@ index b09ee32..5ff59d9 100644
  	}
  
  	/** Refresh one stored OAuth selection and shape it as an {@link OAuthAccessResolution}. */
-@@ -286,12 +301,12 @@ export class OAuthAccounts implements OAuthApi {
+@@ -287,12 +302,12 @@ export class OAuthAccounts implements OAuthApi {
  	 * exercise each stored account exactly once.
  	 */
  	async accessAll(provider: string, options?: AuthApiKeyOptions): Promise<OAuthAccessResolution[]> {
@@ -854,7 +854,7 @@ index b09ee32..5ff59d9 100644
  				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
  			),
  		);
-@@ -314,10 +329,10 @@ export class OAuthAccounts implements OAuthApi {
+@@ -315,10 +330,10 @@ export class OAuthAccounts implements OAuthApi {
  		credentialId: number,
  		options?: AuthApiKeyOptions,
  	): Promise<OAuthAccessResolution | undefined> {
@@ -867,7 +867,7 @@ index b09ee32..5ff59d9 100644
  			candidate => candidate.credentialId === credentialId,
  		);
  		if (!selection) return undefined;
-@@ -333,24 +348,7 @@ export class OAuthAccounts implements OAuthApi {
+@@ -334,24 +349,7 @@ export class OAuthAccounts implements OAuthApi {
  	identity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
  		const preferred = this.#deps.affinity.activeOAuth(provider, sessionId);
  		if (!preferred) return undefined;
@@ -1395,7 +1395,7 @@ index 89b80c1..7b03337 100644
  	// Short-window guard: candidates whose primary (e.g. 5h) window is
  	// nearly exhausted rank behind cool ones regardless of drain urgency —
 diff --git a/packages/ai/src/auth/rotation.ts b/packages/ai/src/auth/rotation.ts
-index e901785..0039720 100644
+index 23ce733..aa906ba 100644
 --- a/packages/ai/src/auth/rotation.ts
 +++ b/packages/ai/src/auth/rotation.ts
 @@ -18,8 +18,10 @@ import type { KeyOverrides } from "./cascade";
@@ -1562,7 +1562,7 @@ index e901785..0039720 100644
  		this.#deps.blocks.mark(
  			provider,
  			providerTypeKey(provider, matched.type),
-@@ -403,6 +435,7 @@ export class RateLimits implements LimitsApi {
+@@ -404,6 +436,7 @@ export class RateLimits implements LimitsApi {
  		options?: RotateCredentialOptions,
  	): Promise<CredentialRotation> {
  		await this.#deps.pool.adoptExternalChanges();
@@ -1570,15 +1570,15 @@ index e901785..0039720 100644
  		const error = options?.error;
  		const status = AIError.status(error);
  		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-@@ -420,6 +453,7 @@ export class RateLimits implements LimitsApi {
+@@ -421,6 +454,7 @@ export class RateLimits implements LimitsApi {
  				apiKey: options?.apiKey,
  				credentialId: options?.credentialId,
  				signal: options?.signal,
 +				selection,
  			});
- 			return awaitSiblingUnblock(mark, options?.signal);
+ 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
  		}
-@@ -431,6 +465,7 @@ export class RateLimits implements LimitsApi {
+@@ -432,6 +466,7 @@ export class RateLimits implements LimitsApi {
  		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
  			credentialId: options?.credentialId,
  			apiKey: options?.apiKey,
@@ -1586,7 +1586,7 @@ index e901785..0039720 100644
  			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
  		});
  		if (!sessionCredential) return { switched: false };
-@@ -451,12 +486,12 @@ export class RateLimits implements LimitsApi {
+@@ -452,12 +487,12 @@ export class RateLimits implements LimitsApi {
  			);
  			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
  			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
@@ -1601,15 +1601,15 @@ index e901785..0039720 100644
  			}
  			const mark = this.#blockCredentialForRotation(
  				provider,
-@@ -466,6 +501,7 @@ export class RateLimits implements LimitsApi {
+@@ -467,6 +502,7 @@ export class RateLimits implements LimitsApi {
  				Date.now() + DEFAULT_BLOCK_MS,
  				routing,
  				false,
 +				selection,
  			);
- 			return awaitSiblingUnblock(mark, options?.signal);
+ 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
  		}
-@@ -474,21 +510,22 @@ export class RateLimits implements LimitsApi {
+@@ -475,21 +511,22 @@ export class RateLimits implements LimitsApi {
  		// Snapshot sibling availability before mutating so a soft-deleting
  		// suspect hook can't reindex the answer out from under us.
  		const hasSibling = this.#deps.pool
@@ -1639,7 +1639,7 @@ index e901785..0039720 100644
  		this.#deps.blocks.mark(
  			provider,
 diff --git a/packages/ai/src/auth/select.ts b/packages/ai/src/auth/select.ts
-index 4bab440..36668a5 100644
+index 5fd5710..6675e88 100644
 --- a/packages/ai/src/auth/select.ts
 +++ b/packages/ai/src/auth/select.ts
 @@ -6,8 +6,8 @@ import type { Provider } from "../types";
@@ -2260,24 +2260,28 @@ index 4bab440..36668a5 100644
  
  		// Plan-gated models rank on every resolve to re-verify account tiers,
  		// so the drain-urgency order can flip between two eligible accounts as their
-@@ -962,25 +1151,34 @@ export class CredentialSelector {
+@@ -962,22 +1151,37 @@ export class CredentialSelector {
  			}
  		}
  
+-		const passes = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+-		// Discovery may have observed only part of the pool. Try other unblocked
+-		// accounts before reusing a blocked discovery match, without relaxing plan gates.
+-		if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
+-		passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
 +		// With an explicit selection policy there is no fallback outside the
 +		// pool: a blocked eligible row stays blocked rather than admitting a
 +		// blocked pass (or a non-eligible row) the grant forbids.
- 		const passes: Array<{
- 			allowBlocked: boolean;
- 			enforcePlanRequirement: boolean;
- 			enforceAccounts: boolean;
--		}> = [
--			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
--			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
--		];
--		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
++		const passes: Array<{
++			allowBlocked: boolean;
++			enforcePlanRequirement: boolean;
++			enforceAccounts: boolean;
 +		}> = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
 +		if (selectionPolicy === undefined) {
++			// Discovery may have observed only part of the pool. Try other unblocked
++			// accounts before reusing a blocked discovery match, without relaxing plan gates.
++			if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
 +			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
 +			if (enforcePlanRequirement) {
 +				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
@@ -2304,7 +2308,7 @@ index 4bab440..36668a5 100644
  				if (preflightFailures.has(candidate)) continue;
  				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
  				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
-@@ -996,9 +1194,13 @@ export class CredentialSelector {
+@@ -993,9 +1197,13 @@ export class CredentialSelector {
  					rankingContext,
  					blockScope,
  					blockScopes,
@@ -2319,7 +2323,7 @@ index 4bab440..36668a5 100644
  			}
  		}
  
-@@ -1008,6 +1210,11 @@ export class CredentialSelector {
+@@ -1005,6 +1213,11 @@ export class CredentialSelector {
  		return undefined;
  	}
  
@@ -2331,7 +2335,7 @@ index 4bab440..36668a5 100644
  	#syncOAuthSelectionFromStore(
  		provider: string,
  		selection: { credential: OAuthCredential; index: number },
-@@ -1083,7 +1290,27 @@ export class CredentialSelector {
+@@ -1080,7 +1293,27 @@ export class CredentialSelector {
  			!allowBlocked &&
  			this.#deps.blocks.isBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
  		) {
@@ -2360,7 +2364,7 @@ index 4bab440..36668a5 100644
  		}
  
  		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
-@@ -1093,7 +1320,7 @@ export class CredentialSelector {
+@@ -1090,7 +1323,7 @@ export class CredentialSelector {
  		// resynced selection.index from the store. A concurrent disable during the
  		// usage/refresh awaits below can shift positional indices, so every later
  		// refresh / persist / CAS-disable addresses the row by this stable id.
@@ -2369,7 +2373,7 @@ index 4bab440..36668a5 100644
  
  		const planGate = providedPlanGate ?? this.#deps.strategies(provider)?.planGate?.({ modelId: options?.modelId });
  		const hasPlanRequirement = planGate !== undefined;
-@@ -1169,7 +1396,7 @@ export class CredentialSelector {
+@@ -1166,7 +1399,7 @@ export class CredentialSelector {
  				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
  				if (idx !== -1) selection.index = idx;
  			} else {
@@ -2378,7 +2382,7 @@ index 4bab440..36668a5 100644
  				if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
  			}
  			if ((checkUsage && !allowBlocked) || hasPlanRequirement) {
-@@ -1202,7 +1429,29 @@ export class CredentialSelector {
+@@ -1199,7 +1432,29 @@ export class CredentialSelector {
  			}
  			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
  			if (options?.recordAffinity !== false) {
@@ -2409,7 +2413,7 @@ index 4bab440..36668a5 100644
  			}
  			return { apiKey: result.apiKey, credential: updated, credentialId };
  		} catch (error) {
-@@ -1249,4 +1498,217 @@ export class CredentialSelector {
+@@ -1246,4 +1501,217 @@ export class CredentialSelector {
  
  		return undefined;
  	}
@@ -2711,7 +2715,7 @@ index 0000000..3d44a5c
 +	return selection.eligibleCredentialIds.filter(id => currentIds.has(id));
 +}
 diff --git a/packages/ai/src/auth/types.ts b/packages/ai/src/auth/types.ts
-index 8df625b..b82a148 100644
+index b937153..77bd3a6 100644
 --- a/packages/ai/src/auth/types.ts
 +++ b/packages/ai/src/auth/types.ts
 @@ -45,6 +45,96 @@ export type AuthCredentialEntry = AuthCredential | AuthCredential[];
@@ -2811,7 +2815,7 @@ index 8df625b..b82a148 100644
  /** Identity fields matched by an account routing policy. */
  export interface AuthAccountSelector {
  	readonly email?: string;
-@@ -339,6 +429,22 @@ export type AuthStorageOptions = {
+@@ -344,6 +434,22 @@ export type AuthStorageOptions = {
  	accountPolicies?: AuthAccountPolicies;
  	/** Global reserve fallback for accounts without a matching reservePct policy. */
  	defaultReservePct?: number;
@@ -2834,7 +2838,7 @@ index 8df625b..b82a148 100644
  	usageFetch?: typeof fetch;
  	usageRequestTimeoutMs?: number;
  	usageLogger?: UsageLogger;
-@@ -394,16 +500,13 @@ export type AuthStorageOptions = {
+@@ -399,16 +505,13 @@ export type AuthStorageOptions = {
  };
  
  /**
@@ -2858,7 +2862,7 @@ index 8df625b..b82a148 100644
   *
   * `blockedUntilMs` (epoch ms) is the just-blocked credential's own unblock
   * deadline — the later of the caller's retry-after and any exhausted window
-@@ -495,6 +598,8 @@ export type AuthApiKeyOptions = {
+@@ -503,6 +606,8 @@ export type AuthApiKeyOptions = {
  	 * that a peer/broker rotated out from under us is replaced before retrying.
  	 */
  	forceRefresh?: boolean;
@@ -2867,7 +2871,7 @@ index 8df625b..b82a148 100644
  	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
  	refreshReason?: OAuthRefreshReason;
  	/**
-@@ -619,10 +724,11 @@ export interface OAuthAccountSummary {
+@@ -627,10 +732,11 @@ export interface OAuthAccountSummary {
  	/** Last use recorded on the session sticky; set only on the `active` account. */
  	lastUsedAtMs?: number;
  }
@@ -2880,7 +2884,7 @@ index 8df625b..b82a148 100644
  }
  
  /** Options for refreshing one stored OAuth row through durable ownership. */
-@@ -769,6 +875,8 @@ export type MarkUsageLimitOptions = {
+@@ -777,6 +883,8 @@ export type MarkUsageLimitOptions = {
  	apiKey?: string;
  	credentialId?: number;
  	signal?: AbortSignal;
@@ -2889,16 +2893,16 @@ index 8df625b..b82a148 100644
  };
  
  /** Resolve a failed request to its credential and rotate if possible. */
-@@ -778,6 +886,8 @@ export type RotateCredentialOptions = {
+@@ -786,6 +894,8 @@ export type RotateCredentialOptions = {
  	apiKey?: string;
  	credentialId?: number;
  	signal?: AbortSignal;
 +	/** Restrict rotation to the caller's credential pool. */
 +	selection?: AuthCredentialSelectionPolicy;
+ 	/** Whether to wait for a briefly blocked sibling; defaults to true. The failed credential is blocked either way. */
+ 	waitForSibling?: boolean;
  };
- 
- /**
-@@ -955,6 +1065,17 @@ export interface KeysApi {
+@@ -965,6 +1075,17 @@ export interface KeysApi {
  	 * pinned sessions, and pools that do not rank usage do no work.
  	 */
  	prefetchUsage(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<void>;
@@ -2916,7 +2920,7 @@ index 8df625b..b82a148 100644
  	/**
  	 * Resolve a bearer together with its durable stored credential row id, when known.
  	 * Same precedence as {@link KeysApi.get}, but rejects with
-@@ -1050,7 +1171,10 @@ export interface KeysApi {
+@@ -1060,7 +1181,10 @@ export interface KeysApi {
  	 * Used by web-search providers and other consumers that hold an AuthStorage
  	 * directly (no ModelRegistry in scope).
  	 */
@@ -2929,10 +2933,10 @@ index 8df625b..b82a148 100644
  
  /** Controls whether a row-id refresh may reuse a recently minted token. */
 diff --git a/packages/ai/src/providers/openai-codex-responses.ts b/packages/ai/src/providers/openai-codex-responses.ts
-index e6c0545..21c8776 100644
+index 0331b4c..59988d8 100644
 --- a/packages/ai/src/providers/openai-codex-responses.ts
 +++ b/packages/ai/src/providers/openai-codex-responses.ts
-@@ -175,6 +175,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
+@@ -182,6 +182,8 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
  	codexMode?: boolean;
  	toolChoice?: ToolChoice;
  	preferWebsockets?: boolean;
@@ -2941,23 +2945,23 @@ index e6c0545..21c8776 100644
  	serviceTier?: ServiceTier;
  	/**
  	 * Responses Lite transport opt-in. Normal inference defaults to full
-@@ -1826,6 +1828,7 @@ async function openCodexWebSocketTransport(
+@@ -1710,6 +1712,7 @@ async function openCodexWebSocketTransport(
  		websocketHeaders,
  		model.provider,
  		requestSetup.requestSignal,
 +		options?.webSocketProxy,
  	);
- 	const timeouts: CodexWebSocketRequestTimeouts = {
- 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
-@@ -1871,6 +1874,7 @@ async function openCodexWebSocketTransport(
- 				websocketHeaders,
- 				model.provider,
- 				requestSetup.requestSignal,
-+				options?.webSocketProxy,
- 			);
- 		}
- 	}
-@@ -3386,6 +3390,7 @@ export async function prewarmOpenAICodexResponses(
+ 	let releaseReservation = websocketConnection.reserveForRequest();
+ 	try {
+@@ -1775,6 +1778,7 @@ async function openCodexWebSocketTransport(
+ 					websocketHeaders,
+ 					model.provider,
+ 					requestSetup.requestSignal,
++					options?.webSocketProxy,
+ 				);
+ 				releaseReservation = websocketConnection.reserveForRequest();
+ 			}
+@@ -3290,6 +3294,7 @@ export async function prewarmOpenAICodexResponses(
  		| "providerSessionState"
  		| "responsesLite"
  		| "serviceTier"
@@ -2965,15 +2969,15 @@ index e6c0545..21c8776 100644
  	>,
  ): Promise<void> {
  	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-@@ -3439,6 +3444,7 @@ export async function prewarmOpenAICodexResponses(
- 		headers,
- 		model.provider,
- 		options?.signal,
-+		options?.webSocketProxy,
- 	);
- 	state.prewarmed = true;
- }
-@@ -4556,8 +4562,9 @@ async function getOrCreateCodexWebSocketConnection(
+@@ -3362,6 +3367,7 @@ export async function prewarmOpenAICodexResponses(
+ 			headers,
+ 			model.provider,
+ 			options?.signal,
++			options?.webSocketProxy,
+ 		);
+ 	} catch (error) {
+ 		if (error instanceof CodexWebSocketBusyError) return;
+@@ -3986,8 +3992,9 @@ async function getOrCreateCodexWebSocketConnection(
  	headers: Headers,
  	provider: string,
  	signal?: AbortSignal,
@@ -3205,24 +3209,24 @@ index 260ec3b..d30c36a 100644
  	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
  	readonly storeCredentialsAs?: string;
 diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
-index d19e4f7..6a6e834 100644
+index 788e191..d492f34 100644
 --- a/packages/ai/src/stream.ts
 +++ b/packages/ai/src/stream.ts
-@@ -2087,6 +2087,7 @@ function mapOptionsForApi<TApi extends Api>(
+@@ -2084,6 +2084,7 @@ function mapOptionsForApi<TApi extends Api>(
  				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
  				serviceTier: options?.serviceTier,
  				preferWebsockets: options?.preferWebsockets,
 +				webSocketProxy: options?.webSocketProxy,
  				codexCompaction: options?.codexCompaction,
+ 				codexAccessPrograms: options?.codexAccessPrograms,
  				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
- 				textVerbosity: options?.textVerbosity,
 diff --git a/packages/ai/src/types.ts b/packages/ai/src/types.ts
-index b318ba4..4a0ad54 100644
+index 5b88775..b3dc16b 100644
 --- a/packages/ai/src/types.ts
 +++ b/packages/ai/src/types.ts
-@@ -838,6 +838,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
+@@ -861,6 +861,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
  	syntheticApiFormat?: "openai" | "anthropic";
- 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+ 	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
  	preferWebsockets?: boolean;
 +	/**
 +	 * Proxy URL for the Codex WebSocket handshake of this request (`http(s)://[user:pass@]host:port`).
@@ -3279,19 +3283,19 @@ index e5bad75..86f7649 100644
  		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
  		// cannot round-trip encrypted reasoning: the upstream binds
 diff --git a/packages/coding-agent/src/cli/worktree-cli.ts b/packages/coding-agent/src/cli/worktree-cli.ts
-index f9f8253..8f25469 100644
+index eb04e50..8602e9b 100644
 --- a/packages/coding-agent/src/cli/worktree-cli.ts
 +++ b/packages/coding-agent/src/cli/worktree-cli.ts
-@@ -24,7 +24,7 @@ import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
- import chalk from "@oh-my-pi/pi-utils/chalk";
+@@ -27,7 +27,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
  import { Settings } from "../config/settings";
  import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
+ import { releaseOvnfsCheckout } from "../task/ovnfs";
 -import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 +import { canCloneCheckoutInto, formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
  
  import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
  
-@@ -149,7 +149,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
+@@ -152,7 +152,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
  	}
  	const result = await repository.worktreeAdd(worktreePath, ref, {
  		detach,
@@ -3301,10 +3305,10 @@ index f9f8253..8f25469 100644
  	});
  	if (!options.quiet) {
 diff --git a/packages/coding-agent/src/task/settings.ts b/packages/coding-agent/src/task/settings.ts
-index 3f9ea81..7801e62 100644
+index 75438b3..fac400e 100644
 --- a/packages/coding-agent/src/task/settings.ts
 +++ b/packages/coding-agent/src/task/settings.ts
-@@ -83,7 +83,7 @@ export const cfgWorktreeClone = register({
+@@ -89,7 +89,7 @@ export const cfgWorktreeClone = register({
  		group: "Isolation",
  		label: "Clone Checkout into Worktrees",
  		description:
@@ -3314,7 +3318,7 @@ index 3f9ea81..7801e62 100644
  });
  
 diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
-index 0bb8353..6b9dd86 100644
+index bf1f39b..86b37f7 100644
 --- a/packages/coding-agent/src/task/worktree.ts
 +++ b/packages/coding-agent/src/task/worktree.ts
 @@ -6,7 +6,15 @@ import * as path from "node:path";
@@ -3373,6 +3377,185 @@ index 0bb8353..6b9dd86 100644
  export interface IsolationHandle {
  	/** Merged view materialised by the backend; pass this to the task. */
  	mergedDir: string;
+diff --git a/packages/coding-agent/src/thread/services/auth-protocol.ts b/packages/coding-agent/src/thread/services/auth-protocol.ts
+index 0daca99..d7d0f1e 100644
+--- a/packages/coding-agent/src/thread/services/auth-protocol.ts
++++ b/packages/coding-agent/src/thread/services/auth-protocol.ts
+@@ -12,6 +12,7 @@
+  * numeric ids held in a main-side table.
+  */
+ import type {
++	AccountSelectionEvent,
+ 	AnthropicSlowModeFailure,
+ 	AnthropicSlowModeRetry,
+ 	AnthropicSlowModeSignal,
+@@ -22,6 +23,7 @@ import type {
+ 	AuthAccountPolicy,
+ 	AuthAccountPolicyConfig,
+ 	AuthApiKeyOptions,
++	AuthApiKeySelectionResult,
+ 	AuthCredential,
+ 	AuthCredentialEntry,
+ 	AuthCredentialSnapshot,
+@@ -38,6 +40,7 @@ import type {
+ 	CredentialDisabledEvent,
+ 	CredentialHealthResult,
+ 	CredentialRotation,
++	DefaultAccountFallover,
+ 	DisabledCredentialSummary,
+ 	InvalidateCredentialMatchingOptions,
+ 	ListResetCreditsOptions,
+@@ -171,6 +174,10 @@ export type AuthStorageProtocol = {
+ 		[provider: string, sessionId?: string, options?: AuthApiKeyOptions],
+ 		ResolvedApiKey | undefined
+ 	>;
++	"keys.resolveApiKeySelection": RpcMethod<
++		[provider: string, sessionId?: string, options?: AuthApiKeyOptions],
++		AuthApiKeySelectionResult
++	>;
+ 	"keys.peek": RpcMethod<[provider: string, options?: AuthPeekOptions], string | undefined>;
+ 	/** `keys.source` with another than the default `env` mode (the availability table holds the default). */
+ 	"keys.source": RpcMethod<[provider: string, options?: AuthSourceOptions], AuthSource | undefined>;
+@@ -273,6 +280,21 @@ export type AuthStorageProtocol = {
+ 	"blocks.deleteAll": RpcMethod<[credentialId: number], void>;
+ 
+ 	setAccountPolicies: RpcMethod<[config: AuthAccountPolicyConfig], void>;
++
++	/** Fork: per-provider default-account/priority pins (flat `AuthStorage` methods). */
++	getDefaultAccountSelector: RpcMethod<[provider: string], string | undefined>;
++	getDefaultAccountCredentialId: RpcMethod<[provider: string], number | undefined>;
++	getDefaultAccountIdentity: RpcMethod<[provider: string], OAuthAccountIdentity | undefined>;
++	setDefaultAccountSelector: RpcMethod<[provider: string, selector: string | undefined], void>;
++	getAccountPrioritySelectors: RpcMethod<[provider: string], readonly string[]>;
++	getAccountPriorityCredentialIds: RpcMethod<[provider: string], readonly number[]>;
++	describeAccountSelector: RpcMethod<[provider: string, credentialId: number], string | undefined>;
++	setAccountPrioritySelectors: RpcMethod<[provider: string, selectors: readonly string[] | undefined], void>;
++	consumeDefaultAccountFallover: RpcMethod<[provider: string, sessionId: string], DefaultAccountFallover | undefined>;
++	listAccountSelectionEvents: RpcMethod<
++		[options?: { provider?: string; sessionId?: string; limit?: number }],
++		readonly AccountSelectionEvent[]
++	>;
+ };
+ 
+ /**
+diff --git a/packages/coding-agent/src/thread/services/auth-remote.ts b/packages/coding-agent/src/thread/services/auth-remote.ts
+index 5ab973a..d752f5f 100644
+--- a/packages/coding-agent/src/thread/services/auth-remote.ts
++++ b/packages/coding-agent/src/thread/services/auth-remote.ts
+@@ -9,6 +9,7 @@
+  * evaluated here first and sent as data (see `./auth-protocol`).
+  */
+ import type {
++	AccountSelectionEvent,
+ 	AnthropicSlowModeFailure,
+ 	AnthropicSlowModeRetry,
+ 	AnthropicSlowModeSignal,
+@@ -16,6 +17,7 @@ import type {
+ 	AuthAccountPolicy,
+ 	AuthAccountPolicyConfig,
+ 	AuthApiKeyOptions,
++	AuthApiKeySelectionResult,
+ 	AuthCredential,
+ 	AuthCredentialEntry,
+ 	AuthCredentialSnapshot,
+@@ -35,6 +37,7 @@ import type {
+ 	CredentialHealthResult,
+ 	CredentialRotation,
+ 	CredentialsApi,
++	DefaultAccountFallover,
+ 	DisabledCredentialSummary,
+ 	HealthApi,
+ 	InvalidateCredentialMatchingOptions,
+@@ -309,6 +312,13 @@ class RemoteKeys implements KeysApi {
+ 	): Promise<ResolvedApiKey | undefined> {
+ 		return this.#remote.call("keys.getWithCredential", provider, sessionId, options);
+ 	}
++	resolveApiKeySelection(
++		provider: string,
++		sessionId?: string,
++		options?: AuthApiKeyOptions,
++	): Promise<AuthApiKeySelectionResult> {
++		return this.#remote.call("keys.resolveApiKeySelection", provider, sessionId, options);
++	}
+ 	peek(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
+ 		return this.#remote.call("keys.peek", provider, options);
+ 	}
+@@ -660,6 +670,41 @@ export class RemoteAuthStorageBackend implements AuthStorageBackend {
+ 		this.#remote.callSync("setAccountPolicies", config);
+ 	}
+ 
++	getDefaultAccountSelector(provider: string): string | undefined {
++		return this.#remote.callSync("getDefaultAccountSelector", provider);
++	}
++	getDefaultAccountCredentialId(provider: string): number | undefined {
++		return this.#remote.callSync("getDefaultAccountCredentialId", provider);
++	}
++	getDefaultAccountIdentity(provider: string): OAuthAccountIdentity | undefined {
++		return this.#remote.callSync("getDefaultAccountIdentity", provider);
++	}
++	setDefaultAccountSelector(provider: string, selector: string | undefined): void {
++		this.#remote.notify("setDefaultAccountSelector", provider, selector);
++	}
++	getAccountPrioritySelectors(provider: string): readonly string[] {
++		return this.#remote.callSync("getAccountPrioritySelectors", provider);
++	}
++	getAccountPriorityCredentialIds(provider: string): readonly number[] {
++		return this.#remote.callSync("getAccountPriorityCredentialIds", provider);
++	}
++	describeAccountSelector(provider: string, credentialId: number): string | undefined {
++		return this.#remote.callSync("describeAccountSelector", provider, credentialId);
++	}
++	setAccountPrioritySelectors(provider: string, selectors: readonly string[] | undefined): void {
++		this.#remote.notify("setAccountPrioritySelectors", provider, selectors);
++	}
++	consumeDefaultAccountFallover(provider: string, sessionId: string): DefaultAccountFallover | undefined {
++		return this.#remote.callSync("consumeDefaultAccountFallover", provider, sessionId);
++	}
++	listAccountSelectionEvents(options?: {
++		provider?: string;
++		sessionId?: string;
++		limit?: number;
++	}): readonly AccountSelectionEvent[] {
++		return this.#remote.callSync("listAccountSelectionEvents", options);
++	}
++
+ 	async replaceStore(store: AuthCredentialStore): Promise<void> {
+ 		// Contract on failure: the offered store is closed, the current one stays active.
+ 		store.close();
+diff --git a/packages/coding-agent/src/thread/services/auth.ts b/packages/coding-agent/src/thread/services/auth.ts
+index 60ce225..8f7fc5b 100644
+--- a/packages/coding-agent/src/thread/services/auth.ts
++++ b/packages/coding-agent/src/thread/services/auth.ts
+@@ -219,6 +219,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
+ 			storage.keys.prefetchUsage(provider, sessionId, options),
+ 		"keys.getWithCredential": (storage, provider, sessionId, options) =>
+ 			storage.keys.getWithCredential(provider, sessionId, options),
++		"keys.resolveApiKeySelection": (storage, provider, sessionId, options) =>
++			storage.keys.resolveApiKeySelection(provider, sessionId, options),
+ 		"keys.peek": (storage, provider, options) => storage.keys.peek(provider, options),
+ 		"keys.source": (storage, provider, options) => storage.keys.source(provider, options),
+ 		"keys.availability": (storage, providers) => authAvailability(storage, providers),
+@@ -320,6 +322,20 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
+ 		"blocks.deleteAll": (storage, credentialId) => storage.blocks.deleteAll(credentialId),
+ 
+ 		setAccountPolicies: (storage, config) => storage.setAccountPolicies(config),
++
++		getDefaultAccountSelector: (storage, provider) => storage.getDefaultAccountSelector(provider),
++		getDefaultAccountCredentialId: (storage, provider) => storage.getDefaultAccountCredentialId(provider),
++		getDefaultAccountIdentity: (storage, provider) => storage.getDefaultAccountIdentity(provider),
++		setDefaultAccountSelector: (storage, provider, selector) => storage.setDefaultAccountSelector(provider, selector),
++		getAccountPrioritySelectors: (storage, provider) => storage.getAccountPrioritySelectors(provider),
++		getAccountPriorityCredentialIds: (storage, provider) => storage.getAccountPriorityCredentialIds(provider),
++		describeAccountSelector: (storage, provider, credentialId) =>
++			storage.describeAccountSelector(provider, credentialId),
++		setAccountPrioritySelectors: (storage, provider, selectors) =>
++			storage.setAccountPrioritySelectors(provider, selectors),
++		consumeDefaultAccountFallover: (storage, provider, sessionId) =>
++			storage.consumeDefaultAccountFallover(provider, sessionId),
++		listAccountSelectionEvents: (storage, options) => storage.listAccountSelectionEvents(options),
+ 	};
+ }
+ 
 diff --git a/packages/coding-agent/src/tools/gh-pr-checkout.ts b/packages/coding-agent/src/tools/gh-pr-checkout.ts
 index 1582599..a7595cf 100644
 --- a/packages/coding-agent/src/tools/gh-pr-checkout.ts

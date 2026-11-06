@@ -1,9 +1,9 @@
 {
-	"base": "v18.14.0",
-	"baseCommit": "31147f9d1a76608549821c3759f8487b4d66c72d",
+	"base": "v18.17.0",
+	"baseCommit": "75e7801e247d4e3263439d4cc08ccad60dc64bdd",
 	"head": "HEAD",
-	"headCommit": "28803f685544bb9e80205be7d0bfbf0937929d7b",
-	"generated": "2026-10-30T12:46:14.775Z",
+	"headCommit": "afab132b0e3c13bb89100e9ad4a2ba4ba84a5c6f",
+	"generated": "2026-11-06T12:44:52.728Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -181,6 +181,9 @@
 				"packages/coding-agent/src/cli/worktree-cli.ts",
 				"packages/coding-agent/src/task/settings.ts",
 				"packages/coding-agent/src/task/worktree.ts",
+				"packages/coding-agent/src/thread/services/auth-protocol.ts",
+				"packages/coding-agent/src/thread/services/auth-remote.ts",
+				"packages/coding-agent/src/thread/services/auth.ts",
 				"packages/coding-agent/src/tools/gh-pr-checkout.ts"
 			]
 		}

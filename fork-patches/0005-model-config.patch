@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index 84d84da..0755f41 100644
+index a0ab336..6acd5f4 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -601,6 +601,10 @@ A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or
+@@ -613,6 +613,10 @@ A prompt whose active model has no usable credential walks the same chain before
  
  Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
  
@@ -13,16 +13,15 @@ index 84d84da..0755f41 100644
  ### Tools and approvals
  
  ```yaml
-@@ -904,6 +908,8 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
+@@ -921,6 +925,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
  
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
 +`statusLine.segmentOptions.model.showAccount: true` (custom preset only) adds an account chip to the `model` segment: the OAuth account actually serving this session, plus one chip per advisor whose provider session resolved an account. A chip switches to the fallover glyph and warning color when that account is not the provider's pinned default (`providers.accountPriority` head or `providers.defaultAccount`). Chips only appear once a request has resolved a credential, and advisor chips are capped at two with a `+N` counter.
-+
- ### Interaction
+ The `cache` segment (in the `full` and `nerd` presets) shows before you send whether the next message reads the prompt cache: a dim database glyph while it does, struck through in the warning colour once the entry expired, omp's warm refresh missed it, the context was compacted, or the model, thinking level, tools, system prompt or cache retention changed. The Unicode symbol preset draws `●`/`⊘`, ASCII `cache`/`!cache`. It is hidden when nothing has used the cache yet, the model declares no cache lifetime, or the session is a subagent's; entries a provider keeps indefinitely (logged-in Codex) never expire. A reopened session is read off its newest cached reply and shown as likely cached. In Tern, hovering the marker says until when the entry holds (or why not) and how much the next message sends; clicking it opens `/session`, whose Prompt Cache section adds the tier and the warming schedule.
  
- | Key                            | Type    | Default         | Values                                                                                                                                                                                                                                                      |
-@@ -975,6 +981,8 @@ searxng:
+ ### Interaction
+@@ -1003,6 +1008,8 @@ capability gating, model/request vetoes, hooks, chaining and recovery tradeoffs.
  | `providers.fetch`                          | enum    | `auto`     | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
  | `providers.tinyModelDevice`                | enum    | `default`  | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
  | `providers.maxInFlightRequests`            | record  | `{}`       | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -90,18 +89,18 @@ index 5b507e0..01da086 100644
  		resolveHeaders: resolvedModel.resolveHeaders,
  		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 diff --git a/packages/coding-agent/src/config/model-discovery.ts b/packages/coding-agent/src/config/model-discovery.ts
-index dac2458..21dd2b3 100644
+index 0e9c166..80c5ad7 100644
 --- a/packages/coding-agent/src/config/model-discovery.ts
 +++ b/packages/coding-agent/src/config/model-discovery.ts
-@@ -33,6 +33,7 @@ import {
- } from "@oh-my-pi/pi-catalog/types";
- import { Effort } from "@oh-my-pi/pi-catalog/effort";
+@@ -35,6 +35,7 @@ import {
+ import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+ import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
  import { isRecord } from "@oh-my-pi/pi-utils";
 +import { OPENAI_RUNNER_APIS } from "./model-patch";
  import type { ProviderDiscovery } from "./models-config-schema";
  
  // Default cap on `max_tokens` for auto-discovered models that do not advertise
-@@ -853,9 +854,10 @@ function collectModalities(values: readonly unknown[]): Set<string> {
+@@ -855,9 +856,10 @@ function collectModalities(values: readonly unknown[]): Set<string> {
  
  /**
   * Read image-input support from an OpenAI-compatible `/v1/models` row. Handles
@@ -115,7 +114,7 @@ index dac2458..21dd2b3 100644
   */
  function extractOpenAIModelsListInputCapabilities(item: {
  	input?: unknown;
-@@ -882,29 +884,51 @@ function extractOpenAIModelsListInputCapabilities(item: {
+@@ -884,29 +886,51 @@ function extractOpenAIModelsListInputCapabilities(item: {
   * `/images/generations` surfaces of the same OpenAI-compatible root the
   * provider already serves its model list from.
   *
@@ -173,36 +172,26 @@ index dac2458..21dd2b3 100644
 +	if (endpoints.some(endpoint => endpoint.endsWith("/chat/completions"))) return undefined;
 +	if (endpoints.some(endpoint => endpoint.endsWith("/audio/speech"))) {
 +		return { kind: "tts", api: "openai-speech" };
-+	}
+ 	}
 +	if (endpoints.some(endpoint => endpoint.endsWith("/audio/transcriptions"))) {
 +		return { kind: "stt", api: "openai-transcriptions" };
- 	}
++	}
 +	return undefined;
  }
  /**
   * Reasoning tiers omp can send as `reasoning_effort` on OpenAI-compatible
-@@ -957,14 +981,17 @@ type AdvertisedReasoning =
- 	/** The row states it does not reason. */
- 	| { kind: "none" }
- 	/** The row advertises an effort ladder, and whether it also accepts `none`. */
--	| { kind: "ladder"; efforts: Effort[]; acceptsNone: boolean; defaultLevel?: Effort };
-+	| { kind: "ladder"; efforts: Effort[]; acceptsNone: boolean; defaultLevel?: Effort; requiresEffort?: boolean };
- 
- /**
-  * Read server-advertised reasoning support from an OpenAI-compatible
-  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
-  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
-- * other gateways may advertise the same fields top-level. Returns undefined
-- * when the row says nothing usable about reasoning.
-+ * other gateways may advertise the same fields top-level. OpenRouter-shaped
-+ * catalogs (aigw2 among them) state the ladder as
+@@ -975,7 +999,9 @@ type AdvertisedReasoning =
+  * other gateways may advertise the same fields top-level, along with
+  * `reasoning_effort_map` (where an unserved request lands) and
+  * `reasoning_required`. Returns undefined when the row says nothing usable
+- * about reasoning.
++ * about reasoning. OpenRouter-shaped catalogs (aigw2 among them) state the ladder as
 + * `reasoning: { supported_efforts, default_effort, mandatory }`, read when the
-+ * Codex-shaped fields are absent. Returns undefined when the row says nothing
-+ * usable about reasoning.
++ * Codex-shaped fields are absent.
   *
   * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
   * rather than `undefined`: the caller must be able to tell "this endpoint says
-@@ -982,11 +1009,13 @@ function extractAdvertisedReasoning(item: {
+@@ -995,14 +1021,17 @@ function extractAdvertisedReasoning(item: {
  	// codex-lb nests every reasoning field under `metadata`; read the denial from
  	// the same place the ladder below comes from, or a nested `reasoning: false`
  	// would keep the reference dial alive.
@@ -217,32 +206,14 @@ index dac2458..21dd2b3 100644
 -	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 +	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level ?? controls?.default_effort;
  	const defaultLevel = advertisedReasoningEffort(rawDefault);
+ 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
+-	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;
++	// OpenRouter's `mandatory`: the route rejects a request without an effort.
++	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required ?? controls?.mandatory;
  	return {
  		kind: "ladder",
-@@ -997,6 +1026,8 @@ function extractAdvertisedReasoning(item: {
- 		// clamped to the lowest tier.
- 		acceptsNone: advisoryEffortEntries(raw).includes("none"),
- 		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
-+		// OpenRouter's `mandatory`: the route rejects a request without an effort.
-+		...(controls?.mandatory === true ? { requiresEffort: true } : {}),
- 	};
- }
- 
-@@ -1048,7 +1079,12 @@ function withAdvertisedEfforts(
- 		preferredDefault !== undefined && advertised.efforts.includes(preferredDefault)
- 			? preferredDefault
- 			: advertised.efforts[0];
--	const thinking = { mode: "effort" as const, efforts: advertised.efforts, defaultLevel };
-+	const thinking = {
-+		mode: "effort" as const,
-+		efforts: advertised.efforts,
-+		defaultLevel,
-+		...(advertised.requiresEffort ? { requiresEffort: true } : {}),
-+	};
- 	if (isAnthropic) {
- 		const mode = resolveModelPolicy({ ...spec, reasoning: true }).thinking?.mode ?? "budget";
- 		return { ...spec, reasoning: true, thinking: { ...thinking, mode } };
-@@ -1152,8 +1188,8 @@ export async function discoverOpenAIModelsList(
+ 		efforts,
+@@ -1192,8 +1221,8 @@ export async function discoverOpenAIModelsList(
  						output?: unknown;
  						output_modalities?: unknown;
  						architecture?: unknown;
@@ -252,7 +223,7 @@ index dac2458..21dd2b3 100644
  						supported_reasoning_levels?: unknown;
  						default_reasoning_level?: unknown;
  						reasoning?: unknown;
-@@ -1222,6 +1258,7 @@ export async function discoverOpenAIModelsList(
+@@ -1265,6 +1294,7 @@ export async function discoverOpenAIModelsList(
  			toPositiveNumberOrUndefined(item.max_model_len) ??
  			toPositiveNumberOrUndefined(item.context_length) ??
  			toPositiveNumberOrUndefined(metadata?.context_window) ??
@@ -260,17 +231,17 @@ index dac2458..21dd2b3 100644
  			reportedLimitsContextWindow ??
  			nativeMetadataForModel?.contextWindow ??
  			reference?.contextWindow ??
-@@ -1407,6 +1444,9 @@ export async function discoverProxyModels(
+@@ -1455,6 +1485,9 @@ export async function discoverProxyModels(
  					supported_reasoning_levels?: unknown;
  					default_reasoning_level?: unknown;
  					reasoning?: unknown;
 +					kind?: unknown;
 +					display_name?: unknown;
 +					input_modalities?: unknown;
+ 					reasoning_effort_map?: unknown;
+ 					reasoning_required?: unknown;
  				}>;
- 			};
- 		});
-@@ -1419,6 +1459,33 @@ export async function discoverProxyModels(
+@@ -1469,6 +1502,33 @@ export async function discoverProxyModels(
  	for (const item of items) {
  		const id = item.id;
  		if (!id) continue;
@@ -305,7 +276,7 @@ index dac2458..21dd2b3 100644
  		const api: Api | undefined = endpoints.includes("anthropic")
  			? "anthropic-messages"
 diff --git a/packages/coding-agent/src/config/model-patch.ts b/packages/coding-agent/src/config/model-patch.ts
-index 33bc22e..696e562 100644
+index 28e44ea..379daf9 100644
 --- a/packages/coding-agent/src/config/model-patch.ts
 +++ b/packages/coding-agent/src/config/model-patch.ts
 @@ -5,7 +5,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -390,10 +361,10 @@ index 33bc22e..696e562 100644
  	if (patch.api !== undefined) result.api = patch.api;
  	if (patch.kind !== undefined) {
 diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
-index e096d6a..a78fb5d 100644
+index c03e422..3867f49 100644
 --- a/packages/coding-agent/src/config/model-registry.ts
 +++ b/packages/coding-agent/src/config/model-registry.ts
-@@ -1535,9 +1535,22 @@ export class ModelRegistry {
+@@ -1826,9 +1826,22 @@ export class ModelRegistry {
  		return models;
  	}
  
@@ -417,7 +388,7 @@ index e096d6a..a78fb5d 100644
  	}
  
  	#loadCachedDiscoverableModels(): Model<Api>[] {
-@@ -2682,6 +2695,7 @@ export class ModelRegistry {
+@@ -2992,6 +3005,7 @@ export class ModelRegistry {
  			headers?: Record<string, string>;
  			resolveHeaders?: Model<Api>["resolveHeaders"];
  			remoteCompaction?: RemoteCompactionConfig<Api>;
@@ -425,7 +396,7 @@ index e096d6a..a78fb5d 100644
  		},
  	>(
  		entry: T,
-@@ -2690,15 +2704,28 @@ export class ModelRegistry {
+@@ -3000,15 +3014,28 @@ export class ModelRegistry {
  			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
  		>,
  	): T {
@@ -458,7 +429,7 @@ index e096d6a..a78fb5d 100644
  			: entry.resolveHeaders;
  		return {
 diff --git a/packages/coding-agent/src/config/models-config-schema-bundle.ts b/packages/coding-agent/src/config/models-config-schema-bundle.ts
-index fada9dc..6aa33d9 100644
+index 18699bd..b2263c0 100644
 --- a/packages/coding-agent/src/config/models-config-schema-bundle.ts
 +++ b/packages/coding-agent/src/config/models-config-schema-bundle.ts
 @@ -118,7 +118,7 @@ export const getModelsConfigSchemaBundle = once(() => {
@@ -493,7 +464,7 @@ index fada9dc..6aa33d9 100644
  			return ctx.mustBe("baseUrl a non-empty string");
  		}
 diff --git a/packages/coding-agent/src/config/resolve-config-value.ts b/packages/coding-agent/src/config/resolve-config-value.ts
-index c066153..362abb7 100644
+index e6679cc..820a594 100644
 --- a/packages/coding-agent/src/config/resolve-config-value.ts
 +++ b/packages/coding-agent/src/config/resolve-config-value.ts
 @@ -2,7 +2,11 @@ import { executeShell } from "@oh-my-pi/pi-natives";
@@ -570,7 +541,7 @@ index c066153..362abb7 100644
  				hasResolved = true;
  			}
 diff --git a/packages/coding-agent/test/model-registry-command-values.test.ts b/packages/coding-agent/test/model-registry-command-values.test.ts
-index 722d362..4908fc1 100644
+index 722d362..4889ebc 100644
 --- a/packages/coding-agent/test/model-registry-command-values.test.ts
 +++ b/packages/coding-agent/test/model-registry-command-values.test.ts
 @@ -6,6 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
@@ -724,7 +695,7 @@ index 722d362..4908fc1 100644
 +		);
 +		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
 +		writeModelCache(
-+			"gateway-proxy:proxy-v2-context-v5",
++			"gateway-proxy:proxy-v2-context-v6",
 +			cacheUpdatedAt,
 +			[
 +				buildModel({
@@ -782,7 +753,7 @@ index 722d362..4908fc1 100644
 +		);
 +		const cacheUpdatedAt = Math.floor(fs.statSync(modelsPath).mtimeMs) + 1_000;
 +		writeModelCache(
-+			"gateway-proxy:proxy-v2-context-v5",
++			"gateway-proxy:proxy-v2-context-v6",
 +			cacheUpdatedAt,
 +			[
 +				buildModel({
@@ -838,7 +809,7 @@ index 722d362..4908fc1 100644
  		const tokenFile = path.join(tempDir, "token.txt");
  		const counterFile = path.join(tempDir, "counter.txt");
 diff --git a/packages/coding-agent/test/model-registry.test.ts b/packages/coding-agent/test/model-registry.test.ts
-index 5490dc0..c32102c 100644
+index 14bb2eb..20a8c11 100644
 --- a/packages/coding-agent/test/model-registry.test.ts
 +++ b/packages/coding-agent/test/model-registry.test.ts
 @@ -686,6 +686,46 @@ describe("ModelRegistry", () => {
@@ -856,7 +827,7 @@ index 5490dc0..c32102c 100644
 +				},
 +			});
 +			writeModelCache(
-+				"xllm-gateway:proxy-v2-context-v5",
++				"xllm-gateway:proxy-v2-context-v6",
 +				Date.now(),
 +				[
 +					buildModel({

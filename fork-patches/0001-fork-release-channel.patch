@@ -160,28 +160,28 @@ index 0000000..18cfbed
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, and credentials. Delete it
 +separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index 9b44a82..e38cf45 100644
+index b4d6ee4..b318e88 100644
 --- a/package.json
 +++ b/package.json
-@@ -21,11 +21,11 @@
- 			"@oh-my-pi/pi-agent-core": "18.14.0",
- 			"@oh-my-pi/pi-ai": "18.14.0",
- 			"@oh-my-pi/pi-catalog": "18.14.0",
--			"@oh-my-pi/pi-coding-agent": "18.14.0",
-+			"@oh-my-pi/pi-coding-agent": "18.14.0-fork.1",
- 			"@oh-my-pi/pi-mnemopi": "18.14.0",
- 			"@oh-my-pi/pi-natives": "18.14.0",
- 			"@oh-my-pi/pi-tui": "18.14.0",
--			"@oh-my-pi/pi-utils": "18.14.0",
-+			"@oh-my-pi/pi-utils": "18.14.0-fork.1",
- 			"@oh-my-pi/pi-wire": "18.14.0",
- 			"@oh-my-pi/snapcompact": "18.14.0",
+@@ -20,11 +20,11 @@
+ 			"@oh-my-pi/pi-agent-core": "18.17.0",
+ 			"@oh-my-pi/pi-ai": "18.17.0",
+ 			"@oh-my-pi/pi-catalog": "18.17.0",
+-			"@oh-my-pi/pi-coding-agent": "18.17.0",
++			"@oh-my-pi/pi-coding-agent": "18.17.0-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.17.0",
+ 			"@oh-my-pi/pi-natives": "18.17.0",
+ 			"@oh-my-pi/pi-tui": "18.17.0",
+-			"@oh-my-pi/pi-utils": "18.17.0",
++			"@oh-my-pi/pi-utils": "18.17.0-fork.1",
+ 			"@oh-my-pi/pi-wire": "18.17.0",
+ 			"@oh-my-pi/snapcompact": "18.17.0",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
-index 0ec8388..5669d92 100644
+index 670e787..35ce2f8 100644
 --- a/packages/ai/test/openai-compat-user-agent.test.ts
 +++ b/packages/ai/test/openai-compat-user-agent.test.ts
-@@ -132,7 +132,7 @@ describe("xAI stream User-Agent", () => {
+@@ -147,7 +147,7 @@ describe("xAI stream User-Agent", () => {
  		);
  		expect(captured.url).toBe("https://api.x.ai/v1/responses");
  		expect(captured.userAgent).toBe(USER_AGENT);
@@ -191,14 +191,14 @@ index 0ec8388..5669d92 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index 8251aaa..746abf0 100644
+index df92bc0..31cc69c 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.14.0",
-+	"version": "18.14.0-fork.1",
+-	"version": "18.17.0",
++	"version": "18.17.0-fork.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -343,7 +343,7 @@ index 0000000..b935289
 +	return release;
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 8fbee0c..3b0d8b3 100644
+index 49d3988..b7b1385 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -11,6 +11,7 @@ import { Transform } from "node:stream";
@@ -354,15 +354,7 @@ index 8fbee0c..3b0d8b3 100644
  	$which,
  	APP_NAME,
  	compareVersions,
-@@ -19,6 +20,7 @@ import {
- 	isCompiledBinary,
- 	isEnoent,
- 	VERSION,
-+	WhichCachePolicy,
- } from "@oh-my-pi/pi-utils";
- import chalk from "@oh-my-pi/pi-utils/chalk";
- import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-@@ -31,7 +33,14 @@ import {
+@@ -33,7 +34,14 @@ import {
  	unsupportedProxyMessage,
  	withTimeoutSignal,
  } from "../utils/fetch-timeout";
@@ -378,7 +370,7 @@ index 8fbee0c..3b0d8b3 100644
  import {
  	DEFAULT_NPM_REGISTRY,
  	loadNpmRegistryResolver,
-@@ -39,6 +48,12 @@ import {
+@@ -41,6 +49,12 @@ import {
  	type NpmRegistryResolver,
  	npmRegistryPackageUrl,
  } from "./npm-registry";
@@ -391,7 +383,7 @@ index 8fbee0c..3b0d8b3 100644
  
  import { cfgUpdateChannel } from "../modes/settings";
  
-@@ -46,6 +61,7 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
+@@ -48,6 +62,7 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
  const MISE_TOOL = "github:can1357/oh-my-pi";
  const NIX_STORE_DIR = "/nix/store";
@@ -399,7 +391,7 @@ index 8fbee0c..3b0d8b3 100644
  const RELEASE_METADATA_TIMEOUT_MS = 30_000;
  const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
  
-@@ -1060,7 +1076,7 @@ async function pruneBunCacheAfterGlobalInstall(): Promise<BunInstallCachePruneRe
+@@ -1089,7 +1104,7 @@ async function pruneBunCacheAfterGlobalInstall(): Promise<BunInstallCachePruneRe
   * Resolve the path that `omp` maps to in the user's PATH.
   */
  function resolveOmpPath(): string | undefined {
@@ -408,8 +400,8 @@ index 8fbee0c..3b0d8b3 100644
  }
  
  /**
-@@ -2275,6 +2291,151 @@ async function runManagedUpdate(
- 	}
+@@ -2374,6 +2389,154 @@ async function runManagedUpdate(
+ 	return { kind: "installed", version: installed };
  }
  
 +async function readGitHubCliToken(ghPath: string): Promise<string | undefined> {
@@ -537,40 +529,42 @@ index 8fbee0c..3b0d8b3 100644
 + * Upstream's build service and npm never serve fork builds, so the PATH `omp`
 + * is replaced in place with the verified release asset whatever installed it.
 + */
-+async function runForkReleaseUpdate(request: UpdateRequest): Promise<void> {
++async function runForkReleaseUpdate(request: UpdateRequest): Promise<UpdateOutcome> {
 +	let release: ForkReleaseInfo;
 +	try {
 +		release = await getLatestReleaseForVersion();
 +	} catch (err) {
-+		console.error(chalk.red(`Failed to check for updates: ${err}`));
-+		process.exit(1);
++		throw updateError("Failed to check for updates", err);
 +	}
-+	if (!announceOffer(release.version, request) || request.check) return;
++	if (!announceOffer(release.version, request)) return { kind: "current" };
++	if (request.check) return { kind: "available", version: release.version };
 +
++	const lock = acquireInstallLock();
 +	try {
 +		const targetPath = resolveOmpPath();
 +		if (!targetPath) throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
-+		await updateViaBinaryAt(targetPath, await fetchForkReleaseBuild(release));
++		await updateViaBinaryAt(targetPath, await fetchForkReleaseBuild(release), { onProgress: request.onProgress });
 +	} catch (err) {
-+		console.error(chalk.red(`Update failed: ${err}`));
-+		process.exit(1);
++		throw updateError("Update failed", err);
++	} finally {
++		lock.release();
 +	}
++	return { kind: "installed", version: release.version };
 +}
 +
  /**
   * Run the update command.
   *
-@@ -2309,6 +2470,10 @@ export async function runUpdateCommand(opts: {
- 		isChannelSwitch: opts.channel !== undefined && opts.channel !== persistedChannel,
+@@ -2407,6 +2570,9 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
  		persistChannel: opts.channel !== undefined,
+ 		onProgress: opts.onProgress,
  	};
 +	if (isForkVersion()) {
-+		await runForkReleaseUpdate(request);
-+		return;
++		return await runForkReleaseUpdate(request);
 +	}
  
- 	let target: UpdateTarget | undefined;
- 	let targetError: unknown;
+ 	const lock = opts.check ? undefined : acquireInstallLock();
+ 	try {
 diff --git a/packages/coding-agent/test/release-info.test.ts b/packages/coding-agent/test/release-info.test.ts
 new file mode 100644
 index 0000000..94434c3
@@ -633,10 +627,10 @@ index 0000000..25c6094
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index fc02ccb..0e4a77e 100644
+index acee3da..a7f894e 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -159,6 +159,118 @@ describe("update command plugin dispatch", () => {
+@@ -160,6 +160,118 @@ describe("update command plugin dispatch", () => {
  	});
  });
  
@@ -756,19 +750,19 @@ index fc02ccb..0e4a77e 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 64f13d3..16748e4 100644
+index e749739..bdd9071 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.14.0",
-+	"version": "18.14.0-fork.1",
+-	"version": "18.17.0",
++	"version": "18.17.0-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
 diff --git a/scripts/ci-release-publish.test.ts b/scripts/ci-release-publish.test.ts
-index 49c3784..48f4f75 100644
+index f3438f4..aafc64b 100644
 --- a/scripts/ci-release-publish.test.ts
 +++ b/scripts/ci-release-publish.test.ts
 @@ -163,7 +163,7 @@ describe("published legal payloads", () => {
@@ -892,7 +886,7 @@ index 0000000..51ef339
 +	}, 30_000);
 +});
 diff --git a/scripts/ci-test-ts.ts b/scripts/ci-test-ts.ts
-index 9880a0a..ce646fb 100755
+index 53cdcce..893490a 100755
 --- a/scripts/ci-test-ts.ts
 +++ b/scripts/ci-test-ts.ts
 @@ -27,12 +27,21 @@ interface TestCommand {
@@ -943,7 +937,7 @@ index 9880a0a..ce646fb 100755
  function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
  	const { extraArgs = [] } = options;
  	return {
-@@ -306,10 +333,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition>
+@@ -307,10 +334,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition>
  	return codingAgentTestPartitionPromise;
  }
  
@@ -964,7 +958,7 @@ index 9880a0a..ce646fb 100755
  		throw new Error(`No coding-agent ${bucket} tests matched`);
  	}
  	const plan = codingAgentBucketPlans[bucket];
-@@ -326,15 +361,18 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
+@@ -327,15 +362,18 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
  			parallel: plan.parallel,
  		});
  	}
@@ -987,7 +981,7 @@ index 9880a0a..ce646fb 100755
  		case "coding-agent-singleton":
  			return await codingAgentTestCommands("singleton");
  		case "coding-agent-ui":
-@@ -344,36 +382,40 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
+@@ -345,36 +383,40 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
  		case "coding-agent-native":
  			return await codingAgentTestCommands("native");
  		case "coding-agent-heavy":
@@ -1047,7 +1041,7 @@ index 9880a0a..ce646fb 100755
  	}
  }
  
-@@ -1011,7 +1053,14 @@ if (!(requestedMode in validModes)) {
+@@ -1015,7 +1057,14 @@ if (!(requestedMode in validModes)) {
  	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`);
  }
  

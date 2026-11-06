@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 45619d4..dd4b0ee 100644
+index 2bfe0b7..5da3597 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
 @@ -39,6 +39,7 @@ import {
@@ -10,16 +10,16 @@ index 45619d4..dd4b0ee 100644
  import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
  import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
  import { fetchBuild } from "./cli/build-service";
-@@ -271,7 +272,7 @@ function writeStartupWarning(warning: string): void {
+@@ -272,7 +273,7 @@ function writeStartupWarning(warning: string): void {
  	process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
  }
  
 -async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 +export async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
- 	if (!cfgStartupCheckUpdate.get(settings)) {
+ 	if (!cfgStartupCheckUpdate.get(settings) && !cfgUpdateAuto.get(settings)) {
  		return;
  	}
-@@ -279,6 +280,12 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+@@ -280,6 +281,12 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
  		// Checkouts update through git and a manager (Tern) updates its omp itself:
  		// "run omp update" would be wrong advice for both.
  		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
@@ -33,10 +33,10 @@ index 45619d4..dd4b0ee 100644
  		// A compiled binary updates from the build service; naming the running
  		// version lets the service prepare the patch `omp update` will then use.
 diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
-index e3d554f..3e3cdca 100644
+index aa6aafc..b5c852d 100644
 --- a/packages/coding-agent/src/modes/controllers/command-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
-@@ -2617,6 +2617,7 @@ export function renderUsageReports(
+@@ -2740,6 +2740,7 @@ export function renderUsageReports(
  	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
  	usageModelSelectors: readonly string[] = [],
  	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
@@ -44,7 +44,7 @@ index e3d554f..3e3cdca 100644
  ): string {
  	const displayReports = collapseSharedUsageReports(reports);
  	const lines: string[] = [];
-@@ -2707,6 +2708,10 @@ export function renderUsageReports(
+@@ -2830,6 +2831,10 @@ export function renderUsageReports(
  		if (activeAccountLabel) {
  			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
  		}
@@ -56,10 +56,10 @@ index e3d554f..3e3cdca 100644
  		if (reportingModels.length > 0) {
  			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
 diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
-index 46e029b..6570711 100644
+index 01b633f..9de3a20 100644
 --- a/packages/coding-agent/src/modes/controllers/event-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
-@@ -73,6 +73,7 @@ import {
+@@ -74,6 +74,7 @@ import {
  import {
  	assistantHasVisibleContent,
  	assistantUsageIsBilled,
@@ -67,7 +67,7 @@ index 46e029b..6570711 100644
  	splitAssistantMessageToolTimeline,
  } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
  import { isWarpCliAgentProtocolActive } from "../warp-events";
-@@ -276,6 +277,7 @@ export class EventController {
+@@ -277,6 +278,7 @@ export class EventController {
  	// restored when the banner clears at the next `agent_start` (see
  	// #handleMessageEnd / #handleAgentStart).
  	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
@@ -75,7 +75,7 @@ index 46e029b..6570711 100644
  	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
  	#restorePinnedErrorInline = true;
  	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
-@@ -1187,6 +1189,7 @@ export class EventController {
+@@ -1201,6 +1203,7 @@ export class EventController {
  			this.#asyncWaitEnd = undefined;
  			this.ctx.setWorkingMessage();
  		}
@@ -83,7 +83,7 @@ index 46e029b..6570711 100644
  		this.#readToolCallArgs.clear();
  		this.#readToolCallAssistantComponents.clear();
  		this.#resetReadGroup();
-@@ -1949,15 +1952,18 @@ export class EventController {
+@@ -1964,15 +1967,18 @@ export class EventController {
  			// errors are known intermediate attempts: hide them entirely while
  			// session recovery continues, but retain the component so a terminal
  			// retry-cap event can promote its final error into the one banner.
@@ -111,7 +111,7 @@ index 46e029b..6570711 100644
  			}
  			this.ctx.statusLine.invalidate();
  			this.ctx.ui.requestRender();
-@@ -2355,6 +2361,18 @@ export class EventController {
+@@ -2370,6 +2376,18 @@ export class EventController {
  			}
  		}
  	}
@@ -130,7 +130,7 @@ index 46e029b..6570711 100644
  	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
  		// A superseded agent_end: the agent is already streaming a fresh turn, so
  		// this event belongs to a turn that has already been replaced. The session
-@@ -2411,7 +2429,13 @@ export class EventController {
+@@ -2426,7 +2444,13 @@ export class EventController {
  		}
  		setRunStatus(this.#settledRunStatus(event));
  
@@ -144,7 +144,7 @@ index 46e029b..6570711 100644
  		// This settle may belong to an extension-started turn while the main
  		// input loop remains asleep. Do not await session-idle from its own event.
  		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
-@@ -2862,6 +2886,7 @@ export class EventController {
+@@ -2886,6 +2910,7 @@ export class EventController {
  		}
  		this.#clearRetrySupersededAssistantComponents();
  		if (!event.success) {
@@ -153,7 +153,7 @@ index 46e029b..6570711 100644
  				const terminalError = this.#restorePinnedErrorInline
  					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
 diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
-index f3f1ae5..9ab781c 100644
+index e222839..7d254ab 100644
 --- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
 @@ -73,6 +73,11 @@ import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../.
@@ -180,7 +180,7 @@ index f3f1ae5..9ab781c 100644
  import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
  import { createAgentsHubDeps } from "../agents-hub-deps";
  import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-@@ -128,6 +138,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+@@ -129,6 +139,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
  import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
  import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
  import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -188,7 +188,7 @@ index f3f1ae5..9ab781c 100644
  import { renderUsageReports } from "./command-controller";
  import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
  
-@@ -459,6 +470,7 @@ export class SelectorController {
+@@ -460,6 +471,7 @@ export class SelectorController {
  					provider => (provider === currentProvider ? activeAccount : undefined),
  					usageModelSelectors,
  					unavailableAccounts,
@@ -196,7 +196,7 @@ index f3f1ae5..9ab781c 100644
  				),
  			loadActivity: loadDailyActivity,
  			refresh: () => this.ctx.session.fetchUsageReports(),
-@@ -2410,6 +2422,146 @@ export class SelectorController {
+@@ -2419,6 +2431,146 @@ export class SelectorController {
  		});
  	}
  
@@ -344,10 +344,10 @@ index f3f1ae5..9ab781c 100644
  		const session = this.ctx.session;
  		this.ctx.showStatus("Checking saved rate-limit resets…", { dim: true });
 diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index ee91a20..1062a91 100644
+index 2d444a3..d464d1c 100644
 --- a/packages/coding-agent/src/modes/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -9179,6 +9179,10 @@ export class InteractiveMode implements InteractiveModeContext {
+@@ -9590,6 +9590,10 @@ export class InteractiveMode implements InteractiveModeContext {
  		return this.#selectorController.showSessionPinSelector();
  	}
  
@@ -436,10 +436,10 @@ index 2ab041f..668e76f 100644
  	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
  	resolveActiveRepo: resolveActiveRepoContextSync,
 diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
-index bef7767..c4a3bec 100644
+index 9e4c7bd..8cb7eef 100644
 --- a/packages/coding-agent/src/modes/types.ts
 +++ b/packages/coding-agent/src/modes/types.ts
-@@ -577,6 +577,7 @@ export interface InteractiveModeContext {
+@@ -642,6 +642,7 @@ export interface InteractiveModeContext {
  	handleSessionDeleteCommand(): Promise<void>;
  	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
  	showSessionPinSelector(): Promise<void>;
@@ -448,18 +448,18 @@ index bef7767..c4a3bec 100644
  	showProviderSetup(): Promise<void>;
  	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index e98956b..af62f94 100644
+index 8fb13a9..753212c 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
-@@ -224,6 +224,7 @@ import {
- import type { SecretObfuscator } from "../secrets/obfuscator";
- import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+@@ -226,6 +226,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
+ import { USER_AWAIT_ID } from "../registry/agent-awaits";
+ import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
  import { cfgSecretsEnabled } from "../secrets/settings";
 +import { formatDefaultAccountFalloverNotice } from "../slash-commands/helpers/active-oauth-account";
  import { releaseSharpshooterSession } from "../sharpshooter/backend";
  import { flushSharpshooterExtraction } from "../sharpshooter/extract";
  import { toolReadsSkillUris } from "../system-prompt";
-@@ -438,6 +439,7 @@ import {
+@@ -455,6 +456,7 @@ import {
  import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
  import type { ServingModel } from "./retry-fallback-chains";
  import {
@@ -467,7 +467,7 @@ index e98956b..af62f94 100644
  	type AdvisorCatchupOptions,
  	type AdvisorStats,
  	type AdvisorStatusOverviewEntry,
-@@ -485,7 +487,12 @@ import { YieldQueue } from "./yield-queue";
+@@ -515,7 +517,12 @@ import { YieldQueue } from "./yield-queue";
  
  export * from "./agent-session-events";
  export * from "./agent-session-types";
@@ -481,7 +481,7 @@ index e98956b..af62f94 100644
  
  const SESSION_STOP_CONTINUATION_CAP = 8;
  /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
-@@ -4746,6 +4753,20 @@ export class AgentSession implements SettingsScope {
+@@ -4891,6 +4898,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  					this.sessionId,
  					assistantMsg.provider,
  				);
@@ -502,7 +502,7 @@ index e98956b..af62f94 100644
  			}
  			if (event.message.role === "toolResult") {
  				const { toolName, toolCallId, isError, content } = event.message;
-@@ -15212,6 +15233,15 @@ export class AgentSession implements SettingsScope {
+@@ -15734,6 +15755,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		return this.#advisors.getAdvisorStatusOverview();
  	}
  
@@ -541,10 +541,10 @@ index f80b706..1d957c7 100644
  		keepChanges,
  	});
 diff --git a/packages/coding-agent/src/session/settings.ts b/packages/coding-agent/src/session/settings.ts
-index 73863f3..bc666a2 100644
+index b65c57c..8858b7f 100644
 --- a/packages/coding-agent/src/session/settings.ts
 +++ b/packages/coding-agent/src/session/settings.ts
-@@ -28,6 +28,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+@@ -30,6 +30,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
  import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
  
  const EMPTY_NUMBER_RECORD: Record<string, number> = {};
@@ -552,7 +552,7 @@ index 73863f3..bc666a2 100644
  const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
  const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
  
-@@ -219,6 +220,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
+@@ -217,6 +218,32 @@ effect(cfgProvidersMaxInFlightRequests, limits =>
  	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
  );
  
@@ -586,7 +586,7 @@ index 73863f3..bc666a2 100644
  	id: "images.describeForTextModels",
  	type: "boolean",
 diff --git a/packages/coding-agent/src/slash-commands/builtin-session.ts b/packages/coding-agent/src/slash-commands/builtin-session.ts
-index 1cde118..81388fa 100644
+index 0e1dde0..38fc0fe 100644
 --- a/packages/coding-agent/src/slash-commands/builtin-session.ts
 +++ b/packages/coding-agent/src/slash-commands/builtin-session.ts
 @@ -182,6 +182,65 @@ async function handleSessionPinCommand(
@@ -688,10 +688,10 @@ index 1cde118..81388fa 100644
  		name: "jobs",
  		icon: "jobs",
 diff --git a/packages/coding-agent/test/acp-builtins.test.ts b/packages/coding-agent/test/acp-builtins.test.ts
-index 55cfbec..8152160 100644
+index d0644f6..c0e644c 100644
 --- a/packages/coding-agent/test/acp-builtins.test.ts
 +++ b/packages/coding-agent/test/acp-builtins.test.ts
-@@ -75,6 +75,7 @@ interface FakeAcpBuiltinSession {
+@@ -76,6 +76,7 @@ interface FakeAcpBuiltinSession {
  	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	scopedModels: Array<{ model: { provider: string; id: string } }>;
  	modelRegistry: {
@@ -699,7 +699,7 @@ index 55cfbec..8152160 100644
  		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
  		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
  	};
-@@ -183,6 +184,7 @@ function createRuntime() {
+@@ -186,6 +187,7 @@ function createRuntime() {
  		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
  		scopedModels: [],
  		modelRegistry: {
@@ -862,7 +862,7 @@ index 1867c20..61a55a3 100644
  		const message = makeAssistantMessage({
  			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
 diff --git a/packages/coding-agent/test/model-discovery.test.ts b/packages/coding-agent/test/model-discovery.test.ts
-index 6294e00..3db4a41 100644
+index 9b2a03e..9ea8145 100644
 --- a/packages/coding-agent/test/model-discovery.test.ts
 +++ b/packages/coding-agent/test/model-discovery.test.ts
 @@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -877,7 +877,7 @@ index 6294e00..3db4a41 100644
  import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
  import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
  import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
-@@ -26,9 +28,10 @@ import {
+@@ -27,9 +29,10 @@ import {
  	discoveryProbeTimeoutMs,
  } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
  import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -889,7 +889,7 @@ index 6294e00..3db4a41 100644
  import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
  import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
  
-@@ -3259,6 +3262,125 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -3408,6 +3411,125 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(rosterFor("image")).toEqual(["image-generator"]);
  	});
  
@@ -1015,7 +1015,7 @@ index 6294e00..3db4a41 100644
  	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {
  		// Gateways like opper.ai root their OpenAI-compatible surface at a
  		// versioned path (`https://api.opper.ai/v3/compat`); the default
-@@ -3833,6 +3955,192 @@ describe("ModelRegistry runtime discovery", () => {
+@@ -3982,6 +4104,192 @@ describe("ModelRegistry runtime discovery", () => {
  		expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
  	});
  
@@ -1257,7 +1257,7 @@ index dad8fe0..dd67b1e 100644
  
  	it("tears the loader down on the live turn's own final agent_end", async () => {
 diff --git a/packages/coding-agent/test/task/worktree.test.ts b/packages/coding-agent/test/task/worktree.test.ts
-index a1fe835..7fda53e 100644
+index 7a3d9ad..afee9a5 100644
 --- a/packages/coding-agent/test/task/worktree.test.ts
 +++ b/packages/coding-agent/test/task/worktree.test.ts
 @@ -4,6 +4,7 @@ import * as os from "node:os";
@@ -1268,7 +1268,7 @@ index a1fe835..7fda53e 100644
  	captureBaseline,
  	captureDeltaPatch,
  	captureIsolationBaseline,
-@@ -574,6 +575,38 @@ describe("getRepoRoot", () => {
+@@ -595,6 +596,38 @@ describe("getRepoRoot", () => {
  	});
  });
  
@@ -1308,18 +1308,18 @@ index a1fe835..7fda53e 100644
  	// Build a source checkout whose `.git` is a linked-worktree pointer file —
  	// the exact shape (`gitdir: …/worktrees/<name>`) that makes copy backends
 diff --git a/packages/tui/src/status-line/component.ts b/packages/tui/src/status-line/component.ts
-index e56d2db..ab59370 100644
+index 442b541..0173e18 100644
 --- a/packages/tui/src/status-line/component.ts
 +++ b/packages/tui/src/status-line/component.ts
-@@ -2597,6 +2597,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
- 			sessionAccent: sessionAccentEnabled,
+@@ -2709,6 +2709,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			previewTitle,
+ 			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId?.()),
  			activeRepo: activeRepoCache.activeRepo,
 +			account: segmentOptions?.model?.showAccount ? (this.host.resolveAccountStatus?.(this.session) ?? null) : null,
  			width,
  			options: segmentOptions ?? {},
  			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
-@@ -2664,6 +2665,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
+@@ -2777,6 +2778,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
  			};
  		}
  
@@ -1334,7 +1334,7 @@ index e56d2db..ab59370 100644
  			? (this.#settings.leftSegments ?? presetDef.leftSegments)
  			: presetDef.leftSegments;
 diff --git a/packages/tui/src/status-line/host.ts b/packages/tui/src/status-line/host.ts
-index fbdb0b5..ae31925 100644
+index e83a724..8d4e254 100644
 --- a/packages/tui/src/status-line/host.ts
 +++ b/packages/tui/src/status-line/host.ts
 @@ -3,7 +3,7 @@ import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -1346,7 +1346,7 @@ index fbdb0b5..ae31925 100644
  
  export interface StatusAccountIdentity {
  	accountId?: string;
-@@ -95,6 +95,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
+@@ -146,6 +146,14 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
  	getSessionSettingsRevision(session: TSession): number;
  	goalStatusInFooter(session: TSession): boolean;
  	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
@@ -1362,10 +1362,10 @@ index fbdb0b5..ae31925 100644
  	fetchUsageReports(session: TSession, signal: AbortSignal): Promise<unknown>;
  	resolveActiveRepo(cwd: string): ActiveRepoContext | null;
 diff --git a/packages/tui/src/status-line/segments.ts b/packages/tui/src/status-line/segments.ts
-index 06b42e1..dd038f1 100644
+index 189ff99..da27286 100644
 --- a/packages/tui/src/status-line/segments.ts
 +++ b/packages/tui/src/status-line/segments.ts
-@@ -37,6 +37,12 @@ export type { SegmentContext } from "./types";
+@@ -38,6 +38,12 @@ export type { SegmentContext } from "./types";
  // Helpers
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -1378,7 +1378,7 @@ index 06b42e1..dd038f1 100644
  function withIcon(icon: string, text: string): string {
  	return icon ? `${icon} ${text}` : text;
  }
-@@ -348,6 +354,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
+@@ -349,6 +355,48 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
  	return icon ? { icon, color } : undefined;
  }
  
@@ -1427,7 +1427,7 @@ index 06b42e1..dd038f1 100644
  const modelSegment: StatusLineSegment = {
  	id: "model",
  	render(ctx) {
-@@ -375,6 +423,7 @@ const modelSegment: StatusLineSegment = {
+@@ -376,6 +424,7 @@ const modelSegment: StatusLineSegment = {
  		// `statusLineModel` is aliased to `accent` in many themes, so the badge
  		// uses status colors to stay visibly distinct from the model name color.
  		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
@@ -1435,7 +1435,7 @@ index 06b42e1..dd038f1 100644
  		// Per-advisor detail lives in `/advisor status`.
  		const advisor = modelAdvisorBadge(ctx);
  		if (advisor) content += theme.fg(advisor.color, ` ${advisor.icon}`);
-@@ -393,6 +442,7 @@ const modelSegment: StatusLineSegment = {
+@@ -394,6 +443,7 @@ const modelSegment: StatusLineSegment = {
  		// quiet separator; the terminal draws the model icon.
  		const token = accentToken(ctx, "statusLineModel");
  		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
@@ -1444,7 +1444,7 @@ index 06b42e1..dd038f1 100644
  		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
  		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
 diff --git a/packages/tui/src/status-line/types.ts b/packages/tui/src/status-line/types.ts
-index 47917bf..08f38a5 100644
+index 4f949d8..370c2d2 100644
 --- a/packages/tui/src/status-line/types.ts
 +++ b/packages/tui/src/status-line/types.ts
 @@ -37,7 +37,7 @@ export interface CollabStatus {
@@ -1481,7 +1481,7 @@ index 47917bf..08f38a5 100644
  export type RGB = readonly [number, number, number];
  
  export interface SegmentContext {
-@@ -206,6 +224,13 @@ export interface SegmentContext {
+@@ -208,6 +226,13 @@ export interface SegmentContext {
  			expiring?: StatusResetExpiry;
  		};
  	} | null;
@@ -1492,14 +1492,14 @@ index 47917bf..08f38a5 100644
 +	 * identity to attribute) or the option is off.
 +	 */
 +	account?: ActiveAccountStatus | null;
+ 	/** What the next request finds in the prompt cache; read only when the `cache` segment is configured. */
+ 	promptCache?: PromptCacheStatus;
  }
- 
- /** How close an account's saved resets are to expiring, when it is worth a warning. */
 diff --git a/packages/tui/src/theme/symbols.ts b/packages/tui/src/theme/symbols.ts
-index bbf12af..9945aa8 100644
+index 78aa4b2..885f5c0 100644
 --- a/packages/tui/src/theme/symbols.ts
 +++ b/packages/tui/src/theme/symbols.ts
-@@ -101,6 +101,8 @@ export type SymbolKey =
+@@ -102,6 +102,8 @@ export type SymbolKey =
  	| "icon.subscription"
  	| "icon.advisor"
  	| "icon.advisorClosed"
@@ -1508,7 +1508,7 @@ index bbf12af..9945aa8 100644
  	| "icon.time"
  	| "icon.omp"
  	| "icon.ghost"
-@@ -487,6 +489,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
+@@ -492,6 +494,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "👁",
  	"icon.advisorClosed": "🙈",
@@ -1517,7 +1517,7 @@ index bbf12af..9945aa8 100644
  	"icon.time": "⏱",
  	"icon.omp": "π",
  	"icon.ghost": "👻",
-@@ -870,6 +874,10 @@ const NERD_SYMBOLS: SymbolMap = {
+@@ -878,6 +882,10 @@ const NERD_SYMBOLS: SymbolMap = {
  	"icon.advisor": "\uea70",
  	// pick:  (nf-oct-eye_closed)
  	"icon.advisorClosed": "\ueae7",
@@ -1528,7 +1528,7 @@ index bbf12af..9945aa8 100644
  	// pick:  | alt: ◷ ◴
  	"icon.time": "\uf017",
  	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
-@@ -1280,6 +1288,8 @@ const ASCII_SYMBOLS: SymbolMap = {
+@@ -1295,6 +1303,8 @@ const ASCII_SYMBOLS: SymbolMap = {
  	"icon.subscription": "(sub)",
  	"icon.advisor": "(adv)",
  	"icon.advisorClosed": "(adv)",
@@ -1538,10 +1538,10 @@ index bbf12af..9945aa8 100644
  	"icon.omp": "pi",
  	"icon.ghost": "@",
 diff --git a/packages/tui/src/theme/theme-class.ts b/packages/tui/src/theme/theme-class.ts
-index 75feb8c..8a120ea 100644
+index 0522f28..cda455a 100644
 --- a/packages/tui/src/theme/theme-class.ts
 +++ b/packages/tui/src/theme/theme-class.ts
-@@ -637,6 +637,8 @@ export class Theme {
+@@ -670,6 +670,8 @@ export class Theme {
  			subscription: this.#symbols["icon.subscription"],
  			advisor: this.#symbols["icon.advisor"],
  			advisorClosed: this.#symbols["icon.advisorClosed"],
@@ -1642,10 +1642,10 @@ index 067ade3..0d53066 100644
 +	});
 +});
 diff --git a/packages/utils/src/postmortem.ts b/packages/utils/src/postmortem.ts
-index 3889174..bee0717 100644
+index 885a1f7..164e519 100644
 --- a/packages/utils/src/postmortem.ts
 +++ b/packages/utils/src/postmortem.ts
-@@ -685,6 +685,21 @@ export async function fatal(error: unknown): Promise<never> {
+@@ -720,6 +720,21 @@ export async function fatal(error: unknown): Promise<never> {
  	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
  }
  
@@ -1664,12 +1664,12 @@ index 3889174..bee0717 100644
 +	process.removeListener("SIGTERM", sigtermCleanup);
 +}
 +
- if (Bun.isMainThread) {
- 	process
- 		.on("SIGINT", async () => {
-@@ -764,15 +779,7 @@ if (Bun.isMainThread) {
- 		.on("exit", async () => {
- 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
+ // Exit-time cleanup is safe in any host: it neither delays nor triggers an exit. Signal and fatal
+ // handlers change the process lifecycle, so only {@link installProcessHandlers} adds them.
+ process.on("exit", () => {
+@@ -803,15 +818,7 @@ export function installProcessHandlers(): void {
+ 				Reason.UNHANDLED_REJECTION,
+ 			);
  		})
 -		.on("SIGTERM", async () => {
 -			// A stopped session otherwise leaves its last frame above the shell prompt,
