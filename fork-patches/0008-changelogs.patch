@@ -1,11 +1,17 @@
 diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index 60d4b83..175529a 100644
+index 60d4b83..694d8e8 100644
 --- a/packages/ai/CHANGELOG.md
 +++ b/packages/ai/CHANGELOG.md
-@@ -2,6 +2,71 @@
+@@ -2,6 +2,77 @@
  
  ## [Unreleased]
  
++## [18.18.0-fork.1] - 2026-11-07
++
++### Changed
++
++- Re-based the fork onto upstream v18.18.0.
++
 +## [18.17.0-fork.1] - 2026-11-06
 +
 +### Changed
@@ -74,7 +80,7 @@ index 60d4b83..175529a 100644
  ## [18.17.0] - 2026-11-06
  
  ### Added
-@@ -2203,4 +2268,229 @@
+@@ -2203,4 +2274,229 @@
  - Fixed Anthropic Claude reasoning and thinking replay handling. Same-model replays now drop unsigned prior reasoning blocks to prevent reasoning-extraction refusals, while cross-model replays (including Bedrock cross-region profiles) correctly demote reasoning without emitting raw thinking tags or causing text-flattening formatting issues.
  - Fixed custom OpenAI-compatible relays serving standard OpenAI model IDs to be correctly classified as OpenAI-family targets for fast mode.
  
@@ -305,13 +311,19 @@ index 60d4b83..175529a 100644
 +Older fork entries are archived in [packages/ai/CHANGELOG.md@98ee86c3c7bd](https://github.com/arynyklas/oh-my-pi/blob/98ee86c3c7bd4dddc726cb32463c87c6ca14818c/packages/ai/CHANGELOG.md).
  Older entries are archived in [packages/ai/CHANGELOG.md@bdbb5c920f69](https://github.com/can1357/oh-my-pi/blob/bdbb5c920f693caff287c50996c116e42e37992b/packages/ai/CHANGELOG.md).
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index 43f45c9..ec7010e 100644
+index f449a29..4929aa3 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,107 @@
+@@ -2,6 +2,114 @@
  
  ## [Unreleased]
  
++## [18.18.0-fork.1] - 2026-11-07
++
++### Changed
++
++- Re-based the fork onto upstream v18.18.0.
++
 +## [18.17.0-fork.1] - 2026-11-06
 +
 +### Changed
@@ -413,10 +425,11 @@ index 43f45c9..ec7010e 100644
 +### Changed
 +
 +- Re-based the fork onto upstream v18.2.9, whose TUI components moved into `@oh-my-pi/pi-tui`. The gateway connection-profile editor is now injected into the settings selector and the status line resolves the active-account chip through its host, so both keep working from the relocated components.
- ## [18.17.0] - 2026-11-06
++
+ ## [18.18.0] - 2026-11-07
  
  ### Added
-@@ -1073,4 +1174,442 @@
+@@ -1155,4 +1263,442 @@
  - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
  - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
  

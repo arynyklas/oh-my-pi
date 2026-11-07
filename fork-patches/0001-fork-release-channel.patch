@@ -160,22 +160,22 @@ index 0000000..18cfbed
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, and credentials. Delete it
 +separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index b4d6ee4..b318e88 100644
+index e87a56b..37e449b 100644
 --- a/package.json
 +++ b/package.json
 @@ -20,11 +20,11 @@
- 			"@oh-my-pi/pi-agent-core": "18.17.0",
- 			"@oh-my-pi/pi-ai": "18.17.0",
- 			"@oh-my-pi/pi-catalog": "18.17.0",
--			"@oh-my-pi/pi-coding-agent": "18.17.0",
-+			"@oh-my-pi/pi-coding-agent": "18.17.0-fork.1",
- 			"@oh-my-pi/pi-mnemopi": "18.17.0",
- 			"@oh-my-pi/pi-natives": "18.17.0",
- 			"@oh-my-pi/pi-tui": "18.17.0",
--			"@oh-my-pi/pi-utils": "18.17.0",
-+			"@oh-my-pi/pi-utils": "18.17.0-fork.1",
- 			"@oh-my-pi/pi-wire": "18.17.0",
- 			"@oh-my-pi/snapcompact": "18.17.0",
+ 			"@oh-my-pi/pi-agent-core": "18.18.0",
+ 			"@oh-my-pi/pi-ai": "18.18.0",
+ 			"@oh-my-pi/pi-catalog": "18.18.0",
+-			"@oh-my-pi/pi-coding-agent": "18.18.0",
++			"@oh-my-pi/pi-coding-agent": "18.18.0-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "18.18.0",
+ 			"@oh-my-pi/pi-natives": "18.18.0",
+ 			"@oh-my-pi/pi-tui": "18.18.0",
+-			"@oh-my-pi/pi-utils": "18.18.0",
++			"@oh-my-pi/pi-utils": "18.18.0-fork.1",
+ 			"@oh-my-pi/pi-wire": "18.18.0",
+ 			"@oh-my-pi/snapcompact": "18.18.0",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
 index 670e787..35ce2f8 100644
@@ -191,14 +191,14 @@ index 670e787..35ce2f8 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index df92bc0..31cc69c 100644
+index 3ecd1d6..73883d2 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.17.0",
-+	"version": "18.17.0-fork.1",
+-	"version": "18.18.0",
++	"version": "18.18.0-fork.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -750,14 +750,14 @@ index acee3da..a7f894e 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index e749739..bdd9071 100644
+index fab2e26..ec1b815 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.17.0",
-+	"version": "18.17.0-fork.1",
+-	"version": "18.18.0",
++	"version": "18.18.0-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",

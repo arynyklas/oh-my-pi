@@ -56,10 +56,10 @@ index aa6aafc..b5c852d 100644
  		if (reportingModels.length > 0) {
  			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
 diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
-index 01b633f..9de3a20 100644
+index d95743f..485b306 100644
 --- a/packages/coding-agent/src/modes/controllers/event-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
-@@ -74,6 +74,7 @@ import {
+@@ -75,6 +75,7 @@ import {
  import {
  	assistantHasVisibleContent,
  	assistantUsageIsBilled,
@@ -67,7 +67,7 @@ index 01b633f..9de3a20 100644
  	splitAssistantMessageToolTimeline,
  } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
  import { isWarpCliAgentProtocolActive } from "../warp-events";
-@@ -277,6 +278,7 @@ export class EventController {
+@@ -278,6 +279,7 @@ export class EventController {
  	// restored when the banner clears at the next `agent_start` (see
  	// #handleMessageEnd / #handleAgentStart).
  	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
@@ -75,7 +75,7 @@ index 01b633f..9de3a20 100644
  	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
  	#restorePinnedErrorInline = true;
  	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
-@@ -1201,6 +1203,7 @@ export class EventController {
+@@ -1215,6 +1217,7 @@ export class EventController {
  			this.#asyncWaitEnd = undefined;
  			this.ctx.setWorkingMessage();
  		}
@@ -83,7 +83,7 @@ index 01b633f..9de3a20 100644
  		this.#readToolCallArgs.clear();
  		this.#readToolCallAssistantComponents.clear();
  		this.#resetReadGroup();
-@@ -1964,15 +1967,18 @@ export class EventController {
+@@ -2010,15 +2013,18 @@ export class EventController {
  			// errors are known intermediate attempts: hide them entirely while
  			// session recovery continues, but retain the component so a terminal
  			// retry-cap event can promote its final error into the one banner.
@@ -111,7 +111,7 @@ index 01b633f..9de3a20 100644
  			}
  			this.ctx.statusLine.invalidate();
  			this.ctx.ui.requestRender();
-@@ -2370,6 +2376,18 @@ export class EventController {
+@@ -2416,6 +2422,18 @@ export class EventController {
  			}
  		}
  	}
@@ -130,7 +130,7 @@ index 01b633f..9de3a20 100644
  	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
  		// A superseded agent_end: the agent is already streaming a fresh turn, so
  		// this event belongs to a turn that has already been replaced. The session
-@@ -2426,7 +2444,13 @@ export class EventController {
+@@ -2472,7 +2490,13 @@ export class EventController {
  		}
  		setRunStatus(this.#settledRunStatus(event));
  
@@ -144,7 +144,7 @@ index 01b633f..9de3a20 100644
  		// This settle may belong to an extension-started turn while the main
  		// input loop remains asleep. Do not await session-idle from its own event.
  		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
-@@ -2886,6 +2910,7 @@ export class EventController {
+@@ -2932,6 +2956,7 @@ export class EventController {
  		}
  		this.#clearRetrySupersededAssistantComponents();
  		if (!event.success) {
@@ -448,7 +448,7 @@ index 9e4c7bd..8cb7eef 100644
  	showProviderSetup(): Promise<void>;
  	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
-index 8fb13a9..753212c 100644
+index e07b344..061ea96 100644
 --- a/packages/coding-agent/src/session/agent-session.ts
 +++ b/packages/coding-agent/src/session/agent-session.ts
 @@ -226,6 +226,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -481,7 +481,7 @@ index 8fb13a9..753212c 100644
  
  const SESSION_STOP_CONTINUATION_CAP = 8;
  /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
-@@ -4891,6 +4898,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -4895,6 +4902,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  					this.sessionId,
  					assistantMsg.provider,
  				);
@@ -502,7 +502,7 @@ index 8fb13a9..753212c 100644
  			}
  			if (event.message.role === "toolResult") {
  				const { toolName, toolCallId, isError, content } = event.message;
-@@ -15734,6 +15755,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+@@ -15756,6 +15777,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
  		return this.#advisors.getAdvisorStatusOverview();
  	}
  

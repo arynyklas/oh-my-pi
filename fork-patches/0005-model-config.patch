@@ -361,7 +361,7 @@ index 28e44ea..379daf9 100644
  	if (patch.api !== undefined) result.api = patch.api;
  	if (patch.kind !== undefined) {
 diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
-index c03e422..3867f49 100644
+index 3f8a25f..6f79b79 100644
 --- a/packages/coding-agent/src/config/model-registry.ts
 +++ b/packages/coding-agent/src/config/model-registry.ts
 @@ -1826,9 +1826,22 @@ export class ModelRegistry {
