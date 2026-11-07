@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.18.0-fork.1] - 2026-11-07
+
+### Changed
+
+- Re-based the fork onto upstream v18.18.0.
+
 ## [18.17.0-fork.1] - 2026-11-06
 
 ### Changed
