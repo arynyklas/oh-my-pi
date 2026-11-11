@@ -620,7 +620,6 @@ async function scanPrefixState(sessionPath: string, folder: string, endOffset: n
 export interface SessionParserState {
 	version: 1;
 	offset: number;
-	dev: number;
 	ino: number;
 	birthtimeMs: number;
 	size: number;
@@ -686,8 +685,13 @@ async function readCheckpoint(sessionPath: string, end: number): Promise<Uint8Ar
 		.bytes();
 }
 
+/**
+ * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
+ */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /**
@@ -831,7 +835,6 @@ export async function parseSessionFile(
 			parserState: {
 				version: 1,
 				offset: read,
-				dev: info.dev,
 				ino: info.ino,
 				birthtimeMs: info.birthtimeMs,
 				size: info.size,

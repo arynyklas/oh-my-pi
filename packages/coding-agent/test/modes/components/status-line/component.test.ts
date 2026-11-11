@@ -79,9 +79,7 @@ function makeSessionWithLastMessage(
 		isAdvisorUsingSubscription: () => advisorUsingSubscription,
 		isFastModeActive: () => false,
 		configuredThinkingLevel: () => undefined,
-		modelRegistry: {
-			isUsingOAuth: () => usingSubscription,
-		},
+		modelRegistry: { isUsingSubscription: () => usingSubscription },
 	};
 }
 
@@ -265,6 +263,7 @@ describe("StatusLineComponent", () => {
 			sessionId: "primary-session",
 			modelRegistry: {
 				isUsingOAuth: () => true,
+				isUsingSubscription: () => true,
 				authStorage: {
 					oauth: {
 						accounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),

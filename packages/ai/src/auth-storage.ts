@@ -427,7 +427,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		}
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
-		next.usage.adoptRuntimeProviders(previous.usage);
+		next.usage.adoptRegistrations(previous.usage);
 		next.pins.adoptSelectors(previous.pins);
 		this.#modules = next;
 		retire(previous);
@@ -474,6 +474,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			usageProviders,
 			fetch: options.usageFetch ?? fetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
+			requestKey: provider => keys.peek(provider),
 			logger:
 				options.usageLogger ??
 				({
