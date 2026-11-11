@@ -2,8 +2,8 @@
 	"base": "v18.18.8",
 	"baseCommit": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
 	"head": "HEAD",
-	"headCommit": "f4db85fdb8596be79aca3914a01777c5cea52ab9",
-	"generated": "2026-11-11T12:25:51.086Z",
+	"headCommit": "a9ace737500baa1f24c186eda80f2c8e1e5a240f",
+	"generated": "2026-11-11T12:33:43.596Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -42,6 +42,7 @@
 				"packages/ai/test/auth-storage-default-account.test.ts",
 				"packages/ai/test/auth-storage-force-refresh-rotate.test.ts",
 				"packages/ai/test/auth-storage-selection-policy.test.ts",
+				"packages/ai/test/auth-storage-selection-provider-disabled.test.ts",
 				"packages/ai/test/discover-default-accounts.test.ts",
 				"packages/coding-agent/src/modes/components/account-manager-selector.ts",
 				"packages/coding-agent/src/session/auth-storage.ts",
