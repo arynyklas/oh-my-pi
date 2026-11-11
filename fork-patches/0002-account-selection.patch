@@ -121,7 +121,7 @@ index 20969f4..9f735ff 100644
  	await storage.credentials.reload();
  	return storage;
 diff --git a/packages/ai/src/auth-storage.ts b/packages/ai/src/auth-storage.ts
-index d2a2ba6..3bbfba8 100644
+index 50aed16..df210b9 100644
 --- a/packages/ai/src/auth-storage.ts
 +++ b/packages/ai/src/auth-storage.ts
 @@ -13,6 +13,10 @@
@@ -310,7 +310,7 @@ index d2a2ba6..3bbfba8 100644
 @@ -302,6 +428,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
  		const previous = this.#modules;
  		next.pool.adoptSubscribers(previous.pool);
- 		next.usage.adoptRuntimeProviders(previous.usage);
+ 		next.usage.adoptRegistrations(previous.usage);
 +		next.pins.adoptSelectors(previous.pins);
  		this.#modules = next;
  		retire(previous);
@@ -338,7 +338,7 @@ index d2a2ba6..3bbfba8 100644
  			store,
  			pool,
  			overrides,
-@@ -356,10 +485,12 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
+@@ -357,10 +486,12 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
  			store,
  			pool,
  			policies,
@@ -351,7 +351,7 @@ index d2a2ba6..3bbfba8 100644
  			strategies,
  		});
  		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
-@@ -368,6 +499,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
+@@ -369,6 +500,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
  			overrides,
  			selector,
  			affinity,
@@ -359,7 +359,7 @@ index d2a2ba6..3bbfba8 100644
  			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
  			sourceLabel,
  		});
-@@ -395,12 +527,93 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
+@@ -396,12 +528,93 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
  			limits,
  			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
  			blocks,
@@ -1025,7 +1025,7 @@ index 0000000..1bd43b6
 +	);
 +});
 diff --git a/packages/ai/test/auth-storage-codex-selection.test.ts b/packages/ai/test/auth-storage-codex-selection.test.ts
-index 586d507..b7cdb94 100644
+index 2d5413c..3968a42 100644
 --- a/packages/ai/test/auth-storage-codex-selection.test.ts
 +++ b/packages/ai/test/auth-storage-codex-selection.test.ts
 @@ -11,7 +11,12 @@ import {
@@ -1042,7 +1042,7 @@ index 586d507..b7cdb94 100644
  import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
  import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
  import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-@@ -2890,6 +2895,56 @@ describe("AuthStorage codex oauth ranking", () => {
+@@ -2938,6 +2943,56 @@ describe("AuthStorage codex oauth ranking", () => {
  		expect(apiKey).toBe("api-acct-paid");
  	});
  
@@ -2441,10 +2441,10 @@ index eb64b2e..131cd78 100644
  	OAuthAccountSummary,
  	OAuthCredential,
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index b026665..e2a3ba6 100644
+index c31eb11..6051753 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -553,6 +553,18 @@ export interface AdvisorStatusOverviewEntry {
+@@ -557,6 +557,18 @@ export interface AdvisorStatusOverviewEntry {
  	isPaused: boolean;
  }
  
@@ -2463,7 +2463,7 @@ index b026665..e2a3ba6 100644
  /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
  export class SessionAdvisors {
  	readonly #host: SessionAdvisorsHost;
-@@ -2930,6 +2942,27 @@ export class SessionAdvisors {
+@@ -2955,6 +2967,27 @@ export class SessionAdvisors {
  		return { configured: this.#advisorEnabled, advisors };
  	}
  

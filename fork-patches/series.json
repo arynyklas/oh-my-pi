@@ -1,9 +1,9 @@
 {
-	"base": "v18.18.0",
-	"baseCommit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+	"base": "v18.18.8",
+	"baseCommit": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
 	"head": "HEAD",
-	"headCommit": "fa6a2695688c4fe0eade2dccb8104c6a4b1be964",
-	"generated": "2026-11-07T15:05:09.149Z",
+	"headCommit": "f4db85fdb8596be79aca3914a01777c5cea52ab9",
+	"generated": "2026-11-11T12:25:51.086Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -24,7 +24,6 @@
 				"packages/coding-agent/test/startup-update-check.test.ts",
 				"packages/coding-agent/test/update-cli.test.ts",
 				"packages/utils/package.json",
-				"scripts/ci-release-publish.test.ts",
 				"scripts/ci-test-ts.test.ts",
 				"scripts/ci-test-ts.ts",
 				"scripts/install-fork.ps1"

@@ -1,17 +1,8 @@
 diff --git a/packages/ai/src/usage/claude.ts b/packages/ai/src/usage/claude.ts
-index c983e2e..ab9b399 100644
+index c8182cb..e77207c 100644
 --- a/packages/ai/src/usage/claude.ts
 +++ b/packages/ai/src/usage/claude.ts
-@@ -25,8 +25,6 @@ const MAX_ATTEMPTS = 3;
- const BASE_RETRY_DELAY_MS = 500;
- /** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
- const FAILURE_BACKOFF_MS = 60_000;
--/** Shared windows that gate every Claude request, whatever the model. */
--const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
- 
- const CLAUDE_USAGE_BETAS =
- 	"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-@@ -939,40 +937,65 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
+@@ -987,38 +987,64 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
  	/**
  	 * A reactive Fable/Mythos block carries the reset the 429 reported, but
  	 * Anthropic can restore the tier earlier (plan change, corrected counter),
@@ -31,9 +22,8 @@ index c983e2e..ab9b399 100644
 -		// The endpoint returns a report as soon as one window parses, and a tier
 -		// 429 can be caused by a shared wall. A payload missing a shared gate
 -		// leaves the block's cause unknown, so vouch for nothing rather than
--		// clear a block that still holds.
--		const everySharedGateReported = CLAUDE_SHARED_GATE_WINDOW_IDS.every(windowId =>
--			sharedLimits.some(limit => limit.scope.windowId === windowId || limit.window?.id === windowId),
+-		// clear a block that still holds. A gate the payload declared inactive
+-		// is accounted for: no running window can be what blocks the account.
 +		// Partial response headers cannot vouch for every quota gating a scope.
 +		if (report.metadata?.source === "ratelimit-headers") return [];
 +		// Display normalization drops missing counters and clamps negatives.
@@ -54,9 +44,12 @@ index c983e2e..ab9b399 100644
 +			}
 +		}
 +		const shared = report.limits.filter(limit => limit.scope.shared === true);
-+		if (!shared.some(limit => limit.id === "anthropic:5h") || !shared.some(limit => limit.id === "anthropic:7d")) {
-+			return [];
-+		}
++		// A gate the payload declared inactive is accounted for: no running window can be what blocks the account.
+ 		if (!claudeReportCoversSharedGates(report)) return [];
+-		const tiers = new Set<string>();
+-		for (const limit of report.limits) {
+-			const tier = limit.scope.tier;
+-			if (tier === "fable" || tier === "mythos") tiers.add(tier);
 +		const isHealthy = (limit: UsageLimit): boolean => {
 +			const used = resolveUsedFraction(limit);
 +			return (
@@ -79,12 +72,7 @@ index c983e2e..ab9b399 100644
 +		// name a block that cannot exist.
 +		const tiers = new Set(
 +			report.limits.map(limit => limit.scope.tier).filter(tier => tier === "fable" || tier === "mythos"),
- 		);
--		if (!everySharedGateReported) return [];
--		const tiers = new Set<string>();
--		for (const limit of report.limits) {
--			const tier = limit.scope.tier;
--			if (tier === "fable" || tier === "mythos") tiers.add(tier);
++		);
 +		for (const tier of tiers) {
 +			const limits = report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier === tier);
 +			if (limits.every(isHealthy)) scopes.push({ blockScope: `tier:${tier}`, limits });
@@ -105,7 +93,7 @@ index c983e2e..ab9b399 100644
  	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
  };
 diff --git a/packages/coding-agent/src/cli/stats-cli.ts b/packages/coding-agent/src/cli/stats-cli.ts
-index c193bc7..76535f5 100644
+index 407599a..4cb5f14 100644
 --- a/packages/coding-agent/src/cli/stats-cli.ts
 +++ b/packages/coding-agent/src/cli/stats-cli.ts
 @@ -6,7 +6,7 @@
@@ -148,7 +136,7 @@ index c193bc7..76535f5 100644
  			const trimmed = truncateToWidth(line, columns - 1);
  			stream.write(`\r${trimmed.padEnd(lastWidth)}`);
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
-index ae2066c..b79f155 100644
+index 987d50d..b5f9551 100644
 --- a/packages/coding-agent/src/cli/usage-cli.ts
 +++ b/packages/coding-agent/src/cli/usage-cli.ts
 @@ -43,7 +43,11 @@ import {
@@ -363,7 +351,7 @@ index 73d3a4e..06ed5fb 100644
  			);
  		}
 diff --git a/packages/coding-agent/test/usage-cli.test.ts b/packages/coding-agent/test/usage-cli.test.ts
-index 70e25e9..64a0319 100644
+index 0e6a70b..21bd6b9 100644
 --- a/packages/coding-agent/test/usage-cli.test.ts
 +++ b/packages/coding-agent/test/usage-cli.test.ts
 @@ -1125,6 +1125,33 @@ describe("formatUsageBreakdown", () => {
@@ -401,10 +389,10 @@ index 70e25e9..64a0319 100644
  		const disabled = [
  			{
 diff --git a/packages/stats/CHANGELOG.md b/packages/stats/CHANGELOG.md
-index ba375e8..c8d2b30 100644
+index ebd48cc..029be25 100644
 --- a/packages/stats/CHANGELOG.md
 +++ b/packages/stats/CHANGELOG.md
-@@ -160,6 +160,13 @@
+@@ -172,6 +172,13 @@
  - Fixed requests whose timestamp could not be recovered being reported as free usage: they now count as unpriced (`N/A`) rather than `$0`, in both the aggregates and the per-request list, and an existing database re-parses its sessions once so rows stored before this change are repaired.
  - Fixed the trace summary showing `$0` instead of `N/A` for legacy scheduled requests that omit their token total: the total is derived from the token buckets before classifying unpriced usage.
  
@@ -804,7 +792,7 @@ index 3afa874..b796c7e 100755
  				const clipped = line.length > columns - 1 ? `${line.slice(0, columns - 2)}\u2026` : line;
  				process.stderr.write(`\r${clipped.padEnd(lastWidth)}`);
 diff --git a/packages/stats/src/parser.ts b/packages/stats/src/parser.ts
-index c8e7d2c..adcf6c1 100644
+index 3d8c06a..6a24a5d 100644
 --- a/packages/stats/src/parser.ts
 +++ b/packages/stats/src/parser.ts
 @@ -14,7 +14,7 @@ import {
@@ -1006,7 +994,7 @@ index c8e7d2c..adcf6c1 100644
  export interface SessionParserState {
  	version: 1;
  	offset: number;
-@@ -526,6 +631,29 @@ export interface SessionParserState {
+@@ -525,6 +630,29 @@ export interface SessionParserState {
  	spotlight?: SpotlightParserState;
  }
  
@@ -1036,7 +1024,7 @@ index c8e7d2c..adcf6c1 100644
  export interface ParseSessionResult {
  	stats: MessageStatsInput[];
  	userStats: UserMessageStats[];
-@@ -534,43 +662,64 @@ export interface ParseSessionResult {
+@@ -533,23 +661,28 @@ export interface ParseSessionResult {
  	toolResults: ToolResultLink[];
  	spotlight: SpotlightParseRows;
  	newOffset: number;
@@ -1075,8 +1063,9 @@ index c8e7d2c..adcf6c1 100644
 +		.bytes();
  }
  
- export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
- 	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+ /**
+@@ -561,20 +694,36 @@ export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats
+ 	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
  }
  
 -/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
@@ -1123,7 +1112,7 @@ index c8e7d2c..adcf6c1 100644
  	const folder = extractFolderFromPath(sessionPath);
  	const agentType = classifyAgentType(sessionPath);
  	const stats: MessageStatsInput[] = [];
-@@ -580,98 +729,118 @@ export async function parseSessionFile(
+@@ -584,98 +733,117 @@ export async function parseSessionFile(
  	const toolResults: ToolResultLink[] = [];
  	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
  	const callsById = new Map<string, ToolCallStats>();
@@ -1311,7 +1300,6 @@ index c8e7d2c..adcf6c1 100644
 +			parserState: {
 +				version: 1,
 +				offset: read,
-+				dev: info.dev,
 +				ino: info.ino,
 +				birthtimeMs: info.birthtimeMs,
 +				size: info.size,
@@ -1324,7 +1312,7 @@ index c8e7d2c..adcf6c1 100644
  	} catch (err) {
  		if (isEnoent(err))
  			return {
-@@ -682,34 +851,11 @@ export async function parseSessionFile(
+@@ -686,33 +854,11 @@ export async function parseSessionFile(
  				toolResults: [],
  				spotlight: emptySpotlightRows(),
  				newOffset: fromOffset,
@@ -1348,7 +1336,6 @@ index c8e7d2c..adcf6c1 100644
 -		parserState: {
 -			version: 1,
 -			offset: newOffset,
--			dev: info.dev,
 -			ino: info.ino,
 -			birthtimeMs: info.birthtimeMs,
 -			size: info.size,
@@ -1361,7 +1348,7 @@ index c8e7d2c..adcf6c1 100644
  }
  
  /**
-@@ -767,19 +913,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
+@@ -770,19 +916,24 @@ export async function listAllSessionFiles(): Promise<string[]> {
  }
  
  /**

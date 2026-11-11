@@ -36,7 +36,7 @@ index 24eb6b5..5cf7e51 100644
  		case "mode":
  			return [
 diff --git a/packages/coding-agent/test/modes/components/status-line/component.test.ts b/packages/coding-agent/test/modes/components/status-line/component.test.ts
-index ca1305c..4021217 100644
+index ace536a..9231a87 100644
 --- a/packages/coding-agent/test/modes/components/status-line/component.test.ts
 +++ b/packages/coding-agent/test/modes/components/status-line/component.test.ts
 @@ -1,9 +1,14 @@
@@ -56,7 +56,7 @@ index ca1305c..4021217 100644
  import type { AgentSession } from "../../../../src/session/agent-session";
  import { StatusLineTestComponents } from "../../../helpers/status-line";
  
-@@ -241,4 +246,64 @@ describe("StatusLineComponent", () => {
+@@ -239,4 +244,65 @@ describe("StatusLineComponent", () => {
  			setThemeInstance(baseTheme);
  		}
  	});
@@ -79,6 +79,7 @@ index ca1305c..4021217 100644
 +			sessionId: "primary-session",
 +			modelRegistry: {
 +				isUsingOAuth: () => true,
++				isUsingSubscription: () => true,
 +				authStorage: {
 +					oauth: {
 +						accounts: (provider: string) => (provider === "anthropic" ? accounts : advisorAccounts),

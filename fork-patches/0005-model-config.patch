@@ -1,8 +1,8 @@
 diff --git a/docs/settings.md b/docs/settings.md
-index a0ab336..6acd5f4 100644
+index 5635d70..8e99515 100644
 --- a/docs/settings.md
 +++ b/docs/settings.md
-@@ -613,6 +613,10 @@ A prompt whose active model has no usable credential walks the same chain before
+@@ -615,6 +615,10 @@ A prompt whose active model has no usable credential walks the same chain before
  
  Retry model fallback is not context promotion. `contextPromotion.enabled: false` only disables [context promotion](./models.md#context-promotion) to a model's `contextPromotionTarget`; set `retry.modelFallback: false` to stop `retry.fallbackChains` from switching the active model after provider errors. Same-model retries and compaction remain available.
  
@@ -13,7 +13,7 @@ index a0ab336..6acd5f4 100644
  ### Tools and approvals
  
  ```yaml
-@@ -921,6 +925,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
+@@ -923,6 +927,7 @@ The `pi` segment tags the brand with the active named profile (`π-work`; see [P
  
  The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
  
@@ -21,7 +21,7 @@ index a0ab336..6acd5f4 100644
  The `cache` segment (in the `full` and `nerd` presets) shows before you send whether the next message reads the prompt cache: a dim database glyph while it does, struck through in the warning colour once the entry expired, omp's warm refresh missed it, the context was compacted, or the model, thinking level, tools, system prompt or cache retention changed. The Unicode symbol preset draws `●`/`⊘`, ASCII `cache`/`!cache`. It is hidden when nothing has used the cache yet, the model declares no cache lifetime, or the session is a subagent's; entries a provider keeps indefinitely (logged-in Codex) never expire. A reopened session is read off its newest cached reply and shown as likely cached. In Tern, hovering the marker says until when the entry holds (or why not) and how much the next message sends; clicking it opens `/session`, whose Prompt Cache section adds the tier and the warming schedule.
  
  ### Interaction
-@@ -1003,6 +1008,8 @@ capability gating, model/request vetoes, hooks, chaining and recovery tradeoffs.
+@@ -1005,6 +1010,8 @@ capability gating, model/request vetoes, hooks, chaining and recovery tradeoffs.
  | `providers.fetch`                          | enum    | `auto`     | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
  | `providers.tinyModelDevice`                | enum    | `default`  | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
  | `providers.maxInFlightRequests`            | record  | `{}`       | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -361,10 +361,10 @@ index 28e44ea..379daf9 100644
  	if (patch.api !== undefined) result.api = patch.api;
  	if (patch.kind !== undefined) {
 diff --git a/packages/coding-agent/src/config/model-registry.ts b/packages/coding-agent/src/config/model-registry.ts
-index 3f8a25f..6f79b79 100644
+index e2c174f..24b69e7 100644
 --- a/packages/coding-agent/src/config/model-registry.ts
 +++ b/packages/coding-agent/src/config/model-registry.ts
-@@ -1826,9 +1826,22 @@ export class ModelRegistry {
+@@ -1845,9 +1845,22 @@ export class ModelRegistry {
  		return models;
  	}
  
@@ -388,7 +388,7 @@ index 3f8a25f..6f79b79 100644
  	}
  
  	#loadCachedDiscoverableModels(): Model<Api>[] {
-@@ -2992,6 +3005,7 @@ export class ModelRegistry {
+@@ -3013,6 +3026,7 @@ export class ModelRegistry {
  			headers?: Record<string, string>;
  			resolveHeaders?: Model<Api>["resolveHeaders"];
  			remoteCompaction?: RemoteCompactionConfig<Api>;
@@ -396,7 +396,7 @@ index 3f8a25f..6f79b79 100644
  		},
  	>(
  		entry: T,
-@@ -3000,15 +3014,28 @@ export class ModelRegistry {
+@@ -3021,15 +3035,28 @@ export class ModelRegistry {
  			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
  		>,
  	): T {
