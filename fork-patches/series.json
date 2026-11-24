@@ -2,8 +2,8 @@
 	"base": "v19.1.1",
 	"baseCommit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
 	"head": "HEAD",
-	"headCommit": "2266e4f08e60bebc3ac08571922081092e46de31",
-	"generated": "2026-11-24T21:21:51.190Z",
+	"headCommit": "6cd7dea240b0e965d3e8eeb5f145e0275366840b",
+	"generated": "2026-11-24T21:29:13.863Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -118,6 +118,7 @@
 				"packages/coding-agent/test/cli/update-cli.test.ts",
 				"packages/coding-agent/test/event-controller-error-banner.test.ts",
 				"packages/coding-agent/test/model-discovery.test.ts",
+				"packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts",
 				"packages/tui/src/status-line/component.ts",
 				"packages/tui/src/status-line/host.ts",
 				"packages/tui/src/status-line/segments.ts",

@@ -673,13 +673,19 @@ index f8db830..21db1f3 100644
 +Older entries are archived in [packages/ai/CHANGELOG.md@0f88ff08d2bb](https://github.com/can1357/oh-my-pi/blob/0f88ff08d2bbdd1d3eeb39dd15557986a27f75a5/packages/ai/CHANGELOG.md).
  Older entries are archived in [packages/ai/CHANGELOG.md@02eb912b7688](https://github.com/can1357/oh-my-pi/blob/02eb912b76887f1a06bc65e2352ef96742ec1067/packages/ai/CHANGELOG.md).
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index d728cac..3790b62 100644
+index d728cac..bef1407 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,126 @@
+@@ -2,6 +2,132 @@
  
  ## [Unreleased]
  
++## [19.1.1-fork.2] - 2026-11-25
++
++### Fixed
++
++- An error from a turn that ended after the next run had already started no longer shows as an error banner over the new run.
++
 +## [19.1.1-fork.1] - 2026-11-25
 +
 +### Changed
@@ -803,7 +809,7 @@ index d728cac..3790b62 100644
  ## [19.1.1] - 2026-11-23
  
  ### Breaking Changes
-@@ -1411,4 +1531,1130 @@
+@@ -1411,4 +1537,1130 @@
  - Fixed `/tan` clones ending without a final answer when they call `ask`; the clone now keeps running and the parent receives its final answer instead of an empty result ([#17223](https://github.com/can1357/oh-my-pi/pull/17223) by [@trukhinyuri](https://github.com/trukhinyuri))
  - Fixed GitHub `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
  
