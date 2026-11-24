@@ -160,22 +160,22 @@ index 0000000..18cfbed
 +Neither removes your profile at `~/.omp`, which holds sessions, settings, and credentials. Delete it
 +separately if you want a clean slate.
 diff --git a/package.json b/package.json
-index e6f2080..2ec243d 100644
+index 7aaa673..a1b2ab4 100644
 --- a/package.json
 +++ b/package.json
 @@ -20,11 +20,11 @@
- 			"@oh-my-pi/pi-agent-core": "18.18.8",
- 			"@oh-my-pi/pi-ai": "18.18.8",
- 			"@oh-my-pi/pi-catalog": "18.18.8",
--			"@oh-my-pi/pi-coding-agent": "18.18.8",
-+			"@oh-my-pi/pi-coding-agent": "18.18.8-fork.1",
- 			"@oh-my-pi/pi-mnemopi": "18.18.8",
- 			"@oh-my-pi/pi-natives": "18.18.8",
- 			"@oh-my-pi/pi-tui": "18.18.8",
--			"@oh-my-pi/pi-utils": "18.18.8",
-+			"@oh-my-pi/pi-utils": "18.18.8-fork.1",
- 			"@oh-my-pi/pi-wire": "18.18.8",
- 			"@oh-my-pi/snapcompact": "18.18.8",
+ 			"@oh-my-pi/pi-agent-core": "19.1.1",
+ 			"@oh-my-pi/pi-ai": "19.1.1",
+ 			"@oh-my-pi/pi-catalog": "19.1.1",
+-			"@oh-my-pi/pi-coding-agent": "19.1.1",
++			"@oh-my-pi/pi-coding-agent": "19.1.1-fork.1",
+ 			"@oh-my-pi/pi-mnemopi": "19.1.1",
+ 			"@oh-my-pi/pi-natives": "19.1.1",
+ 			"@oh-my-pi/pi-tui": "19.1.1",
+-			"@oh-my-pi/pi-utils": "19.1.1",
++			"@oh-my-pi/pi-utils": "19.1.1-fork.1",
+ 			"@oh-my-pi/pi-wire": "19.1.1",
+ 			"@oh-my-pi/snapcompact": "19.1.1",
  			"@opentelemetry/api": "^1.9.1",
 diff --git a/packages/ai/test/openai-compat-user-agent.test.ts b/packages/ai/test/openai-compat-user-agent.test.ts
 index 670e787..35ce2f8 100644
@@ -191,14 +191,14 @@ index 670e787..35ce2f8 100644
  
  	test("xAI OAuth Responses POST sends omp User-Agent", async () => {
 diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
-index a860856..217b8e8 100644
+index d80bbc0..067991e 100644
 --- a/packages/coding-agent/package.json
 +++ b/packages/coding-agent/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-coding-agent",
--	"version": "18.18.8",
-+	"version": "18.18.8-fork.1",
+-	"version": "19.1.1",
++	"version": "19.1.1-fork.1",
  	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
  	"keywords": [
  		"agent",
@@ -343,34 +343,30 @@ index 0000000..b935289
 +	return release;
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 49d3988..b7b1385 100644
+index 6b8defd..e6a8aa1 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
-@@ -11,6 +11,7 @@ import { Transform } from "node:stream";
- import { pipeline } from "node:stream/promises";
+@@ -9,6 +9,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
  import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
  import {
 +	$env,
  	$which,
  	APP_NAME,
  	compareVersions,
-@@ -33,7 +34,14 @@ import {
- 	unsupportedProxyMessage,
- 	withTimeoutSignal,
- } from "../utils/fetch-timeout";
--import { type BuildAnswer, type BuildPatch, type Fetch, fetchBuild, type UpdateChannel } from "./build-service";
-+import {
-+	type BuildAnswer,
-+	type BuildPatch,
+@@ -36,9 +37,11 @@ import {
+ 	BUILD_DOWNLOAD_TIMEOUT_MS,
+ 	type BuildAnswer,
+ 	type BuildPatch,
 +	currentBuildHost,
-+	type Fetch,
-+	fetchBuild,
-+	type UpdateChannel,
-+} from "./build-service";
- import {
- 	DEFAULT_NPM_REGISTRY,
- 	loadNpmRegistryResolver,
-@@ -41,6 +49,12 @@ import {
+ 	downloadBuildFile,
+ 	type Fetch,
+ 	fetchBuild,
++	OMP_BUILD,
+ 	type UpdateChannel,
+ } from "./build-service";
+ import { managedInstallName } from "./managed-install";
+@@ -49,6 +52,12 @@ import {
  	type NpmRegistryResolver,
  	npmRegistryPackageUrl,
  } from "./npm-registry";
@@ -383,15 +379,15 @@ index 49d3988..b7b1385 100644
  
  import { cfgUpdateChannel } from "../modes/settings";
  
-@@ -48,6 +62,7 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
+@@ -56,6 +65,7 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
  const HOMEBREW_FORMULA = "can1357/tap/omp";
  const MISE_TOOL = "github:can1357/oh-my-pi";
  const NIX_STORE_DIR = "/nix/store";
 +const GITHUB_API = "https://api.github.com";
  const RELEASE_METADATA_TIMEOUT_MS = 30_000;
- const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
  
-@@ -1089,7 +1104,7 @@ async function pruneBunCacheAfterGlobalInstall(): Promise<BunInstallCachePruneRe
+ /**
+@@ -999,7 +1009,7 @@ async function pruneBunCacheAfterGlobalInstall(): Promise<BunInstallCachePruneRe
   * Resolve the path that `omp` maps to in the user's PATH.
   */
  function resolveOmpPath(): string | undefined {
@@ -400,7 +396,7 @@ index 49d3988..b7b1385 100644
  }
  
  /**
-@@ -2374,6 +2389,154 @@ async function runManagedUpdate(
+@@ -2318,6 +2328,154 @@ async function runManagedUpdate(
  	return { kind: "installed", version: installed };
  }
  
@@ -513,7 +509,7 @@ index 49d3988..b7b1385 100644
 +
 +/** This host's binary asset of a fork release, resolved from its GitHub release metadata. */
 +async function fetchForkReleaseBuild(release: ForkReleaseInfo): Promise<BuildAnswer> {
-+	const { fileName } = await currentBuildHost();
++	const fileName = OMP_BUILD.fileName(await currentBuildHost(), release.version);
 +	const response = await fetchReleaseMetadata(
 +		`${GITHUB_API}/repos/${release.repo}/releases/tags/${encodeURIComponent(release.tag)}`,
 +		await resolveGitHubToken(),
@@ -555,7 +551,7 @@ index 49d3988..b7b1385 100644
  /**
   * Run the update command.
   *
-@@ -2407,6 +2570,9 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
+@@ -2351,6 +2509,9 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
  		persistChannel: opts.channel !== undefined,
  		onProgress: opts.onProgress,
  	};
@@ -627,10 +623,10 @@ index 0000000..25c6094
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index acee3da..a7f894e 100644
+index 027d9c3..1547499 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -160,6 +160,118 @@ describe("update command plugin dispatch", () => {
+@@ -158,6 +158,118 @@ describe("update command plugin dispatch", () => {
  	});
  });
  
@@ -750,14 +746,14 @@ index acee3da..a7f894e 100644
  	it("preserves the legacy plugin update shorthand", () => {
  		expect(parseUpdateArgs(["update", "-l"])).toEqual({
 diff --git a/packages/utils/package.json b/packages/utils/package.json
-index 36199c4..1c3795d 100644
+index eee611d..d072478 100644
 --- a/packages/utils/package.json
 +++ b/packages/utils/package.json
 @@ -1,6 +1,6 @@
  {
  	"name": "@oh-my-pi/pi-utils",
--	"version": "18.18.8",
-+	"version": "18.18.8-fork.1",
+-	"version": "19.1.1",
++	"version": "19.1.1-fork.1",
  	"description": "Shared utilities for pi packages",
  	"keywords": [
  		"cli",
@@ -873,11 +869,11 @@ index 0000000..51ef339
 +	}, 30_000);
 +});
 diff --git a/scripts/ci-test-ts.ts b/scripts/ci-test-ts.ts
-index b73fde5..a8741f0 100755
+index b9cc2b3..eb8e3be 100755
 --- a/scripts/ci-test-ts.ts
 +++ b/scripts/ci-test-ts.ts
-@@ -27,12 +27,21 @@ interface TestCommand {
- 	parallel?: number;
+@@ -30,12 +30,21 @@ interface TestCommand {
+ 	estimatedSeconds?: number;
  }
  
 +interface TestPlan {
@@ -899,7 +895,7 @@ index b73fde5..a8741f0 100755
  // `--only-failures` is Bun's output filter — it hides passing tests within each
  // chunk, keeping the log terse, and is the default here (CI and the root
  // `test:ts` aggregate append it). It does NOT skip tests or share any
-@@ -207,6 +216,24 @@ function shellQuote(value: string): string {
+@@ -239,6 +248,24 @@ function shellQuote(value: string): string {
  	return `'${value.replaceAll("'", `'\\''`)}'`;
  }
  
@@ -924,8 +920,8 @@ index b73fde5..a8741f0 100755
  function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
  	const { extraArgs = [] } = options;
  	return {
-@@ -307,10 +334,18 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition>
- 	return codingAgentTestPartitionPromise;
+@@ -534,17 +561,25 @@ function balancedChunks(testFiles: string[], chunkSize: number, weights: Map<str
+ 	return chunks.sort((a, b) => b.seconds - a.seconds);
  }
  
 -async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestCommand[]> {
@@ -945,11 +941,18 @@ index b73fde5..a8741f0 100755
  		throw new Error(`No coding-agent ${bucket} tests matched`);
  	}
  	const plan = codingAgentBucketPlans[bucket];
-@@ -327,15 +362,18 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
- 			parallel: plan.parallel,
- 		});
- 	}
--	return commands;
+ 	const chunkSize = plan.chunkSize ?? testFiles.length;
+ 	const weights = bucketFileWeights(testFiles, await getTimingHistory());
+ 	const chunks = weights ? balancedChunks(testFiles, chunkSize, weights) : consecutiveChunks(testFiles, chunkSize);
+-	return chunks.map((chunk, index) => {
++	const commands = chunks.map((chunk, index): TestCommand => {
+ 		const chunkLabel = chunks.length > 1 ? ` chunk ${index + 1}/${chunks.length}` : "";
+ 		return {
+ 			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.files.length} files)`,
+@@ -554,14 +589,18 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
+ 			estimatedSeconds: chunk.seconds === undefined ? undefined : roundSeconds(chunk.seconds),
+ 		};
+ 	});
 +	return testPlan(commands, testFiles.map(normalizeCodingAgentTestFilter));
  }
  
@@ -968,7 +971,7 @@ index b73fde5..a8741f0 100755
  		case "coding-agent-singleton":
  			return await codingAgentTestCommands("singleton");
  		case "coding-agent-ui":
-@@ -345,36 +383,40 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
+@@ -571,36 +610,40 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
  		case "coding-agent-native":
  			return await codingAgentTestCommands("native");
  		case "coding-agent-heavy":
@@ -1028,7 +1031,7 @@ index b73fde5..a8741f0 100755
  	}
  }
  
-@@ -1015,7 +1057,14 @@ if (!(requestedMode in validModes)) {
+@@ -1338,7 +1381,14 @@ if (!(requestedMode in validModes)) {
  	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`);
  }
  

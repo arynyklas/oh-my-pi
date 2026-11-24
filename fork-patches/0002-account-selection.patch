@@ -1,8 +1,8 @@
 diff --git a/packages/ai/src/auth-broker/discover.ts b/packages/ai/src/auth-broker/discover.ts
-index 20969f4..9f735ff 100644
+index 58e3572..8270b57 100644
 --- a/packages/ai/src/auth-broker/discover.ts
 +++ b/packages/ai/src/auth-broker/discover.ts
-@@ -50,6 +50,10 @@ export interface DiscoverAuthStorageOptions {
+@@ -53,6 +53,10 @@ export interface DiscoverAuthStorageOptions {
  	accountPool?: AuthBrokerAccountPool;
  	accountPolicies?: AuthAccountPolicies;
  	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
@@ -10,10 +10,10 @@ index 20969f4..9f735ff 100644
 +	defaultAccounts?: Readonly<Record<string, string>>;
 +	/** Per-provider ordered account preference, overriding `providers.accountPriority` from config.yml. */
 +	accountPriorities?: Readonly<Record<string, readonly string[]>>;
- }
- 
- /** Path to the local bearer token file. Created by `omp auth-broker token`. */
-@@ -85,6 +89,8 @@ interface ConfigSnapshot {
+ 	/**
+ 	 * Without a usable snapshot cache, retry a broker that is restarting or
+ 	 * briefly unreachable for up to 30 s (default `true`). A host with a user
+@@ -109,6 +113,8 @@ interface ConfigSnapshot {
  	token?: string;
  	accountPolicies?: unknown;
  	usageReservePct?: unknown;
@@ -22,7 +22,7 @@ index 20969f4..9f735ff 100644
  }
  
  /**
-@@ -206,6 +212,66 @@ function parseUsageReservePct(value: unknown): number {
+@@ -230,6 +236,66 @@ function parseUsageReservePct(value: unknown): number {
  	return reservePct;
  }
  
@@ -89,7 +89,7 @@ index 20969f4..9f735ff 100644
  async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  	for (const filename of MAIN_CONFIG_FILENAMES) {
  		const configPath = path.join(agentDir, filename);
-@@ -234,6 +300,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+@@ -258,6 +324,8 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
  			token: readDottedString(record, "auth.broker.token"),
  			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
  			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
@@ -98,7 +98,7 @@ index 20969f4..9f735ff 100644
  		};
  	}
  	return {};
-@@ -523,6 +591,12 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+@@ -627,6 +695,12 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
  		accountPolicies: options.accountPolicies,
  		usageReservePct: options.authStorageOptions?.defaultReservePct,
  	});
@@ -111,7 +111,7 @@ index 20969f4..9f735ff 100644
  	const { store, sourceLabel } = await openAuthCredentialStore({
  		brokerConfig,
  		agentDir,
-@@ -536,6 +610,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
+@@ -642,6 +716,8 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions =
  		sourceLabel,
  		accountPolicies,
  		defaultReservePct,
@@ -1364,7 +1364,7 @@ index 0000000..654e3b6
 +	});
 +});
 diff --git a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
-index f1bbd26..c9cc905 100644
+index 7ed399c..99d1474 100644
 --- a/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
 +++ b/packages/ai/test/auth-storage-force-refresh-rotate.test.ts
 @@ -69,7 +69,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
@@ -2490,10 +2490,10 @@ index eb64b2e..131cd78 100644
  	OAuthAccountSummary,
  	OAuthCredential,
 diff --git a/packages/coding-agent/src/session/session-advisors.ts b/packages/coding-agent/src/session/session-advisors.ts
-index c31eb11..6051753 100644
+index b3485a8..755e71c 100644
 --- a/packages/coding-agent/src/session/session-advisors.ts
 +++ b/packages/coding-agent/src/session/session-advisors.ts
-@@ -557,6 +557,18 @@ export interface AdvisorStatusOverviewEntry {
+@@ -581,6 +581,18 @@ export interface AdvisorStatusOverviewEntry {
  	isPaused: boolean;
  }
  
@@ -2512,7 +2512,7 @@ index c31eb11..6051753 100644
  /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
  export class SessionAdvisors {
  	readonly #host: SessionAdvisorsHost;
-@@ -2955,6 +2967,27 @@ export class SessionAdvisors {
+@@ -3010,6 +3022,27 @@ export class SessionAdvisors {
  		return { configured: this.#advisorEnabled, advisors };
  	}
  
@@ -2679,7 +2679,7 @@ index 0000000..2cbd8b2
 +	return { moved: true, rank: target + 1, total: list.length };
 +}
 diff --git a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
-index 95722a5..f821344 100644
+index 2303cc5..595fed8 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/active-oauth-account.ts
 @@ -1,6 +1,7 @@
@@ -2692,7 +2692,7 @@ index 95722a5..f821344 100644
  
  /** Codex's orgName is the login-time plan, not a workspace name. */
  export function codexUsagePlan(report: UsageReport): string | undefined {
-@@ -80,6 +81,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
+@@ -87,6 +88,33 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
  	return org && org !== base ? `${base} (${org})` : base;
  }
  
@@ -2726,7 +2726,7 @@ index 95722a5..f821344 100644
  /**
   * True when a single usage-limit column belongs to the given OAuth identity.
   *
-@@ -140,3 +168,29 @@ export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthA
+@@ -160,3 +188,29 @@ export function reportMatchesActiveAccount(report: UsageReport, identity: Active
  	if (!identity) return false;
  	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
  }

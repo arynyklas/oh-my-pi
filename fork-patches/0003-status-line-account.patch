@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-index 24eb6b5..5cf7e51 100644
+index f335bf0..e637ff4 100644
 --- a/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
 +++ b/packages/coding-agent/src/cli/gallery-fixtures/segments.ts
-@@ -108,6 +108,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
+@@ -114,6 +114,32 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
  				{ label: "advisor error", session: { advisorStatus: "error" } },
  				{ label: "advisor paused", session: { advisorStatus: "paused" } },
  				{ label: "advisor done (yielded)", session: { advisorStatus: "running", advisorYielded: true } },

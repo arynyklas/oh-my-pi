@@ -1,9 +1,9 @@
 {
-	"base": "v18.18.8",
-	"baseCommit": "679691a78141de0dd6ba1b7a5d5c1b1d7d967a63",
+	"base": "v19.1.1",
+	"baseCommit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
 	"head": "HEAD",
-	"headCommit": "a9ace737500baa1f24c186eda80f2c8e1e5a240f",
-	"generated": "2026-11-11T12:33:43.596Z",
+	"headCommit": "2266e4f08e60bebc3ac08571922081092e46de31",
+	"generated": "2026-11-24T21:21:51.190Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -78,7 +78,8 @@
 				"packages/stats/src/parser.ts",
 				"packages/stats/src/sync-worker.ts",
 				"packages/stats/test/parser-large-session.test.ts",
-				"packages/stats/test/priority-premium-requests.test.ts"
+				"packages/stats/test/priority-premium-requests.test.ts",
+				"packages/stats/test/reply-links.test.ts"
 			]
 		},
 		{
@@ -110,7 +111,6 @@
 				"packages/coding-agent/src/modes/status-line-host.ts",
 				"packages/coding-agent/src/modes/types.ts",
 				"packages/coding-agent/src/session/agent-session.ts",
-				"packages/coding-agent/src/session/session-worktree.ts",
 				"packages/coding-agent/src/session/settings.ts",
 				"packages/coding-agent/src/slash-commands/builtin-session.ts",
 				"packages/coding-agent/test/acp-builtins.test.ts",
@@ -118,8 +118,6 @@
 				"packages/coding-agent/test/cli/update-cli.test.ts",
 				"packages/coding-agent/test/event-controller-error-banner.test.ts",
 				"packages/coding-agent/test/model-discovery.test.ts",
-				"packages/coding-agent/test/modes/controllers/event-controller-superseded-agent-end.test.ts",
-				"packages/coding-agent/test/task/worktree.test.ts",
 				"packages/tui/src/status-line/component.ts",
 				"packages/tui/src/status-line/host.ts",
 				"packages/tui/src/status-line/segments.ts",
@@ -156,7 +154,7 @@
 				".gitignore",
 				"docs/models.md",
 				"docs/tools/bash.md",
-				"docs/tools/github.md",
+				"packages/ai/src/auth-gateway/caller-options.ts",
 				"packages/ai/src/auth/affinity.ts",
 				"packages/ai/src/auth/cascade.ts",
 				"packages/ai/src/auth/oauth.ts",
@@ -178,13 +176,10 @@
 				"packages/ai/src/types.ts",
 				"packages/ai/test/claude-block-healing.test.ts",
 				"packages/catalog/test/build.test.ts",
-				"packages/coding-agent/src/cli/worktree-cli.ts",
 				"packages/coding-agent/src/task/settings.ts",
-				"packages/coding-agent/src/task/worktree.ts",
 				"packages/coding-agent/src/thread/services/auth-protocol.ts",
 				"packages/coding-agent/src/thread/services/auth-remote.ts",
-				"packages/coding-agent/src/thread/services/auth.ts",
-				"packages/coding-agent/src/tools/gh-pr-checkout.ts"
+				"packages/coding-agent/src/thread/services/auth.ts"
 			]
 		}
 	]
