@@ -61,6 +61,29 @@ const DONE_END = {
 		},
 	],
 } as unknown as AgentSessionEvent;
+const ERROR_END = {
+	type: "agent_end",
+	messages: [
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "error",
+			errorMessage: "No eligible credential is available for this request",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		},
+	],
+} as unknown as AgentSessionEvent;
 
 describe("EventController agent_end teardown", () => {
 	beforeAll(async () => {
@@ -90,6 +113,23 @@ describe("EventController agent_end teardown", () => {
 
 		expect(loader.stop).toHaveBeenCalledTimes(1);
 		expect(ctx.loadingAnimation).toBeUndefined();
+	});
+
+	it("raises an unpresented error only for an end with no live successor run", async () => {
+		const { ctx, streamState } = createContext({ viewSessionIsMain: true });
+		const controller = new EventController(ctx);
+
+		// Stale end: the next run opened before the ended run's agent_end was dispatched.
+		streamState.mainRunActive = true;
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(ERROR_END);
+		expect(ctx.showError).not.toHaveBeenCalled();
+
+		// The live run's own terminal end surfaces the error the transcript never showed.
+		await controller.handleEvent(AGENT_START);
+		streamState.mainRunActive = false;
+		await controller.handleEvent(ERROR_END);
+		expect(ctx.showError).toHaveBeenCalledWith("No eligible credential is available for this request");
 	});
 
 	it("releases the worker's loader when a focused worker ends while the main session's run goes on", async () => {

@@ -2521,7 +2521,8 @@ export class EventController {
 			}
 		} else {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
-			const fallback = this.#terminalErrorPresented ? undefined : this.#agentEndErrorMessage(event);
+			// A stale end whose successor run is already live must not raise its error over the new run.
+			const fallback = runActive || this.#terminalErrorPresented ? undefined : this.#agentEndErrorMessage(event);
 			await this.#finishAgentEnd(event);
 			if (fallback !== undefined) {
 				const sanitizedFallback = previewLine(fallback, TRUNCATE_LENGTHS.LINE) || "Unknown error";

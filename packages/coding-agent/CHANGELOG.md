@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [19.1.1-fork.2] - 2026-11-25
+
+### Fixed
+
+- An error from a turn that ended after the next run had already started no longer shows as an error banner over the new run.
+
 ## [19.1.1-fork.1] - 2026-11-25
 
 ### Changed
