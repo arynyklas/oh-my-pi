@@ -13,6 +13,7 @@
  *
  * Replaces the old SessionObserverOverlayComponent (ctrl+s observer).
  */
+import { toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
 	TspPickerAction,
@@ -33,11 +34,13 @@ import {
 	type AgentActivityKind,
 	type AgentActivityRow,
 	activityRowsFromProgress,
+	activitySummaryLabel,
 } from "./agent-activity";
 import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import { agentColored } from "./agent-identity";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
 import { shortenPath, truncateToWidth } from "../render/render-utils";
 import { formatLocalDateTimeWithOffset } from "../chrome/local-date";
@@ -124,11 +127,11 @@ type ActivityScope = "all" | "agent" | "subtree";
 type HubViewMode = "roster" | "tree";
 /** The roster's status scopes: what a phone filters agents by. */
 type StatusScope = "all" | "running" | "done" | "parked";
-const STATUS_SCOPES: readonly { id: StatusScope; label: string; status?: AgentRecordLike["status"] }[] = [
-	{ id: "all", label: "All" },
-	{ id: "running", label: "Running", status: "running" },
-	{ id: "done", label: "Done", status: "idle" },
-	{ id: "parked", label: "Parked", status: "parked" },
+const STATUS_SCOPES: readonly { id: StatusScope; label: string; icon: string; status?: AgentRecordLike["status"] }[] = [
+	{ id: "all", label: "All", icon: "list" },
+	{ id: "running", label: "Running", icon: "play", status: "running" },
+	{ id: "done", label: "Done", icon: "check", status: "idle" },
+	{ id: "parked", label: "Parked", icon: "pause", status: "parked" },
 ];
 
 const SECTION_TABS = [
@@ -984,11 +987,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	/** The status scopes with their counts over the whole session. */
-	#statusScopes(): { id: string; label: string; count: number }[] {
+	#statusScopes(): TspPickerScope[] {
 		const refs = this.#sessionRefs();
 		return STATUS_SCOPES.map(scope => ({
 			id: scope.id,
 			label: scope.label,
+			icon: scope.icon,
 			count: scope.status ? refs.filter(ref => ref.status === scope.status).length : refs.length,
 		}));
 	}
@@ -1151,7 +1155,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 					text([span(activityClock(activity.timestamp), "mono dim")]),
 					text([activityGlyphSpan(activity)]),
 					text([span(sanitizeDisplaySingleLine(name), "mono muted")]),
-					text(sanitizeDisplaySingleLine(activity.summary), { truncate: "end", grow: 1 }),
+					text(sanitizeDisplaySingleLine(activitySummaryLabel(activity)), { truncate: "end", grow: 1 }),
 				],
 				key,
 			);
@@ -1208,7 +1212,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			id: activity.id,
 			label: sanitizeDisplaySingleLine(title),
 			mono: activity.kind === "tool" || undefined,
-			detail: sanitizeDisplaySingleLine(activity.summary),
+			detail: sanitizeDisplaySingleLine(activitySummaryLabel(activity)),
 			icon: ACTIVITY_KIND_ICON[activity.kind],
 			dot: activity.status === "pending" ? "pending" : undefined,
 			tone,
@@ -1485,7 +1489,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (task) facts.push({ k: "Task", v: taskSummary(task) });
 		const current = progress?.currentTool
 			? `${progress.currentTool}${progress.currentToolArgs ? `${dot}${progress.currentToolArgs}` : ""}`
-			: (progress?.lastIntent ?? ref.activity);
+			: progress?.lastIntent === undefined
+				? ref.activity
+				: toolIntentLabel(progress.lastIntent);
 		if (current) {
 			const value = [span(sanitizeDisplaySingleLine(current))];
 			if (progress?.retryState) {
@@ -1548,7 +1554,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			"item",
 			{
 				label,
-				detail: sanitizeDisplaySingleLine(activity.summary),
+				detail: sanitizeDisplaySingleLine(activitySummaryLabel(activity)),
 				value: [span(activityClock(activity.timestamp), "dim")],
 			},
 			undefined,
@@ -1892,7 +1898,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			`${cursor} ${theme.fg("dim", activityClock(activity.timestamp))} ${activityGlyph(activity)} ` +
 			`${roleBadge}${theme.bold(agent)} ${theme.fg(activity.kind === "response" ? "success" : "muted", title)}`;
 		const available = Math.max(1, width - visibleWidth(prefix) - visibleWidth(theme.sep.dot));
-		return `${prefix}${theme.fg("dim", theme.sep.dot)}${sanitizeLine(activity.summary, available)}`;
+		return `${prefix}${theme.fg("dim", theme.sep.dot)}${sanitizeLine(activitySummaryLabel(activity), available)}`;
 	}
 	#renderTable(width: number, termHeight: number): string[] {
 		this.#hitRows.length = 0;
@@ -2192,7 +2198,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 		const current = progress?.currentTool
 			? `${progress.currentTool}${progress.currentToolArgs ? ` · ${progress.currentToolArgs}` : ""}`
-			: (progress?.lastIntent ?? ref.activity);
+			: progress?.lastIntent === undefined
+				? ref.activity
+				: toolIntentLabel(progress.lastIntent);
 		if (current) {
 			section("Current");
 			addWrapped(current);
@@ -2242,7 +2250,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			for (const event of activity) {
 				const title = sanitizeLine(event.kind === "tool" ? (event.toolName ?? event.title) : event.title, width);
 				const prefix = `${theme.fg("dim", activityClock(event.timestamp))} ${activityGlyph(event)} ${theme.fg("muted", title)} `;
-				add(`${prefix}${sanitizeLine(event.summary, Math.max(1, width - visibleWidth(prefix)))}`);
+				add(`${prefix}${sanitizeLine(activitySummaryLabel(event), Math.max(1, width - visibleWidth(prefix)))}`);
 			}
 		}
 		const maxScroll = Math.max(0, lines.length - rows);
@@ -2273,7 +2281,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			? treeBranch(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
 			: "";
 		const id = sanitizeDisplaySingleLine(ref.id);
-		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
+		const styledId = theme.bold(selected ? theme.fg("accent", id) : agentColored(theme, ref.id, id));
 		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status)} ${styledId}`];
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));

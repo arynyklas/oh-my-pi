@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	applyNestedPatches,
-	canCloneCheckoutInto,
 	captureBaseline,
 	captureDeltaPatch,
 	captureIsolationBaseline,
@@ -418,6 +417,76 @@ describe("worktree isolation helpers", () => {
 				}
 			});
 
+			// #18958: an agent that branches from a commit older than the baseline
+			// must not have the baseline commit's own changes reverted on its branch.
+			it("keeps the baseline commit when the agent commits from an older parent over dirty WIP", async () => {
+				await fs.writeFile(path.join(repo, "added-at-baseline.txt"), "baseline commit\n");
+				await runGit(repo, ["add", "added-at-baseline.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "baseline commit"]);
+				const baselineSha = await runGit(repo, ["rev-parse", "HEAD"]);
+				await fs.writeFile(path.join(repo, "staged.txt"), "user wip\n");
+				const baseline = await captureBaseline(repo);
+
+				const isoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-iso-"));
+				tempDirs.push(isoRoot);
+				const iso = path.join(isoRoot, "repo");
+				await runGit(isoRoot, ["clone", "-q", repo, iso]);
+				await runGit(iso, ["config", "user.email", "test@example.com"]);
+				await runGit(iso, ["config", "user.name", "Test User"]);
+				await fs.writeFile(path.join(iso, "staged.txt"), "user wip\n");
+				// The WIP carries over the checkout; the agent commits it along with its edit.
+				await runGit(iso, ["checkout", "-q", "-b", "work", initialSha]);
+				await fs.writeFile(path.join(iso, "merged.txt"), "agent edit\n");
+				await runGit(iso, ["commit", "-q", "-am", "agent edit from an older parent"]);
+				// Uncommitted work lands as a trailing commit, measured from the same fork point.
+				await fs.writeFile(path.join(iso, "leftover.txt"), "uncommitted\n");
+
+				const taskId = `older-parent-${path.basename(isoRoot)}`;
+				let branchName = `omp/task/${taskId}`;
+				try {
+					const commitResult = await commitToBranch(iso, baseline, taskId, "older parent");
+					if (!commitResult?.branchName) throw new Error("expected task branch");
+					branchName = commitResult.branchName;
+
+					expect(await runGit(repo, ["diff", "--name-status", baselineSha, branchName])).toBe(
+						"A\tleftover.txt\nM\tmerged.txt",
+					);
+					expect(await runGit(repo, ["show", `${branchName}:merged.txt`])).toBe("agent edit");
+				} finally {
+					await cleanupTaskBranches(repo, [branchName]);
+				}
+			});
+
+			it("keeps the baseline commit when the agent only leaves uncommitted work on an older parent", async () => {
+				await fs.writeFile(path.join(repo, "added-at-baseline.txt"), "baseline commit\n");
+				await runGit(repo, ["add", "added-at-baseline.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "baseline commit"]);
+				const baselineSha = await runGit(repo, ["rev-parse", "HEAD"]);
+				await fs.writeFile(path.join(repo, "staged.txt"), "user wip\n");
+				const baseline = await captureBaseline(repo);
+
+				const isoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-iso-"));
+				tempDirs.push(isoRoot);
+				const iso = path.join(isoRoot, "repo");
+				await runGit(isoRoot, ["clone", "-q", repo, iso]);
+				await fs.writeFile(path.join(iso, "staged.txt"), "user wip\n");
+				// No agent commit: the task branch comes from the no-commit path alone.
+				await runGit(iso, ["checkout", "-q", "-b", "work", initialSha]);
+				await fs.writeFile(path.join(iso, "agent.txt"), "uncommitted\n");
+
+				const taskId = `older-uncommitted-${path.basename(isoRoot)}`;
+				let branchName = `omp/task/${taskId}`;
+				try {
+					const commitResult = await commitToBranch(iso, baseline, taskId, "older parent, uncommitted");
+					if (!commitResult?.branchName) throw new Error("expected task branch");
+					branchName = commitResult.branchName;
+
+					expect(await runGit(repo, ["diff", "--name-status", baselineSha, branchName])).toBe("A\tagent.txt");
+				} finally {
+					await cleanupTaskBranches(repo, [branchName]);
+				}
+			});
+
 			it("subtracts baseline dirty state even when the task commits it", async () => {
 				await Promise.all([
 					fs.writeFile(path.join(repo, "merged.txt"), "baseline dirty change\n"),
@@ -594,37 +663,34 @@ describe("getRepoRoot", () => {
 
 		expect(await getRepoRoot(inner)).toBe(inner);
 	});
-});
 
-// #16076: the clone copies the whole source checkout, so a destination inside
-// it (`.worktrees/<name>`) was copied into itself until the path was too long.
-describe("canCloneCheckoutInto", () => {
-	it("refuses the checkout root and destinations inside it", async () => {
-		const repo = await createGitRepo();
-		expect(await canCloneCheckoutInto(repo, repo)).toBe(false);
-		expect(await canCloneCheckoutInto(repo, path.join(repo, ".worktrees", "a"))).toBe(false);
-	});
+	describe("bare-repository container (#19791)", () => {
+		// `repo/.git` is bare and the work tree lives in `repo/.worktrees/main`.
+		async function createBareContainer(): Promise<{ container: string; worktree: string }> {
+			const source = await createGitRepo();
+			await runGit(source, ["config", "user.email", "test@example.com"]);
+			await runGit(source, ["config", "user.name", "Test User"]);
+			await runGit(source, ["commit", "-q", "--allow-empty", "-m", "init"]);
+			const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bare-container-"));
+			tempDirs.push(container);
+			const gitDir = path.join(container, ".git");
+			await runGit(container, ["clone", "-q", "--bare", source, gitDir]);
+			const worktree = path.join(container, ".worktrees", "main");
+			await runGit(gitDir, ["worktree", "add", "-q", worktree, "main"]);
+			return { container, worktree };
+		}
 
-	it("allows destinations outside the checkout, including siblings sharing its name prefix", async () => {
-		const repo = await createGitRepo();
-		expect(await canCloneCheckoutInto(repo, `${repo}-wt`)).toBe(true);
-		expect(await canCloneCheckoutInto(repo, path.join(path.dirname(repo), "elsewhere", "a"))).toBe(true);
-	});
+		it("rejects the container, which has no work tree, and names its work trees", async () => {
+			const { container, worktree } = await createBareContainer();
+			const rejection = getRepoRoot(container);
+			await expect(rejection).rejects.toThrow(/requires a Git work tree/);
+			await expect(rejection).rejects.toThrow(await fs.realpath(worktree));
+		});
 
-	it("refuses an in-checkout destination reached through a junction", async () => {
-		const repo = await createGitRepo();
-		const aliasBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-clone-alias-"));
-		tempDirs.push(aliasBase);
-		const alias = path.join(aliasBase, "repo-link");
-		await fs.symlink(repo, alias, "junction");
-
-		expect(await canCloneCheckoutInto(repo, path.join(alias, ".worktrees", "a"))).toBe(false);
-		expect(await canCloneCheckoutInto(alias, path.join(repo, ".worktrees", "a"))).toBe(false);
-	});
-
-	it.skipIf(process.platform !== "win32")("compares Windows paths case-insensitively", async () => {
-		const repo = await createGitRepo();
-		expect(await canCloneCheckoutInto(repo, path.join(repo.toUpperCase(), ".WORKTREES", "A"))).toBe(false);
+		it("returns a linked work tree of the bare repository", async () => {
+			const { worktree } = await createBareContainer();
+			expect(await fs.realpath(await getRepoRoot(worktree))).toBe(await fs.realpath(worktree));
+		});
 	});
 });
 

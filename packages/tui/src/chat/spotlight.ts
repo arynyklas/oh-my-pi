@@ -1,8 +1,8 @@
 /**
  * The Spotlight experiment's trace on a tool result (`details.spotlight`, written by the coding agent's shaping
  * hooks and persisted with the message): what shaping did to the model-facing text, and, when it changed
- * it, where the original is and how Spotlight scored and kept its lines. A native transcript draws it as a notice
- * row under the tool card ({@link SpotlightNotice}); a click on a "saved" or "held out" notice opens the sheet.
+ * it, where the original is and how Spotlight scored and kept its lines. A native transcript draws a notice under
+ * the tool card for a cut, applied or held back, but not for a passthrough ({@link SpotlightNotice}).
  */
 import { formatNumber, isRecord } from "@oh-my-pi/pi-utils";
 import type { TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
@@ -14,16 +14,41 @@ import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions"
 /** Original lines a result's heat and the sheet cover; later lines are shown in neither. */
 export const SPOTLIGHT_VIEW_LINES = 5_000;
 
-/** The original of a result whose text shaping changed. */
-export interface SpotlightOriginal {
-	/** Session artifact holding the original text (`artifact://N`). */
-	url: string;
+/**
+ * One window of an original that several reads make up (a `;`/`,` path `read`, one window per part): where its lines
+ * sit in the original and how they are numbered.
+ */
+export interface SpotlightWindow {
+	/** 0-based position of its first line in the original. */
+	at: number;
 	/** Its line count. */
 	lines: number;
 	/** Line number of its first line: a `read` window's first file line, else 1. */
 	start: number;
-	/** The file a `read` showed (picks the sheet's grammar). */
+	/** The file it shows (picks its grammar); absent for text no file names (a fetched page). */
 	path?: string;
+	/** How the step that cut its lines by rank chose them, positions relative to the window; absent when none did. */
+	rank?: SpotlightRank;
+	/** The part read its file with no line selector (a whole-file read): a tail of the file lies in it. */
+	wholeFile?: true;
+}
+
+/** The original of a result whose text shaping changed. */
+export interface SpotlightOriginal {
+	/** Session spill holding the original text (`local://N.log`). */
+	url: string;
+	/** Its line count. */
+	lines: number;
+	/** Line number of its first line: a `read` window's first file line, else 1. With {@link windows}, 1. */
+	start: number;
+	/** The file a `read` showed (picks the sheet's grammar). Absent with {@link windows}. */
+	path?: string;
+	/**
+	 * The windows the original is made of, in order and covering it, when the result joins several reads (a `;`/`,`
+	 * path `read`): each numbered and ranked on its own, so {@link start}, {@link path} and {@link rank} are then
+	 * absent or 1. Absent for a result of one window: read it through {@link originalWindows}.
+	 */
+	windows?: SpotlightWindow[];
 	/**
 	 * One character per original line, from its first (at most {@link SPOTLIGHT_VIEW_LINES}): the line's rank among
 	 * the lines Spotlight scored, `0` (coldest) to `9` (hottest), `-` for a line it never scored. Lines past the end
@@ -37,7 +62,7 @@ export interface SpotlightOriginal {
 	 * hid the line. Absent on traces written before it.
 	 */
 	why?: string;
-	/** How the step that cut by rank chose its lines; absent when no step ranked them. */
+	/** How the step that cut by rank chose its lines; absent when no step ranked them, and with {@link windows}. */
 	rank?: SpotlightRank;
 	/**
 	 * One entry per line of the text the model saw (of a held-out result: the text it would have seen): the original
@@ -45,8 +70,25 @@ export interface SpotlightOriginal {
 	 * of its own (a shaping note).
 	 */
 	map?: (number | [number, number] | null)[];
-	/** A held-out result's would-be text, the cut the model was not shown (`artifact://N`). */
+	/** A held-out result's would-be text, the cut the model was not shown (`local://N.log`). */
 	shapedUrl?: string;
+}
+
+/**
+ * The windows an original is made of: its {@link SpotlightOriginal.windows}, else (also for an empty or malformed
+ * value) the one window it is.
+ */
+export function originalWindows(original: SpotlightOriginal): SpotlightWindow[] {
+	if (Array.isArray(original.windows) && original.windows.length > 0) return original.windows;
+	return [
+		{
+			at: 0,
+			lines: original.lines,
+			start: original.start,
+			...(original.path !== undefined ? { path: original.path } : {}),
+			...(original.rank ? { rank: original.rank } : {}),
+		},
+	];
 }
 
 /**
@@ -319,8 +361,6 @@ export function spotlightNoticeCard(original: SpotlightOriginal, heldOut = false
 	);
 }
 
-/** The notice's star when the model saw the original (passthrough, held out): Nerd Font `md-star_off_outline`. */
-const STAR_OFF = "\u{f155b}";
 /** The notice's star when shaping changed what the model saw: Nerd Font `fa-star`. */
 const STAR = "\uf005";
 /** {@link STAR} past {@link SHOOTING_STAR_TOKENS} saved: Nerd Font `md-star_shooting_outline`. */
@@ -329,16 +369,14 @@ const SHOOTING_STAR = "\u{f1742}";
 const SHOOTING_STAR_TOKENS = 10_000;
 
 /**
- * The notice's spans: Spotlight's star, then what shaping did to the result. A passthrough is the star alone. A
- * changed result's star is lit and pulses (Tern twinkles it), a shooting star past {@link SHOOTING_STAR_TOKENS} saved.
+ * A held-back cut explains why in text; an applied cut also pulses a star, shooting past {@link SHOOTING_STAR_TOKENS} saved.
  */
 function noticeSpans(spotlight: SpotlightDetails): TspSpan[] {
 	const saving = spotlightSaving(spotlight);
 	if (spotlight.holdout || spotlight.gated) {
 		const why = spotlight.gated ? "kept whole for editing" : "held out";
-		return [span(STAR_OFF, "icon"), span(`spotlight: ${why} · would save ${formatNumber(Math.max(0, saving))} toks`)];
+		return [span(`spotlight: ${why} · would save ${formatNumber(Math.max(0, saving))} toks`)];
 	}
-	if (!spotlight.original) return [span(STAR_OFF, "icon")];
 	const star = saving > SHOOTING_STAR_TOKENS ? SHOOTING_STAR : STAR;
 	return [
 		span(star, "icon", { fx: "pulse" }),
@@ -352,7 +390,7 @@ function noticeSpans(spotlight: SpotlightDetails): TspSpan[] {
 
 /**
  * The notice row under one tool card (role `omp.tool.spotlight`, key `spotlight:<toolCallId>`): muted for a
- * passthrough (its star alone, named by its tooltip) and for a held-out result, accent for a changed result
+ * held-back cut, accent for an applied cut
  * ({@link noticeSpans}). One with an original (changed or held out) has a hover card charting its heat
  * ({@link spotlightNoticeCard}) and a click that opens its sheet through the host's transcript actions. A native
  * transcript block of its own, placed right after its card ({@link Component.nativeTrailers}), so it shows while the
@@ -400,7 +438,7 @@ export class SpotlightNotice implements Component {
 							this.#spotlight.holdout === true || this.#spotlight.gated === true,
 						),
 					}
-				: { title: "Spotlight: passthrough", aria: "Spotlight: passthrough" }),
+				: {}),
 			...(original && hasTranscriptActions() ? { actions: { click: "spotlight" } } : {}),
 			...(this.#hidden ? { hidden: true } : {}),
 		});
@@ -437,7 +475,7 @@ export class SpotlightNotices {
 	set(toolCallId: string, details: unknown, reduced: string): boolean {
 		const spotlight = spotlightDetails(details);
 		const existing = this.#byCall.get(toolCallId);
-		if (!spotlight) {
+		if (!spotlight || !(spotlight.original || spotlight.holdout || spotlight.gated)) {
 			if (!existing) return false;
 			this.#byCall.delete(toolCallId);
 			this.#list = [...this.#byCall.values()];

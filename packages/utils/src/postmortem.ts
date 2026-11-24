@@ -747,7 +747,7 @@ export async function fatal(error: unknown): Promise<never> {
 async function sigtermCleanup(): Promise<void> {
 	// A stopped session otherwise leaves its last frame above the shell prompt,
 	// which reads as a crash.
-	await exitAfterSignal(Reason.SIGTERM, "\n[Stopped by SIGTERM]", 143); // 128 + SIGTERM (15)
+	await exitAfterSignal(Reason.SIGTERM, "\n[Stopped by SIGTERM]", stopSignalsAreRequests ? 0 : 143); // 128 + SIGTERM (15)
 }
 
 /** Transfer SIGTERM ownership to an embedding server without removing other listeners. */
@@ -762,6 +762,17 @@ process.on("exit", () => {
 });
 
 let processHandlersInstalled = false;
+/** Set by {@link exitCleanlyOnStopSignals}: SIGINT/SIGTERM exit 0 after cleanup. */
+let stopSignalsAreRequests = false;
+
+/**
+ * For a long-running service, SIGINT and SIGTERM are how a supervisor asks it to stop
+ * (a restart, `systemctl stop`, `docker stop`), not a failure: after the usual cleanup
+ * pass the process exits 0 instead of 128 + the signal number. SIGHUP keeps its code.
+ */
+export function exitCleanlyOnStopSignals(): void {
+	stopSignalsAreRequests = true;
+}
 
 /**
  * Exit through a termination signal: clean up, print the recovery hints, exit.
@@ -789,7 +800,7 @@ export function installProcessHandlers(): void {
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
-			exitProcess(130); // 128 + SIGINT (2)
+			exitProcess(stopSignalsAreRequests ? 0 : 130); // 128 + SIGINT (2)
 		})
 		.on("SIGUSR1", async () => {
 			if (inspectorOpened) return;

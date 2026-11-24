@@ -18,11 +18,13 @@ export type KnownApi =
 	| "google-generative-ai"
 	| "google-gemini-cli"
 	| "google-vertex"
+	| "kiro-api"
 	| "ollama-chat"
 	| "cursor-agent"
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
@@ -53,7 +55,10 @@ export const RUNNER_APIS = [
 	"typesafe",
 	"openrouter-decisions",
 	"openai-decisions",
+	"google-decisions",
 	"workers-ai-systemone",
+	"liquid-systemone",
+	"nace-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -69,7 +74,10 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
+	"google-decisions": "judge",
 	"workers-ai-systemone": "judge",
+	"liquid-systemone": "judge",
+	"nace-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -193,9 +201,9 @@ export interface ThinkingConfig {
 	requiresEffort?: boolean;
 	/**
 	 * The catalog has no evidence this model reasons (unclassified id, no
-	 * capability metadata). The ladder is offered for the user to opt into:
-	 * sessions leave thinking unset until the user picks an effort, and a
-	 * request without an effort goes out as non-reasoning (see
+	 * capability metadata). The provisional ladder follows the session/default
+	 * effort until live discovery verifies its controls. A request without an
+	 * effort goes out as non-reasoning (see
 	 * `withoutUnverifiedThinking`).
 	 */
 	unverified?: boolean;
@@ -987,6 +995,19 @@ export interface ResolvedOpenAISharedCompat {
 	requiresMistralToolIds: boolean;
 	requiresToolResultName: boolean;
 	requiresAssistantAfterToolResult: boolean;
+	/**
+	 * Append a user/developer message that directly follows a tool result to
+	 * that result's content instead of sending it as its own turn. Rule-owned:
+	 * Gemini 4 Neon ends about half of the requests that close on user text
+	 * after a function response with an empty `MALFORMED_RESPONSE`.
+	 */
+	foldUserAfterToolResult: boolean;
+	/**
+	 * Replay each call of a multi-call assistant turn as its own assistant
+	 * message followed by its result. Rule-owned: vLLM's Llama 3 chat templates
+	 * reject an assistant message with more than one tool call.
+	 */
+	splitToolCalls: boolean;
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
@@ -1147,6 +1168,12 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * input into the in-flight response. Rule-owned: GPT-6 family.
 	 */
 	supportsSteering: boolean;
+	/**
+	 * Whether the model never prompt-caches the top-level `instructions` field,
+	 * so system prompts must ride as leading `developer` input items on every
+	 * host. Rule-owned: GPT-6.2 (openai/codex#62312).
+	 */
+	uncachedInstructions: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**
@@ -1297,11 +1324,19 @@ export interface DevinCompat {
 	supportsParallelToolCalls?: boolean;
 	/** See {@link BedrockCompat.supportsSamplingParams}. */
 	supportsSamplingParams?: boolean;
+	/**
+	 * Smallest explicit `temperature` this wire accepts. Cascade rejects
+	 * `temperature: 0` with an opaque `invalid_argument` while any positive
+	 * value works, so callers that pin 0 for deterministic decoding (session
+	 * titles, memory extraction) would fail and silently fall back to another
+	 * model. Unset sends the caller's value through unchanged.
+	 */
+	temperatureFloor?: number;
 }
 
 /** Fully-resolved devin-agent compat view. */
-export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams">> &
-	Pick<DevinCompat, "supportsSamplingParams">;
+export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams" | "temperatureFloor">> &
+	Pick<DevinCompat, "supportsSamplingParams" | "temperatureFloor">;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the
@@ -1423,6 +1458,16 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 							: TApi extends "ollama-chat"
 								? ResolvedOllamaCompat
 								: undefined;
+
+/**
+ * A configured snapcompact frame shape: a snapcompact shape variant name
+ * (`11on16-bw`, `8on22-bw`, …) and optionally the frame edge in px, which
+ * otherwise is the variant's own. An unknown variant name is ignored.
+ */
+export interface SnapcompactShapeConfig {
+	variant: string;
+	frameSize?: number;
+}
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
@@ -1558,7 +1603,7 @@ export interface AntigravityModelWireProfile {
 	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
 	maxOutputTokens?: number;
 	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
 	thinkingBudget?: number;
 }
@@ -1651,6 +1696,14 @@ export interface Model<TApi extends Api = Api> {
 	 * gateway in front of a vendor with a higher limit.
 	 */
 	imageCountBudget?: number;
+	/**
+	 * Snapcompact frame shape for this model, from user or extension
+	 * configuration. Replaces the model line's eval default (a gateway may
+	 * serve a model whose readers or network path favor another shape); an
+	 * explicit `snapcompact.shape` setting still wins, and the frame stays
+	 * within the host's `image-max-edge`.
+	 */
+	snapcompactShape?: SnapcompactShapeConfig;
 	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and
@@ -1778,9 +1831,10 @@ export interface Model<TApi extends Api = Api> {
 	 *
 	 * Used by containerized omp installs (e.g. robomp slots) to route every
 	 * LLM call through a sidecar gateway that holds the real provider
-	 * credentials. The model's other metadata (pricing, context window,
-	 * thinking config, …) still resolves locally; only the streaming
-	 * dispatch is redirected.
+	 * credentials. The provider's roster and model metadata (pricing, context
+	 * window, thinking config, …) come from the gateway's `GET /v1/pi/models`
+	 * (`piNativeModelManagerOptions`), falling back to the local catalog when
+	 * the gateway predates that route.
 	 */
 	transport?: "pi-native";
 	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
@@ -1884,6 +1938,7 @@ export interface Model<TApi extends Api = Api> {
 export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	Model<TApi>,
 	| "compat"
+	| "reasoning"
 	| "identity"
 	| "compatConfig"
 	| "requiresGlyphTokenization"
@@ -1893,6 +1948,8 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
 > {
+	/** Authored capability: undefined means no evidence; false explicitly rules out reasoning. */
+	reasoning?: boolean;
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

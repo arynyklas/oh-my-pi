@@ -324,6 +324,7 @@ export function roleRules(): RoleRules {
 					selectedOptions?: ArrayLike<{ text: string }>;
 				};
 				const inputType = tag === "input" ? (control.type ?? "").toLowerCase() : "";
+				const value = inputType === "password" ? "•".repeat((control.value ?? "").length) : (control.value ?? "");
 				const inputButton = ["button", "submit", "reset"].includes(inputType);
 				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
 				// A range reads its ARIA value text, then value, before the DOM value.
@@ -339,13 +340,11 @@ export function roleRules(): RoleRules {
 				// A nested field contributes its value, not its own label.
 				if (range) {
 					text += shown
-						? childElement.getAttribute("aria-valuetext") ||
-							childElement.getAttribute("aria-valuenow") ||
-							(control.value ?? "")
+						? childElement.getAttribute("aria-valuetext") || childElement.getAttribute("aria-valuenow") || value
 						: "";
 				} else if (tag === "select") {
 					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
-				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				} else if (valueIsText) text += shown ? value : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
 				else if (inputType === "image") text += shown ? imageInputName(childElement) : "";
@@ -505,9 +504,12 @@ export function roleRules(): RoleRules {
 		const aliases: Record<string, string> = { image: "img", presentation: "none" };
 		const typedRole = parsed[1]!.toLowerCase();
 		const wantedRole = aliases[typedRole] ?? typedRole;
-		const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
+		// `[name="Save exact"]` reads " exact" inside the quotes as the flag, as `[name="Save" exact]` does.
+		const quoted = parsed[2] ?? parsed[3] ?? parsed[4];
+		const flagInQuotes = quoted !== undefined && /\s+exact$/i.test(quoted);
+		const nameText = flagInQuotes ? quoted.replace(/\s+exact$/i, "") : quoted;
 		const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
-		const exact = parsed[5]?.toLowerCase() === "exact";
+		const exact = flagInQuotes || parsed[5]?.toLowerCase() === "exact";
 		const elements: Element[] = [];
 		const visit = (scope: QueryRoot): void => {
 			for (const element of Array.from(scope.querySelectorAll("*"))) {
@@ -564,11 +566,14 @@ export function parseRoleSelector(selector: string): RoleQuery {
 				"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
 		);
 	}
-	const name = parsed[2] ?? parsed[3] ?? parsed[4];
+	// `[name="Save exact"]` reads " exact" inside the quotes as the flag, as `[name="Save" exact]` does.
+	const quoted = parsed[2] ?? parsed[3] ?? parsed[4];
+	const flagInQuotes = quoted !== undefined && /\s+exact$/i.test(quoted);
+	const name = flagInQuotes ? quoted.replace(/\s+exact$/i, "") : quoted;
 	return {
 		role: parsed[1]!.toLowerCase(),
 		name: name === undefined ? undefined : name.replace(/\s+/g, " ").trim().toLowerCase(),
-		exact: parsed[5] !== undefined,
+		exact: flagInQuotes || parsed[5] !== undefined,
 	};
 }
 

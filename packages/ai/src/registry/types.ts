@@ -13,6 +13,7 @@
  */
 
 import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
+import type { OAuthRefreshReason } from "../auth/types";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
@@ -84,11 +85,13 @@ export interface ProviderDefinition {
 	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
 	/**
 	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
+	 * `reason` is why the refresh was requested; undefined means the grant is near expiry.
 	 * `fetchImpl` carries the token request (fork: per-credential proxy); default global fetch.
 	 */
 	readonly refreshToken?: (
 		credentials: OAuthCredentials,
 		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
 		fetchImpl?: FetchImpl,
 	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;

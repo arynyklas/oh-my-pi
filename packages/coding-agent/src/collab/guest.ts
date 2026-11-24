@@ -28,6 +28,7 @@ import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { fromWireEvent } from "../session/loop-end-wire";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
@@ -689,7 +690,8 @@ export class CollabGuestLink {
 				break;
 			}
 			case "event":
-				this.#applyEvent(frame.event);
+				// Hosts send every stopped loop as a flagged `agent_end` (see loop-end-wire.ts).
+				this.#applyEvent(fromWireEvent(frame.event));
 				break;
 			case "state": {
 				this.state = frame.state;
@@ -817,11 +819,7 @@ export class CollabGuestLink {
 				this.#lifecycleEmitter.emit(runner, { type: "agent_start" });
 			}
 		} else if (this.#lifecycleEmitter.sawAgentStart) {
-			this.#lifecycleEmitter.emit(runner, {
-				type: "agent_end",
-				messages: [...this.#ctx.session.messages],
-				isTerminal: true,
-			});
+			this.#lifecycleEmitter.emit(runner, { type: "agent_end", messages: [...this.#ctx.session.messages] });
 		}
 	}
 
@@ -909,14 +907,19 @@ export class CollabGuestLink {
 		this.#pendingUiRequests.set(request.reqId, abort);
 		const dialog =
 			request.kind === "select"
-				? this.#ctx.showHookSelector(request.title, request.options, {
-						signal: abort.signal,
-						initialIndex: request.initialIndex,
-						selectionMarker: request.selectionMarker,
-						checkedIndices: request.checkedIndices,
-						markableCount: request.markableCount,
-						helpText: request.helpText,
-					})
+				? this.#ctx.showHookSelector(
+						request.title,
+						request.options,
+						{
+							signal: abort.signal,
+							initialIndex: request.initialIndex,
+							selectionMarker: request.selectionMarker,
+							checkedIndices: request.checkedIndices,
+							markableCount: request.markableCount,
+							helpText: request.helpText,
+						},
+						{ kind: request.approval ? "permission" : "question" },
+					)
 				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
 		dialog
 			.then(value => {
