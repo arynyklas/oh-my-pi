@@ -410,7 +410,10 @@ describe("anthropic first-event timeout retries", () => {
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		expect(requestMaxRetries).toEqual(new Array(11).fill(0));
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Anthropic stream timed out while waiting for the first event");
+		// The final error names how many attempts the provider loop spent and for how long.
+		expect(result.errorMessage).toMatch(
+			/^Anthropic stream timed out while waiting for the first event \[11 attempts over [^\]]+\]$/,
+		);
 	});
 	it("keeps caller aborts as aborted instead of retrying them as first-event timeouts", async () => {
 		let attempt = 0;

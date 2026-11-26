@@ -219,6 +219,10 @@ export interface RequestUploadProgress {
  * "written to the socket", which does not say the server received it.
  */
 export class ConnectionLostBeforeResponseError extends Error {
+	/** Whether the whole body had been handed to the socket before the loss. */
+	readonly bodySent: boolean;
+	/** Request body size on the wire. */
+	readonly bodyBytes: number;
 	constructor(cause: unknown, { bodyBytes, bodySent, elapsedMs }: RequestUploadProgress) {
 		const after = `connection lost after ${formatDuration(elapsedMs)}`;
 		const code =
@@ -233,6 +237,8 @@ export class ConnectionLostBeforeResponseError extends Error {
 					: `${after} while uploading the ${formatBytes(bodyBytes)} request body; no response received${code}`;
 		super(progress, { cause });
 		this.name = "ConnectionLostBeforeResponseError";
+		this.bodySent = bodySent;
+		this.bodyBytes = bodyBytes;
 	}
 }
 

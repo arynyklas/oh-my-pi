@@ -15,6 +15,7 @@ import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copil
 import {
 	$env,
 	$flag,
+	formatDuration,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
@@ -1224,6 +1225,23 @@ async function* observeDecodedAnthropicEvents(
 const PROVIDER_MAX_RETRIES = 10;
 
 /**
+ * A connection lost before any response after the whole body went out, twice in
+ * a row with the same body, is not a flaky network: the same request will fail
+ * the same way (a body the path cannot carry, an upstream that rejects it by
+ * closing). Spending the rest of PROVIDER_MAX_RETRIES on it only stacks
+ * ~15 s resets under every outer retry layer, so the provider loop stops here.
+ */
+const MAX_POST_UPLOAD_CONNECTION_LOSSES = 2;
+
+/** The loss happened after the full body went out (any depth of the cause chain). */
+function isPostUploadConnectionLoss(error: unknown): boolean {
+	for (let link = error, depth = 0; link instanceof Error && depth < 8; link = link.cause, depth++) {
+		if (link instanceof AIError.ConnectionLostBeforeResponseError) return link.bodySent && link.bodyBytes > 0;
+	}
+	return false;
+}
+
+/**
  * How long `ping` keepalives may keep extending the idle deadline without any
  * semantic stream progress, as a multiple of the idle timeout. Anthropic pings
  * across legitimate generation gaps, so pings count as liveness — but a wedged
@@ -1944,6 +1962,10 @@ const streamAnthropicOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
+		// Provider-loop retries of this call (never reset), and consecutive
+		// post-upload connection losses; both shape the final error.
+		let providerRetriesTotal = 0;
+		let postUploadLosses = 0;
 
 		const onSseEvent = options?.onSseEvent;
 		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, sourceModel) : undefined;
@@ -3827,13 +3849,16 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						AIError.isProviderRetryableError(streamFailure);
+					postUploadLosses = isPostUploadConnectionLoss(streamFailure) ? postUploadLosses + 1 : 0;
 					if (
 						activeAbortTracker.wasCallerAbort() ||
 						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
+						postUploadLosses >= MAX_POST_UPLOAD_CONNECTION_LOSSES ||
 						(!canRetryTransientEnvelopeFailure && !canRetryProviderFailure)
 					) {
 						throw streamFailure;
 					}
+					providerRetriesTotal++;
 					providerRetryAttempt++;
 					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
@@ -3942,6 +3967,10 @@ const streamAnthropicOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			// Each attempt's error names only its own timing; the caller sees how long it really waited.
+			if (providerRetriesTotal > 0 && output.stopReason === "error") {
+				output.errorMessage += ` [${providerRetriesTotal + 1} attempts over ${formatDuration(performance.now() - startTime)}]`;
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({
