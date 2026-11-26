@@ -2,8 +2,8 @@
 	"base": "v19.1.1",
 	"baseCommit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
 	"head": "HEAD",
-	"headCommit": "6cd7dea240b0e965d3e8eeb5f145e0275366840b",
-	"generated": "2026-11-24T21:29:13.863Z",
+	"headCommit": "ef52fc668217a998668751781adf71f110edfe1b",
+	"generated": "2026-11-26T06:25:56.471Z",
 	"excluded": [
 		"bun.lock",
 		"fork-patches/"
@@ -166,6 +166,8 @@
 				"packages/ai/src/auth/select.ts",
 				"packages/ai/src/auth/selection.ts",
 				"packages/ai/src/auth/types.ts",
+				"packages/ai/src/error/classes.ts",
+				"packages/ai/src/providers/anthropic.ts",
 				"packages/ai/src/providers/openai-codex-responses.ts",
 				"packages/ai/src/registry/engine/oauth-code.ts",
 				"packages/ai/src/registry/engine/refresh.ts",
@@ -175,6 +177,8 @@
 				"packages/ai/src/registry/types.ts",
 				"packages/ai/src/stream.ts",
 				"packages/ai/src/types.ts",
+				"packages/ai/test/anthropic-post-upload-reset.test.ts",
+				"packages/ai/test/anthropic-stream-timeout.test.ts",
 				"packages/ai/test/claude-block-healing.test.ts",
 				"packages/catalog/test/build.test.ts",
 				"packages/coding-agent/src/task/settings.ts",

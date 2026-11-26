@@ -1,11 +1,18 @@
 diff --git a/packages/ai/CHANGELOG.md b/packages/ai/CHANGELOG.md
-index f8db830..21db1f3 100644
+index f8db830..17b2758 100644
 --- a/packages/ai/CHANGELOG.md
 +++ b/packages/ai/CHANGELOG.md
-@@ -2,6 +2,90 @@
+@@ -2,6 +2,97 @@
  
  ## [Unreleased]
  
++## [19.1.1-fork.3] - 2026-11-26
++
++### Fixed
++
++- `streamAnthropic` stops provider retries after two consecutive `ConnectionLostBeforeResponseError`s with the whole body sent (`MAX_POST_UPLOAD_CONNECTION_LOSSES`); losses during upload keep the full budget. `ConnectionLostBeforeResponseError` exposes `bodySent` and `bodyBytes`.
++- A final Anthropic error after at least one provider retry appends ` [<N> attempts over <duration>]` to `errorMessage`.
++
 +## [19.1.1-fork.1] - 2026-11-25
 +
 +### Changed
@@ -93,7 +100,7 @@ index f8db830..21db1f3 100644
  ## [19.1.1] - 2026-11-23
  
  ### Added
-@@ -2156,4 +2240,578 @@
+@@ -2156,4 +2247,578 @@
  - Fixed stateful OpenAI Responses explicit cache breakpoints being restored onto edited historical messages, ensuring full replays recompute the latest stable cache boundary.
  - Fixed ChatGPT Codex standard and Lite transports rejecting or hiding native computer-use payloads by unrolling the tool definition, forced choice, `computer_call`, and `computer_call_output` into ordinary function-tool forms.
  
@@ -673,13 +680,20 @@ index f8db830..21db1f3 100644
 +Older entries are archived in [packages/ai/CHANGELOG.md@0f88ff08d2bb](https://github.com/can1357/oh-my-pi/blob/0f88ff08d2bbdd1d3eeb39dd15557986a27f75a5/packages/ai/CHANGELOG.md).
  Older entries are archived in [packages/ai/CHANGELOG.md@02eb912b7688](https://github.com/can1357/oh-my-pi/blob/02eb912b76887f1a06bc65e2352ef96742ec1067/packages/ai/CHANGELOG.md).
 diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
-index d728cac..bef1407 100644
+index d728cac..f6d49d2 100644
 --- a/packages/coding-agent/CHANGELOG.md
 +++ b/packages/coding-agent/CHANGELOG.md
-@@ -2,6 +2,132 @@
+@@ -2,6 +2,139 @@
  
  ## [Unreleased]
  
++## [19.1.1-fork.3] - 2026-11-26
++
++### Fixed
++
++- An Anthropic request whose connection drops before any response after its whole body went out is retried once, not ten times: the same loss twice in a row means the request itself cannot get through, and the old budget left a session waiting minutes per turn.
++- An Anthropic error after provider retries now ends with how many attempts were made and how long they took, e.g. `[2 attempts over 31s]`, instead of naming only the last attempt's timing.
++
 +## [19.1.1-fork.2] - 2026-11-25
 +
 +### Fixed
@@ -809,7 +823,7 @@ index d728cac..bef1407 100644
  ## [19.1.1] - 2026-11-23
  
  ### Breaking Changes
-@@ -1411,4 +1537,1130 @@
+@@ -1411,4 +1544,1130 @@
  - Fixed `/tan` clones ending without a final answer when they call `ask`; the clone now keeps running and the parent receives its final answer instead of an empty result ([#17223](https://github.com/can1357/oh-my-pi/pull/17223) by [@trukhinyuri](https://github.com/trukhinyuri))
  - Fixed GitHub `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
  
