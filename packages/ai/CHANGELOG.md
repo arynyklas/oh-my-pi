@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [19.1.1-fork.3] - 2026-11-26
+
+### Fixed
+
+- `streamAnthropic` stops provider retries after two consecutive `ConnectionLostBeforeResponseError`s with the whole body sent (`MAX_POST_UPLOAD_CONNECTION_LOSSES`); losses during upload keep the full budget. `ConnectionLostBeforeResponseError` exposes `bodySent` and `bodyBytes`.
+- A final Anthropic error after at least one provider retry appends ` [<N> attempts over <duration>]` to `errorMessage`.
+
 ## [19.1.1-fork.1] - 2026-11-25
 
 ### Changed

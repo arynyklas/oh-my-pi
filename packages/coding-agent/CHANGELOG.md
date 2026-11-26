@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [19.1.1-fork.3] - 2026-11-26
+
+### Fixed
+
+- An Anthropic request whose connection drops before any response after its whole body went out is retried once, not ten times: the same loss twice in a row means the request itself cannot get through, and the old budget left a session waiting minutes per turn.
+- An Anthropic error after provider retries now ends with how many attempts were made and how long they took, e.g. `[2 attempts over 31s]`, instead of naming only the last attempt's timing.
+
 ## [19.1.1-fork.2] - 2026-11-25
 
 ### Fixed
